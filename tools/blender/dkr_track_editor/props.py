@@ -28,6 +28,9 @@ class DKR_ValidationEntry(bpy.types.PropertyGroup):
     severity: StringProperty(default="info")
     message: StringProperty(default="")
     object_id: StringProperty(default="")
+    #: Comma-separated document positions, so the result can select what it is
+    #: about rather than leaving the author to hunt for it.
+    objects: StringProperty(default="")
 
 
 class DKR_SceneSettings(bpy.types.PropertyGroup):
@@ -106,11 +109,12 @@ class DKR_SceneSettings(bpy.types.PropertyGroup):
         default="structure",
     )
 
-    show_padding: BoolProperty(
-        name="Show Padding Fields",
+    show_raw: BoolProperty(
+        name="Show Raw Bytes",
         description=(
-            "Show the pad and unknown bytes. They exist so an entry encodes to "
-            "the bytes the game expects and are rarely worth editing"
+            "Show the pad and unk fields. They exist so an entry encodes to the "
+            "bytes the game expects, and nobody has identified what the unk ones "
+            "do - a checkpoint has 15 of them around the 4 that matter"
         ),
         default=False,
     )

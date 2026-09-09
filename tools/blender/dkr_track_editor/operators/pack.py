@@ -11,6 +11,7 @@ from bpy.props import BoolProperty, StringProperty
 from bpy_extras.io_utils import ExportHelper
 
 from .. import catalog as catalog_module, dkrmap, prefs, scene, validate
+from . import geometry_export
 
 
 class DKR_OT_export_dkrmap(bpy.types.Operator, ExportHelper):
@@ -122,6 +123,8 @@ class DKR_OT_export_dkrmap(bpy.types.Operator, ExportHelper):
             # The header comes from the track being remixed, so the geometry,
             # world and race type stay whatever the base track had.
             base = _base_header(context, tree)
+            if base is None:
+                base = _authored_header(context)
             if base is not None:
                 header = package.encode_header(
                     base, catalog.raw.get("enumValues", {}),
@@ -129,8 +132,32 @@ class DKR_OT_export_dkrmap(bpy.types.Operator, ExportHelper):
                 )
                 package.notes.append("header.bin %d bytes" % len(header))
 
-            _attach_existing_payloads(package)
+            _encode_geometry(self, context, package)
+            _warn_header_without_geometry(self, context, package)
+
+            stale = _attach_existing_payloads(package)
+            if stale:
+                # The addon writes the object maps itself, so one it did not
+                # write this time is one the scene has already moved past.
+                # Shipping it is still safer than dropping it - a header whose
+                # slot has no payload points at another level's objects and
+                # hangs - but it must not pass for success.
+                message = (
+                    "the object maps could not be compiled this time, so the "
+                    "package ships %s from an earlier export. The objects now "
+                    "in the scene reached source/ only. Set the decomp asset "
+                    "path in the addon preferences and export again"
+                    % ", ".join(sorted(stale))
+                )
+                package.notes.append(message)
+                self.report({"WARNING"}, message)
             package.write()
+        except geometry_export.GeometryExportError as error:
+            self.report(
+                {"ERROR"},
+                "the track geometry cannot be exported: %s" % error,
+            )
+            return {"CANCELLED"}
         except dkrmap.DkrMapError as error:
             self.report({"ERROR"}, str(error))
             return {"CANCELLED"}
@@ -151,7 +178,7 @@ class DKR_OT_export_dkrmap(bpy.types.Operator, ExportHelper):
         if missing:
             self.report(
                 {"WARNING"},
-                "wrote %s with %d objects compiled. Still missing %s, which the "
+                "wrote %s with %d object(s). Still missing %s, which the "
                 "addon does not write yet - see HOW-TO-BUILD.md"
                 % (os.path.basename(directory), len(object_map.objects),
                    ", ".join(missing)),
@@ -163,6 +190,143 @@ class DKR_OT_export_dkrmap(bpy.types.Operator, ExportHelper):
                 % (os.path.basename(directory), len(object_map.objects)),
             )
         return {"FINISHED"}
+
+
+def _encode_geometry(operator, context, package):
+    """Compile the edited track geometry into the package, if it changed.
+
+    A track that only reworks the objects standing on shipped geometry ships no
+    model payload at all: the header's geometry field then keeps pointing at the
+    base track's model, and the package stays small and stays correct. Writing
+    an unchanged copy would work and would make every remix carry a hundred
+    kilobytes that say nothing.
+    """
+    edit = geometry_export.build_edited_model(context)
+    if edit is None:
+        _report_unusable_meshes(operator, context)
+        return
+
+    for note in edit.notes:
+        operator.report({"WARNING"}, note)
+
+    if edit.ships:
+        payload = package.encode_level_model(edit.model)
+        package.notes.append(
+            "model.bin %d bytes: %s" % (len(payload), edit.describe())
+        )
+        return
+
+    package.notes.append(
+        "geometry unchanged, so no model payload; the header keeps pointing at %s"
+        % os.path.basename(edit.path)
+    )
+    # A model.bin from an earlier export is kept, like any payload sitting in
+    # the directory - but an author who has since undone their edits would
+    # otherwise have no way of knowing the old geometry is still shipping.
+    stale = os.path.join(package.directory, dkrmap.SECTIONS["LEVEL_MODELS"])
+    if os.path.isfile(stale):
+        operator.report(
+            {"WARNING"},
+            "the geometry in the scene matches the base track, but %s already "
+            "holds a model.bin from an earlier export and it is kept. Delete it "
+            "if the track should ship the shipped geometry"
+            % os.path.basename(package.directory),
+        )
+
+
+def _report_unusable_meshes(operator, context):
+    """Say why a mesh the author modelled themselves produced no geometry.
+
+    The addon can only write geometry it decoded from a level model, because a
+    vertex has to name the segment of the track it belongs to and a mesh built
+    in Blender names nothing. Modelling a track from scratch needs a segmenter,
+    which does not exist yet - but an author finding that out from an empty
+    package and no message is the wrong way to learn it.
+    """
+    from . import geometry as geometry_ops
+
+    meshes = geometry_ops.unusable_meshes(context)
+    if not meshes:
+        return
+    names = ", ".join(sorted(o.name for o in meshes)[:4])
+    if len(meshes) > 4:
+        names += " and %d more" % (len(meshes) - 4)
+    operator.report(
+        {"WARNING"},
+        "%d mesh(es) in the scene were not exported as track geometry (%s). The "
+        "addon can only write geometry it imported from a level model: every "
+        "vertex has to name the segment of the track it belongs to, and a mesh "
+        "modelled in Blender names none. Import a track's geometry and reshape "
+        "that, or wait for the segmenter" % (len(meshes), names),
+    )
+
+
+def _warn_header_without_geometry(operator, context, package):
+    """A header authored from nothing has nothing to point at yet.
+
+    A remix leaves ``/model`` alone because the header it inherited already
+    names the base track's geometry. A track built from scratch has neither: the
+    template leaves ``/model`` unset on purpose, since the runtime patches
+    ``0x34`` from the ``LEVEL_MODELS`` payload - and with no payload nothing
+    patches it. The package is well formed and the manifest is honest, so
+    nothing here refuses; but "ready to install" would be a lie about a track
+    with no ground in it.
+    """
+    if "LEVEL_HEADERS" not in package.payloads:
+        return
+    if "LEVEL_MODELS" in package.payloads:
+        return
+    from . import geometry as geometry_ops
+
+    # A remix inherits a header that still names the base track's geometry, so
+    # shipping no model is correct there. The test cannot be "was anything
+    # imported" - a track built from a mesh sets the geometry path too, and
+    # pointed at its own file, which is exactly the case that must not stay
+    # quiet.
+    if any(geometry_ops.PROP_AUTHORED_BASE not in o
+           for o in geometry_ops.geometry_objects(context)):
+        return
+    if not geometry_ops.geometry_objects(context) and (
+            context.scene.dkr.source_path or context.scene.dkr.geometry_path):
+        return
+    operator.report(
+        {"WARNING"},
+        "this package has a header but no geometry, so there is nothing for it "
+        "to point at and the track will not load. The header leaves the "
+        "geometry field for the runtime to patch from a LEVEL_MODELS payload, "
+        "and there is none. Building track geometry from a Blender mesh is not "
+        "supported yet - import a track's geometry and reshape it instead",
+    )
+
+
+def _authored_header(context):
+    """A header built from the template, for a track with no ancestor.
+
+    Returns ``None`` when the author has answered nothing, which leaves the
+    package exactly as it was before this existed - no header, and the warning
+    that says so. A partial answer is refused rather than filled in, because
+    the two fields with no default are world and race type, and zero is a real
+    world and a real race type: a track that never answered would not fail, it
+    would quietly become a Central Area default race.
+    """
+    from . import header as header_ops
+    from .. import level_header_template as template
+
+    overrides = header_ops.overrides(context)
+    if not overrides:
+        return None
+
+    outstanding = template.missing(overrides)
+    if outstanding:
+        raise dkrmap.DkrMapError(
+            "the level header has %d unanswered field(s) - %s - and they have "
+            "no default because retail has no dominant value for them. Zero is "
+            "a real setting rather than an absence, so a track shipped without "
+            "them becomes something other than what you built. Fill them in "
+            "under Level Header"
+            % (len(outstanding), ", ".join(outstanding))
+        )
+    return template.document(overrides)
 
 
 def _base_header(context, tree):
@@ -193,15 +357,26 @@ def _attach_existing_payloads(package):
     author who drops in a ``header.bin`` - which the addon cannot produce yet -
     has to still have it after the next export, or the instruction to do so is a
     trap.
+
+    The object maps are the one case where falling back is not neutral, so this
+    returns the ones it had to fall back on. The addon compiles those itself
+    whenever it can, and the only reason it cannot is that the decomp assets
+    are unreachable and the level-object translation table with them. A file
+    left from an earlier export then no longer matches the scene, and an export
+    that quietly ships it has claimed to save work it did not save.
     """
     for section, filename in dkrmap.SECTIONS.items():
         candidate = os.path.join(package.directory, filename)
         if os.path.isfile(candidate):
             package.add_payload(section, candidate)
+
+    stale = []
     for slot, filename in dkrmap.OBJECT_MAP_SLOTS.items():
         candidate = os.path.join(package.directory, filename)
         if slot not in package.object_maps and os.path.isfile(candidate):
             package.object_maps[slot] = candidate
+            stale.append(filename)
+    return stale
 
 
 CLASSES = (DKR_OT_export_dkrmap,)

@@ -33,14 +33,18 @@ INFO = "info"
 
 
 class Issue:
-    __slots__ = ("severity", "message", "object_id", "index")
+    __slots__ = ("severity", "message", "object_id", "index", "objects")
 
     def __init__(self, severity: str, message: str, object_id: str = "",
-                 index: Optional[int] = None):
+                 index: Optional[int] = None, objects=None):
         self.severity = severity
         self.message = message
         self.object_id = object_id
         self.index = index
+        #: Document positions of the objects this is about, so the UI can select
+        #: them. Finding one duplicate checkpoint among ninety by hand is the
+        #: difference between a useful message and a discouraging one.
+        self.objects = list(objects or [])
 
     def __str__(self):
         where = " [%s]" % self.object_id if self.object_id else ""
@@ -129,8 +133,10 @@ def _check_ai_graph(object_map: ObjectMap) -> List[Issue]:
     if len(nodes) > ai_graph.MAX_NODES:
         issues.append(Issue(
             ERROR,
-            "%d AI nodes, but nodeID is a byte with 255 reserved as the empty "
-            "link, so at most %d fit" % (len(nodes), ai_graph.MAX_NODES),
+            "%d AI nodes, but the game keeps %d and drops any id from %d up "
+            "at load, along with every link pointing at one - the track would "
+            "lose them in silence"
+            % (len(nodes), ai_graph.MAX_NODES, ai_graph.MAX_NODES),
             AINODE,
         ))
 
@@ -158,10 +164,12 @@ def _check_ai_graph(object_map: ObjectMap) -> List[Issue]:
             ))
 
     links = {}
+    elevations = {}
     for node_id, sharing in by_id.items():
         adjacent = sharing[0].fields.get("adjacent") or []
         neighbours = [a for a in adjacent if a != ai_graph.NO_NEIGHBOUR]
         links[node_id] = neighbours
+        elevations[node_id] = sharing[0].fields.get("elevation")
         if len(neighbours) > ai_graph.MAX_NEIGHBOURS:
             issues.append(Issue(
                 ERROR,
@@ -202,6 +210,15 @@ def _check_ai_graph(object_map: ObjectMap) -> List[Issue]:
                     graph.link(a, b)
         reached = ai_graph.reachable_from(graph, 0)
         stranded = [order[i] for i in range(len(order)) if i not in reached]
+        # A node with no neighbours and elevation -1 is not a broken graph, it
+        # is an inert marker: of the 27 isolated nodes in retail, 26 carry -1,
+        # and every one of the 181 connected nodes carries 0 or more. Ancient
+        # Lake's four are a discarded draft of the dinosaur's path, sitting
+        # under the water and read by nothing. Warning about those is noise.
+        stranded = [
+            node_id for node_id in stranded
+            if links.get(node_id) or elevations.get(node_id) != -1
+        ]
         if stranded:
             issues.append(Issue(
                 WARNING,
@@ -225,6 +242,10 @@ def _check_checkpoints(object_map: ObjectMap, require_racing_track: bool) -> Lis
     What does hold, in all 51 chains, is that an index is unique within its
     ``(vehicleType, isAltCheckpoint)`` group. That is the rule worth enforcing.
     """
+    positions = {
+        id(obj): position
+        for position, obj in enumerate(object_map.objects)
+    }
     checkpoints = object_map.by_id(CHECKPOINT)
     if not checkpoints:
         if require_racing_track:
@@ -236,21 +257,30 @@ def _check_checkpoints(object_map: ObjectMap, require_racing_track: bool) -> Lis
         return []
 
     issues = []
-    chains = collections.defaultdict(collections.Counter)
+    chains = collections.defaultdict(lambda: collections.defaultdict(list))
     for checkpoint in checkpoints:
         index = checkpoint.fields.get("index")
         if index is None:
-            issues.append(Issue(ERROR, "a checkpoint has no index", CHECKPOINT))
+            issues.append(Issue(
+                ERROR, "a checkpoint has no index", CHECKPOINT,
+                objects=[positions.get(id(checkpoint))],
+            ))
             continue
         chain = (
             checkpoint.fields.get("vehicleType", 0),
             checkpoint.fields.get("isAltCheckpoint", 0),
         )
-        chains[chain][index] += 1
+        chains[chain][index].append(positions.get(id(checkpoint)))
 
     for (vehicle_type, is_alt), indices in sorted(chains.items()):
-        duplicated = sorted(i for i, n in indices.items() if n > 1)
+        duplicated = sorted(i for i, where in indices.items() if len(where) > 1)
         if duplicated:
+            offenders = [
+                position
+                for index in duplicated
+                for position in indices[index]
+                if position is not None
+            ]
             issues.append(Issue(
                 ERROR,
                 "vehicle type %s%s reuses checkpoint index %s; a racer crossing "
@@ -258,12 +288,13 @@ def _check_checkpoints(object_map: ObjectMap, require_racing_track: bool) -> Lis
                 % (vehicle_type, " (alt route)" if is_alt else "",
                    ", ".join(str(d) for d in duplicated[:12])),
                 CHECKPOINT,
+                objects=offenders,
             ))
         issues.append(Issue(
             INFO,
             "vehicle type %s%s: %d checkpoints, indices %s..%s"
             % (vehicle_type, " (alt route)" if is_alt else "",
-               sum(indices.values()), min(indices), max(indices)),
+               sum(len(w) for w in indices.values()), min(indices), max(indices)),
             CHECKPOINT,
         ))
     return issues

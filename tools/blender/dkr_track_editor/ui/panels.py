@@ -72,36 +72,113 @@ class DKR_PT_geometry(DkrPanel, bpy.types.Panel):
 
         layout.operator("dkr.import_geometry", icon="MESH_DATA")
 
+        from ..operators import new_track as new_track_ops
+        if new_track_ops.convertible(context):
+            box = layout.box()
+            box.label(text="A mesh of your own is in", icon="INFO")
+            box.label(text="the scene. Track From Mesh")
+            box.label(text="turns it into geometry, using")
+            box.label(text="a donor track's textures -")
+            box.label(text="a .dkrmap cannot add any.")
+            box.operator("dkr.track_from_mesh", icon="MESH_MONKEY")
+
         if not settings.geometry_path:
             box = layout.box()
             box.label(text="Load the track to place", icon="INFO")
-            box.label(text="objects against. Without it")
-            box.label(text="there is nothing to aim at.")
+            box.label(text="objects against, and to")
+            box.label(text="reshape. Without it there")
+            box.label(text="is nothing to aim at.")
             box.label(text="levels/models/<world>/*.bin")
             return
 
         layout.label(text=bpy.path.basename(settings.geometry_path), icon="FILE")
 
-        walls = [
-            o for o in context.scene.objects
-            if geometry_ops.PROP_GEOMETRY in o
-            and o[geometry_ops.PROP_GEOMETRY] == geometry_ops.INVISIBLE_WALLS
-        ]
-        if walls:
+        objects = geometry_ops.geometry_objects(context)
+        for obj in objects[:1]:
+            layout.label(
+                text="%d vertices, %d faces"
+                % (len(obj.data.vertices), len(obj.data.polygons)),
+                icon="MESH_DATA",
+            )
+            # The game reserves a fixed arena for a level model, and the
+            # heaviest retail track already sits at 68% of it, so an author
+            # adding geometry needs to see the ceiling before an export rather
+            # than meet it as an overflow at load.
+            budget = geometry_ops.budget_of(obj)
+            if budget is not None:
+                fraction, headroom = budget
+                layout.label(
+                    text="Load budget %d%%, %d tris spare"
+                    % (round(fraction * 100.0), headroom),
+                    icon="ERROR" if fraction >= 0.9 else "INFO",
+                )
+            # The quieter ceiling: collision looks at ten segments at a time,
+            # so segments stretched across the map hold slots everywhere and
+            # the ground a racer stands on stops being considered. It produces
+            # no diagnostic in game at all, which is why it is shown here.
+            pressure = geometry_ops.collision_pressure(obj)
+            if pressure is not None and pressure[0] > pressure[1]:
+                box = layout.box()
+                box.label(text="%d oversized segments" % pressure[0], icon="ERROR")
+                box.label(text="Collision sees %d at a time," % pressure[2])
+                box.label(text="so these crowd it out and")
+                box.label(text="racers fall through the")
+                box.label(text="floor somewhere else.")
+
+        if any(geometry_ops.WALL_GROUP in o.vertex_groups for o in objects):
+            hidden = geometry_ops.walls_hidden(context)
             row = layout.row()
             row.operator(
                 "dkr.toggle_walls",
-                text="Hide Invisible Walls" if not walls[0].hide_get()
-                else "Show Invisible Walls",
+                text="Show Invisible Walls" if hidden else "Hide Invisible Walls",
                 icon="MOD_SOLIDIFY",
             )
 
+        _draw_surface(layout, context, objects)
+
         column = layout.column(align=True)
+        column.operator("dkr.edit_geometry", icon="EDITMODE_HLT")
+        column.operator("dkr.check_geometry", icon="CHECKMARK")
+        column.operator("dkr.resegment", icon="MOD_EXPLODE")
         column.operator("dkr.drop_to_surface", icon="SNAP_NORMAL")
 
         box = layout.box()
-        box.label(text="Reference only, never exported", icon="LOCKED")
-        box.label(text="Writing geometry is Phase 2")
+        box.label(text="Move vertices freely. The", icon="INFO")
+        box.label(text="export reloads the shipped")
+        box.label(text="model and applies only what")
+        box.label(text="you changed, so the rest is")
+        box.label(text="byte-identical. Adding or")
+        box.label(text="deleting vertices is a later")
+        box.label(text="step, and an export says so")
+        box.label(text="rather than dropping it.")
+
+
+def _draw_surface(layout, context, objects):
+    """What the active material's ground behaves like.
+
+    Per material rather than per face, because that is where the game keeps it:
+    the surface type is a byte on the texture table entry, so every face drawn
+    with one entry behaves the same way and nothing finer is expressible. In
+    Edit Mode the active slot follows the selection, so picking a face and
+    reading this is how an author finds out what they are standing on.
+    """
+    obj = context.active_object
+    if obj is None or obj not in objects:
+        return
+    material = obj.active_material
+    if material is None or geometry_ops.PROP_TEXTURE_INDEX not in material:
+        return
+
+    box = layout.box()
+    box.label(text="Surface", icon="MATERIAL")
+    surface = material.get(geometry_ops.PROP_SURFACE)
+    row = box.row(align=True)
+    row.label(text="texture %d" % int(material[geometry_ops.PROP_TEXTURE_INDEX]))
+    row.operator(
+        "dkr.set_surface_type",
+        text=geometry_ops.surface_name(surface) if surface is not None else "set",
+        icon="DOWNARROW_HLT",
+    )
 
 
 def _counts(context):
@@ -204,7 +281,7 @@ class DKR_PT_object(DkrPanel, bpy.types.Panel):
 
         row = layout.row(align=True)
         row.operator("dkr.select_by_type", icon="RESTRICT_SELECT_OFF")
-        row.prop(settings, "show_padding", text="", icon="THREE_DOTS")
+        row.prop(settings, "show_raw", text="", icon="THREE_DOTS")
 
         # Which of the level's two maps this object goes back to. Not inferred:
         # retail puts the same types in both.
@@ -227,7 +304,7 @@ class DKR_PT_object(DkrPanel, bpy.types.Panel):
         for field in object_type.fields:
             if field.unused:
                 continue
-            if field.is_padding and not settings.show_padding:
+            if is_hidden_raw(field, settings.show_raw):
                 continue
             if angle_field is not None and field is angle_field:
                 continue
@@ -235,37 +312,65 @@ class DKR_PT_object(DkrPanel, bpy.types.Panel):
             drawn += 1
 
         if not drawn:
-            column.label(text="This type carries only a position")
+            usable = [f for f in object_type.fields if not f.unused]
+            if usable:
+                # Every field this type has is a pad or an unidentified byte.
+                column.label(text="Every field of this type is a raw byte",
+                             icon="INFO")
+                column.label(text="nobody has identified. Position is")
+                column.label(text="all there is to author.")
+            else:
+                column.label(text="This type carries only a position")
 
         absent = obj.get(scene.PROP_ABSENT)
         if absent:
             layout.label(text="Omitted on import: %s" % absent, icon="INFO")
 
 
+def is_hidden_raw(field, show_raw: bool) -> bool:
+    """Whether a field is a byte to hide rather than something to author.
+
+    A field carrying a label is no longer unidentified, whatever its name still
+    looks like. A checkpoint's ``unkB``..``unk16`` are three groups of four -
+    lateral offset, vertical offset and route flag, one slot per AI lane - and
+    leaving those behind *Show Raw Bytes* buries the part of a checkpoint an
+    author would most want to reach. The rule keeps itself up to date: labelling
+    a field in the catalogue is what reveals it here, with no edit needed.
+    """
+    return bool(field.is_raw and field.label == field.name and not show_raw)
+
+
 def _draw_field(layout, obj, field, object_type):
-    """One row per field, with the widget the field's kind calls for."""
+    """One row per field, with the widget the field's kind calls for.
+
+    Drawn under ``field.label`` and stored under ``field.name``. The two are the
+    same for most fields, and deliberately different where the decomp has
+    identified what a byte does: the catalogue keeps the name, because it is the
+    custom property key an existing ``.blend`` already holds and renaming it
+    would drop the author's value in silence, and carries the meaning alongside.
+    """
     if field.name not in obj:
         row = layout.row(align=True)
-        row.label(text=field.name)
+        row.label(text=field.label)
         row.operator("dkr.reset_field", text="Add", icon="ADD").field = field.name
         return
 
     row = layout.row(align=True)
     if field.kind == "enum":
-        row.label(text=field.name)
+        row.label(text=field.label)
         row.operator(
             "dkr.set_enum_field", text=str(obj[field.name]), icon="DOWNARROW_HLT"
         ).field = field.name
     else:
         try:
-            row.prop(obj, '["%s"]' % field.name, text=field.name)
+            row.prop(obj, '["%s"]' % field.name, text=field.label)
         except (RuntimeError, TypeError):
-            row.label(text="%s: %s" % (field.name, obj[field.name]))
+            row.label(text="%s: %s" % (field.label, obj[field.name]))
     row.operator("dkr.reset_field", text="", icon="LOOP_BACK").field = field.name
 
 
 class DKR_PT_ai(DkrPanel, bpy.types.Panel):
-    bl_label = "AI Racing Line"
+    bl_label = "AI Node Graph"
     bl_idname = "DKR_PT_ai"
 
     def draw(self, context):
@@ -281,7 +386,7 @@ class DKR_PT_ai(DkrPanel, bpy.types.Panel):
         if obj is None or obj.type != "CURVE":
             box = layout.box()
             box.label(text="Select a curve to sample", icon="INFO")
-            box.label(text="Add > Curve, draw the racing line")
+            box.label(text="Add > Curve, draw the route")
             return
 
         column = layout.column(align=True)
@@ -318,8 +423,102 @@ class DKR_PT_validate(DkrPanel, bpy.types.Panel):
             for entry in entries[:12]:
                 for line in _wrap(entry.message, 44):
                     column.label(text=line)
+                if entry.objects:
+                    count = len(entry.objects.split(","))
+                    column.operator(
+                        "dkr.select_issue",
+                        text="Select the %d object(s)" % count,
+                        icon="RESTRICT_SELECT_OFF",
+                    ).objects = entry.objects
+                column.separator()
             if len(entries) > 12:
                 column.label(text="...and %d more" % (len(entries) - 12))
+
+
+class DKR_PT_header(DkrPanel, bpy.types.Panel):
+    """The level header, for a track with no ancestor to inherit one from."""
+
+    bl_label = "Level Header"
+    bl_idname = "DKR_PT_header"
+    bl_parent_id = "DKR_PT_export"
+
+    def draw(self, context):
+        from ..operators import header as header_ops
+        from .. import level_header_template as template
+
+        layout = self.layout
+        settings = context.scene.dkr
+
+        if settings.source_path or settings.geometry_path:
+            box = layout.box()
+            box.label(text="This track inherits its", icon="INFO")
+            box.label(text="header from the one it")
+            box.label(text="was imported from, so")
+            box.label(text="these are unused.")
+
+        layout.operator("dkr.header_defaults", icon="LOOP_BACK")
+
+        outstanding = header_ops.unanswered(context)
+        if outstanding:
+            box = layout.box()
+            box.label(text="%d field(s) unanswered" % len(outstanding), icon="ERROR")
+            box.label(text="Zero is a real world and a")
+            box.label(text="real race type, so a track")
+            box.label(text="that never answered would")
+            box.label(text="quietly become one.")
+
+        column = layout.column(align=True)
+        for choice in template.CHOICES:
+            _draw_header_choice(column, context, choice, header_ops)
+
+
+def _draw_header_choice(layout, context, choice, header_ops):
+    """One row per header field, with the widget its kind calls for.
+
+    Everything shown here is read from the template's own descriptors - the
+    label, the kind, the enum it draws from, the range - so a field added or
+    changed on that side appears with no edit here. Hard-coding the pointers
+    would have drifted the first time the template moved, with nothing to catch
+    it.
+    """
+    key = header_ops.key_for(choice.pointer)
+    answered = key in context.scene
+
+    if choice.kind == "bitfield":
+        box = layout.box()
+        row = box.row(align=True)
+        row.label(text=choice.label)
+        row.operator(
+            "dkr.set_header_choice", text="", icon="ADD"
+        ).pointer = choice.pointer
+        for member in (list(context.scene[key]) if answered else []):
+            entry = box.row(align=True)
+            entry.label(text=str(member), icon="DOT")
+            drop = entry.operator("dkr.clear_header_choice", text="", icon="X")
+            drop.pointer = choice.pointer
+            drop.member = str(member)
+        return
+
+    row = layout.row(align=True)
+    if choice.kind in ("enum", "asset"):
+        row.label(text=choice.label)
+        shown = str(context.scene[key]) if answered else "not set"
+        row.operator(
+            "dkr.set_header_choice", text=shown, icon="DOWNARROW_HLT"
+        ).pointer = choice.pointer
+    elif answered:
+        try:
+            row.prop(context.scene, '["%s"]' % key, text=choice.label)
+        except (RuntimeError, TypeError):
+            row.label(text="%s: %s" % (choice.label, context.scene[key]))
+    else:
+        row.label(text=choice.label)
+        row.label(text="default")
+
+    if answered:
+        row.operator(
+            "dkr.clear_header_choice", text="", icon="X"
+        ).pointer = choice.pointer
 
 
 def _wrap(text, width):
@@ -385,4 +584,5 @@ CLASSES = (
     DKR_PT_ai,
     DKR_PT_validate,
     DKR_PT_export,
+    DKR_PT_header,
 )

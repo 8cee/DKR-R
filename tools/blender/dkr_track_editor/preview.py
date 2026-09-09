@@ -362,6 +362,18 @@ def _srgb_to_linear(value: float) -> float:
     return ((value + 0.055) / 1.055) ** 2.4
 
 
+def _linear_to_srgb(value: float) -> float:
+    """The way back, for a colour an author painted rather than one decoded.
+
+    Exact where it has to be: converting all 256 byte values to linear and back
+    returns every one of them unchanged, in float32 as well as in double, so a
+    colour that came out of a track and went straight back in is untouched.
+    """
+    if value <= 0.0031308:
+        return value * 12.92
+    return 1.055 * (max(0.0, value) ** (1.0 / 2.4)) - 0.055
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------

@@ -34,7 +34,11 @@ _deps/
 /runtime-recomp/data_dump.toml
 /runtime-recomp/applied-patches.json
 /runtime-recomp/resolved-runtime-dependencies.json
-/runtime-recomp/dkr.us.v77.generated.toml
+# Recomp configs written by scripts/generate_recomp_config.py. They embed
+# absolute local paths (ELF, ROM, output dirs), so they are per-machine and
+# must be regenerated rather than shared.
+/runtime-recomp/dkr.us.*.generated.toml
+/runtime-recomp/dkr.us.*.regen.toml
 /imgui.ini
 /logs/
 /cache/

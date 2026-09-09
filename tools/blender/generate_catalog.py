@@ -463,6 +463,45 @@ def _hint_step(hint):
     return 1.0 / float(divide_by)
 
 
+#: Human names for fields the decomp still calls ``unkB`` and friends, so the
+#: N panel can say what a value does.
+#:
+#: **A label, never a rename.** A catalogue field's ``name`` is the Blender
+#: custom property name: ``scene.create_empty`` writes ``empty[field.name]`` and
+#: ``read_object`` skips any field the object does not carry. Rename one and
+#: every existing ``.blend`` silently loses that value on its next export - the
+#: field is skipped, never coerced, and the encoder writes whatever absence
+#: means. So the raw name stays and this rides alongside it.
+#:
+#: Each entry was read out of the decomp, not guessed. The checkpoint block is
+#: three groups of four, one slot per racer lane, interleaved in
+#: ``checkpoint_update_all`` (``objects.c`` ~5675):
+#:
+#:     unk2E[0..3] <- unkB,  unkC,  unkD,  unkE
+#:     unk32[0..3] <- unkF,  unk10, unk11, unk12
+#:     unk36[0..3] <- unk13, unk14, unk15, unk16
+#:
+#: and ``racer.c`` ~1424 says what each group is: ``unk2E`` is added to the
+#: spline's X and Z scaled by the gate's rotation fractions, which is a lateral
+#: offset in the gate's own plane; ``unk32`` is added to Y alone; ``unk36`` is
+#: compared against constants when the AI picks a route.
+FIELD_LABELS = {
+    "ASSET_OBJECT_CHECKPOINT": dict(
+        [("unk%s" % name, "Lateral offset, lane %d" % (index + 1))
+         for index, name in enumerate(("B", "C", "D", "E"))]
+        + [("unk%s" % name, "Vertical offset, lane %d" % (index + 1))
+           for index, name in enumerate(("F", "10", "11", "12"))]
+        + [("unk%s" % name, "Route flag, lane %d" % (index + 1))
+           for index, name in enumerate(("13", "14", "15", "16"))]
+    ),
+}
+
+
+def label_for(object_id, field_name):
+    """The human name for a field, or ``None`` when its own name is clear."""
+    return FIELD_LABELS.get(object_id, {}).get(field_name)
+
+
 def describe_field(field, info, enums):
     """Merge a struct field with what retail maps were seen to put in it."""
     ctype = field["ctype"] if field else None
@@ -608,6 +647,12 @@ EXPORTED_ENUMS = [
     "Vehicle", "BalloonType", "WarpFlag", "World", "RaceType", "CameraMode",
     # The level header needs these too.
     "BossSetupTypes", "Language",
+    # Not reachable from any object field: SurfaceType lives on a level model's
+    # texture table entry, not on a LevelObjectEntry. It is exported anyway so
+    # the addon has one source for it - what a surface behaves like is format
+    # knowledge, and a fallback table copied into a bpy module is exactly the
+    # kind of thing that drifts from the decomp without anything noticing.
+    "SurfaceType",
 ]
 
 
@@ -658,6 +703,11 @@ def build_catalog(decomp_root):
                 item["optional"] = entry["fields"][name]["count"] < entry["count"]
                 item["undeclared"] = True
                 described.append(item)
+
+        for item in described:
+            label = label_for(object_id, item["name"])
+            if label:
+                item["label"] = label
 
         objects[object_id] = {
             "node_name": entry["names"].most_common(1)[0][0],

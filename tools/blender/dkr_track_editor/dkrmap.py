@@ -29,7 +29,7 @@ import re
 import shutil
 from typing import Dict, List, Optional
 
-from . import gltf_io, level_header, object_map_encoder
+from . import gltf_io, level_header, level_model_encoder, object_map_encoder
 from .gltf_io import ObjectMap
 
 MANIFEST_NAME = "manifest.json"
@@ -149,6 +149,31 @@ class TrackPackage:
         with open(path, "wb") as handle:
             handle.write(payload)
         self.payloads["LEVEL_HEADERS"] = path
+        return payload
+
+    def encode_level_model(self, model) -> bytes:
+        """Compile edited track geometry and attach it as ``LEVEL_MODELS``.
+
+        Only worth calling when the author actually changed the geometry. A
+        track that reworks objects over shipped geometry should ship no model
+        payload at all: the header's ``geometry`` field then keeps pointing at
+        the base track's model, and the package stays small and stays correct.
+        Writing an unchanged copy would work, but it makes every remix carry a
+        hundred kilobytes that say nothing.
+
+        The bytes are what the game loads, not what the asset tool takes as
+        input - see :mod:`level_model_encoder`, held to byte equality against
+        every extracted retail model.
+        """
+        try:
+            payload = level_model_encoder.pack(model)
+        except level_model_encoder.LevelModelEncodeError as error:
+            raise DkrMapError("could not compile the track geometry: %s" % error)
+        os.makedirs(self.directory, exist_ok=True)
+        path = os.path.join(self.directory, SECTIONS["LEVEL_MODELS"])
+        with open(path, "wb") as handle:
+            handle.write(payload)
+        self.payloads["LEVEL_MODELS"] = path
         return payload
 
     def add_payload(self, section: str, path: str) -> None:

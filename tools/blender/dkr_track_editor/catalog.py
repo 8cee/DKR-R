@@ -40,10 +40,18 @@ class Field:
         "name", "kind", "ctype", "hint", "step", "minimum", "maximum",
         "default", "values", "enum", "length", "optional", "unused",
         "undeclared", "seen", "seen_min", "seen_max", "offset", "count",
+        "label",
     )
 
     def __init__(self, raw: Dict[str, Any]):
         self.name = raw["name"]
+        #: A human name for a panel to show, when the decomp's own is opaque.
+        #: Never a substitute for :attr:`name`, which is the Blender custom
+        #: property an object carries: renaming that would make an existing
+        #: scene's values vanish on its next export, because ``read_object``
+        #: skips a field the object does not have. Falls back to the name, so
+        #: a caller can always use it.
+        self.label = raw.get("label") or raw["name"]
         self.kind = raw["kind"]
         self.ctype = raw.get("ctype")
         self.hint = raw.get("hint") or {}
@@ -72,9 +80,15 @@ class Field:
         return self.hint.get("kind") == "Angle"
 
     @property
-    def is_padding(self) -> bool:
-        """``pad*`` fields exist to reproduce bytes, not to be authored."""
-        return self.name.startswith("pad")
+    def is_raw(self) -> bool:
+        """Bytes that exist to be reproduced, not authored.
+
+        ``pad*`` is padding and ``unk*`` is a byte nobody has identified yet.
+        Neither is something an author can reason about, and there are a lot of
+        them: a checkpoint declares 19 editable fields of which 15 are ``unk``,
+        burying the three that decide how the checkpoint behaves.
+        """
+        return self.name.startswith(("pad", "unk"))
 
     def coerce(self, value: Any) -> Any:
         """Force a value back into the JSON type the object map must contain."""

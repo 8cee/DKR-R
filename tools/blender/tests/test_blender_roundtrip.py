@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import traceback
 
 import bpy
 
@@ -149,6 +150,14 @@ def main():
 
 
 if __name__ == "__main__":
-    code = main()
-    # Blender ignores a plain return code from a --python script.
-    sys.exit(code)
+    # What vanishes under Blender is an **uncaught exception**, not sys.exit:
+    # measured on 5.2, a bare sys.exit(3) exits 3 and so does sys.exit(main()),
+    # while a NameError makes Blender print the traceback and still exit 0. So a
+    # crashing test read as a pass, stopped the suite where it stood, and hid
+    # every check after it - which is what this catch repairs.
+    try:
+        _code = main()
+    except BaseException:  # noqa: BLE001 - the point is to report anything
+        traceback.print_exc()
+        _code = 1
+    sys.exit(_code)

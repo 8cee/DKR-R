@@ -1,8 +1,21 @@
 """Build a DKR AI node graph from sampled curves.
 
-Hand authoring an AI racing line is the tedious part of making a track, so the
-addon lets a creator draw a curve and turns it into ``ASSET_OBJECT_AINODE``
-entries. This module holds the part of that with no Blender in it: arc-length
+**An AI node graph is not the racing line**, which this module and the addon's
+UI both used to say. A normal race steers by interpolating a spline through the
+*checkpoints* - ``func_80045C48``, ``src/racer.c:1360`` - and never reads a
+node. The dispatch is explicit at ``src/racer.c:613``: only
+``RACETYPE_CHALLENGE_BATTLE`` and ``RACETYPE_CHALLENGE_BANANAS`` route to
+``racer_ai_challenge``, which is what walks the graph.
+
+What the graph is actually for:
+
+* the AI in the Battle and Bananas challenges
+* hub NPCs - T.T., Taj, the golden balloon
+* loop-de-loops, which ride it as an on-rails track
+* teaching the game where an arena's floors are, through ``elevation``
+
+So drawing one is worth doing for an arena or a hub, and does nothing at all for
+a normal circuit. This module holds the part with no Blender in it: arc-length
 sampling, adjacency, branch attachment and the structural limits.
 
 What retail data says about the format, measured across the 16 shipped maps that
@@ -31,9 +44,19 @@ NO_NEIGHBOUR = 255
 #: Slots per node, from ``u8 adjacent[4]``.
 MAX_NEIGHBOURS = 4
 
-#: ``nodeID`` is a ``u8`` and 255 is the empty sentinel, so a node numbered 255
-#: could never be referenced by anything. That caps a track at ids 0..254.
-MAX_NODES = 255
+#: The game keeps ``AINODE_COUNT`` nodes, and that is **128**, not 255:
+#: ``gAINodes`` is allocated as that many pointers and ``ainode_update``'s
+#: working arrays hold that many entries (``src/objects.c:50``, ``:313``,
+#: ``:7342``). Both a ``nodeID`` and every ``adjacent`` slot are filtered with
+#: ``!(index & AINODE_COUNT)`` - a bit-7 test - so an id of 128 or more is
+#: dropped at load, and so is every link pointing at one
+#: (``src/objects.c:7359``, ``:7378``). 255 reads as the empty sentinel through
+#: that same bit rather than by being reserved.
+#:
+#: This was 255 until it was measured, which meant a track with 200 nodes
+#: exported without complaint and silently lost a third of its graph in game.
+#: Retail never exceeds ``nodeID`` 38.
+MAX_NODES = 128
 
 Vector3 = Tuple[float, float, float]
 

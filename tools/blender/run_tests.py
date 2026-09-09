@@ -29,6 +29,8 @@ TESTS = os.path.join(HERE, "tests")
 PLAIN_SUITES = [
     "test_roundtrip.py", "test_validate.py", "test_geometry.py", "test_assets.py",
     "test_binary_format.py", "test_encoder.py", "test_header.py",
+    "test_level_model_roundtrip.py", "test_level_model_edit.py",
+    "test_level_model_layout.py", "test_header_template.py",
 ]
 BLENDER_SUITES = ["test_blender_roundtrip.py", "test_blender_operators.py"]
 

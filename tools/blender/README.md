@@ -1,11 +1,13 @@
 # DKR track editor - Blender addon
 
 Author a Diddy Kong Racing track in Blender: place objects, items and the AI
-racing line over a track's geometry, then write the object map back out and
-package it as a `.dkrmap` for DKR-R's `custom-tracks/` folder.
+AI node graph over a track's geometry, reshape the geometry itself, then write
+it all back out and package it as a `.dkrmap` for DKR-R's `custom-tracks/`
+folder.
 
-This is Phase 1 of `docs/BLENDER_ADDON_PLAN.md`: remixing an existing track.
-Authoring new geometry is Phase 2 and is still blocked on a level-model encoder.
+This is Phase 1 of `docs/BLENDER_ADDON_PLAN.md` - remixing an existing track -
+plus all three steps of Phase 2: the track's own geometry can be reshaped, and
+geometry can be added and removed.
 
 ## Install
 
@@ -34,7 +36,7 @@ extension or as a legacy addon.
 by name. That loads its geometry and *both* of its object maps in one go.
 
 The two maps matter. A level header names `map-2` for the track - checkpoints,
-zippers, scenery, the AI line - and `map-collectables` for the pickups. Loading
+zippers, scenery, the AI graph - and `map-collectables` for the pickups. Loading
 only the first gives a track with no coins and no balloons: Ancient Lake goes
 from 184 objects to 98.
 
@@ -50,19 +52,79 @@ clipping to match.
 `levels/models/<world>/*.bin`; *Import Track* does it for you. Without it there
 is nothing to aim at: objects float in an empty viewport. The geometry arrives
 **textured**, from the level model's own texture table and per-triangle UVs, so
-the road looks like road and the grass like grass. It is read-only reference -
-decoded from what the game ships, never written back - and it is split three
-ways:
+the road looks like road and the grass like grass.
 
-| Mesh | What it is |
+It arrives as **one mesh**, holding every vertex of every segment exactly once.
+That is what makes it editable. An edit is addressed in the file as
+`(segment, vertex index)`, so each Blender vertex records its own in the
+`dkr_segment` and `dkr_vertex` integer attributes and the exporter can put a
+moved vertex back where it came from. The three kinds a batch can be are
+material slots rather than three separate objects, because a segment holding
+batches of more than one kind would otherwise need its vertices in two meshes at
+once - and then "which copy did the author move" has no answer:
+
+| Slot | What it is |
 |---|---|
-| `<track> surface` | the road, drawn and driven on |
-| `<track> invisible walls` | `RENDER_HIDDEN` batches, most of them still solid |
-| `<track> decoration` | drawn but not collidable |
+| `dkr surface ...` | the road, drawn and driven on |
+| `dkr decoration ...` | drawn but not collidable |
+| `dkr invisible walls` | `RENDER_HIDDEN` batches, most of them still solid |
 
-Invisible walls start hidden, since they otherwise bury the track. Once geometry
-is loaded, Blender's own face snapping works, and *Drop To Surface* casts the
-selected objects straight down onto the road.
+Blender's own material-slot *Select* button is how you isolate one kind in Edit
+Mode, and solid viewport shading tints each slot so the split reads at a glance
+without turning the textures off. Invisible walls start masked out, since they
+otherwise bury the track; *Hide/Show Invisible Walls* toggles the mask, and the
+mesh keeps their vertices either way.
+
+**Reshape the track.** *Edit Geometry* unlocks the mesh and opens it in Edit
+Mode. Move vertices, extrude, subdivide, delete faces. *Check Geometry Changes*
+reports what an export would write without writing anything.
+
+There are two ways back out, and which one runs is decided by what you did
+rather than chosen:
+
+- **Nothing was added or removed.** The shipped `.bin` is reloaded and only your
+  differences are applied to it, so everything you did not touch stays
+  byte-identical. Import a track, change nothing, export, and the model is the
+  one the game ships, byte for byte - checked against all 110 retail models.
+- **Counts changed.** Then every offset after the change shifts, so each segment
+  is rebatched and the file is laid out afresh. That cannot be byte-identical to
+  retail and is not meant to be; retail's padding between arrays follows no
+  rule, so a rebuild writes a valid layout rather than the original one.
+
+Keeping the two apart is the point: reshaping a track never loses its byte
+equality just because the addon is now able to rebuild one.
+
+When the geometry is untouched the package carries no `model.bin` at all and the
+track keeps pointing at the base track's geometry.
+
+New geometry keeps working because Blender propagates the attributes: a face you
+extrude inherits the render flags, texture and source batch of the face it grew
+from, and its vertices inherit which segment they are in. A face built from
+nothing instead of extruded has no source, so if it also belongs to no segment
+the export says so rather than putting it somewhere arbitrary. Extrude makes
+quads, which the file cannot store, so they are fanned into triangles on the way
+out.
+
+Two ceilings are worth knowing about, both shown in the Geometry panel:
+
+- **Load budget.** The game reserves a fixed arena for a level model and the
+  heaviest retail track already uses 68% of it. Going over does not fail - it
+  writes past the heap, and the only complaint is a debug print no retail build
+  shows - so the panel shows the percentage and how many more triangles fit.
+- **Oversized segments.** Collision considers at most ten segments at a time,
+  chosen by bounding-box overlap, so a segment stretched across the map holds a
+  slot everywhere and can push the ground a racer is standing on out of the
+  running. The symptom is falling through the floor somewhere else entirely,
+  with no diagnostic at all. One giant polygon is enough to do it.
+
+Two things do not come back yet. Vertex colours and the `UVMap` an author edits
+are read for display only - the export uses the raw values the file stores - so
+repainting or unwrapping in Blender does not reach the track. New faces inherit
+their source's UVs, which means a much larger face stretches rather than tiles.
+
+Once geometry is loaded, Blender's own face snapping works, and *Drop To
+Surface* casts the selected objects straight down onto the road - carrying the
+ray on through decoration and walls, which now share one mesh with it.
 
 **Place objects.** The Place panel lists all 85 object types that appear in
 retail tracks, filtered by category, with the ones a track author reaches for
@@ -87,11 +149,22 @@ setting the asset path for the first time.
 
 **Edit fields.** Select an object and the DKR Object panel shows its fields with
 the right widget for each: a slider bounded by what the C type can hold, or a
-dropdown of an enum's members. Padding and unknown bytes are hidden behind a
-toggle, because they exist to reproduce bytes rather than to be authored. Where
-a type has an angle, rotate the object in the viewport and the field follows.
+dropdown of an enum's members. Where a type has an angle, rotate the object in
+the viewport and the field follows.
 
-**Draw the AI line.** Add a curve, draw the racing line, then *AI Nodes From
+`pad*` and `unk*` fields are hidden behind the **Show Raw Bytes** toggle. They
+exist so an entry encodes to the bytes the game expects, and nobody has
+identified what the `unk` ones do - a checkpoint declares 19 editable fields of
+which 15 are `unk`, which buried the four that decide how it behaves. Thirteen
+object types are nothing but raw bytes; the panel says so rather than showing a
+wall of them.
+
+**Draw the AI node graph.** This is *not* the racing line, which the game
+interpolates from the checkpoints and which no node is read for. The graph
+drives the Battle and Bananas challenges, hub NPCs and loop-de-loops, so it is
+worth drawing for an arena or a hub and does nothing for a normal circuit.
+
+Add a curve, draw the route, then *AI Nodes From
 Curve*. It samples the curve at a spacing you choose, numbers the nodes and
 wires the adjacency, closing the loop if the curve is cyclic. A second curve can
 be spliced on as a branch, attaching to the nearest nodes that still have a free
@@ -173,6 +246,7 @@ tools/blender/
     props.py                scene settings
     prefs.py                where to find the decomp assets
     operators/              import, export, place, AI, validate, package
+    operators/geometry_export.py  the mesh's edits -> a level model
     ui/panels.py            the sidebar
     data/catalog.json       generated; do not edit by hand
   tests/

@@ -1,4 +1,4 @@
-"""Turn a curve into an AI racing line.
+"""Turn a curve into an AI node graph.
 
 The author draws the line they want the AI to follow; this samples it into
 ``ASSET_OBJECT_AINODE`` objects with the adjacency already wired. The graph
@@ -87,7 +87,7 @@ def _write_nodes(context, graph, catalog, elevation, unk8):
 
 
 class DKR_OT_ai_from_curve(bpy.types.Operator):
-    """Sample the selected curve into an AI racing line"""
+    """Sample the selected curve into an AI node graph"""
 
     bl_idname = "dkr.ai_from_curve"
     bl_label = "AI Nodes From Curve"
@@ -122,8 +122,8 @@ class DKR_OT_ai_from_curve(bpy.types.Operator):
         default=0, min=-128, max=127,
     )
     unk8: IntProperty(
-        name="unk8",
-        description="Unidentified per-node byte; retail leaves it 0 on most nodes",
+        name="Destination Class",
+        description="What this node is a destination for, which is how the game's pathfinder picks a target: 0 is an ordinary path node, 1 a weapon balloon, 3 a (re)entry point, and 4 to 7 the base of player 0 to 3. Retail uses 0 to 7",
         default=0, min=0, max=255,
     )
     replace: BoolProperty(
@@ -192,8 +192,25 @@ class DKR_OT_ai_add_branch(bpy.types.Operator):
     bl_label = "Add AI Branch From Curve"
     bl_options = {"REGISTER", "UNDO"}
 
-    spacing: FloatProperty(name="Spacing", default=300.0, min=1.0, soft_max=2000.0)
-    elevation: IntProperty(name="Elevation", default=0, min=-128, max=127)
+    spacing: FloatProperty(
+        name="Spacing",
+        description="Distance between nodes in world units",
+        default=300.0, min=1.0, soft_max=2000.0,
+    )
+    elevation: IntProperty(
+        name="Elevation",
+        description=(
+            "Which floor of a multi-level arena these nodes are on, 0 to 3. It "
+            "is a tier and not a height: the game sorts the nodes by Y and "
+            "derives the boundary between floors from where the tier changes"
+        ),
+        default=0, min=-128, max=127,
+    )
+    unk8: IntProperty(
+        name="Destination Class",
+        description="What this node is a destination for, which is how the game's pathfinder picks a target: 0 is an ordinary path node, 1 a weapon balloon, 3 a (re)entry point, and 4 to 7 the base of player 0 to 3. Retail uses 0 to 7",
+        default=0, min=0, max=255,
+    )
 
     @classmethod
     def poll(cls, context):
@@ -220,7 +237,10 @@ class DKR_OT_ai_add_branch(bpy.types.Operator):
             self.report({"ERROR"}, str(error))
             return {"CANCELLED"}
 
-        _write_nodes(context, graph, catalog, self.elevation, 0)
+        # Not 0 unconditionally: a branch written with destination class 0 can
+        # never be a target the pathfinder is asked for, which quietly made
+        # every branch this operator produced unreachable as a destination.
+        _write_nodes(context, graph, catalog, self.elevation, self.unk8)
         self.report({"INFO"}, "added %d branch node(s)" % len(added))
         return {"FINISHED"}
 

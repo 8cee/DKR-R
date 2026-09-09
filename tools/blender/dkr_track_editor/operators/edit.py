@@ -18,6 +18,47 @@ def _asset_tree(context):
     return prefs.resolve(context)
 
 
+#: Types whose field must be unique among their peers, and what groups them.
+#: A checkpoint index has to be unique within its (vehicleType, isAltCheckpoint)
+#: chain - the rule holds across all 51 retail chains - and an AI node's id has
+#: to be unique outright.
+UNIQUE_FIELDS = {
+    "ASSET_OBJECT_CHECKPOINT": ("index", ("vehicleType", "isAltCheckpoint")),
+    "ASSET_OBJECT_AINODE": ("nodeID", ()),
+}
+
+
+def _assign_free_index(context, object_id, fields):
+    """Give a newly placed object an index nothing else is using.
+
+    Without this the first two checkpoints an author places both take index 0
+    and the track fails validation for a reason that has nothing to do with what
+    they were trying to do.
+    """
+    spec = UNIQUE_FIELDS.get(object_id)
+    if spec is None:
+        return
+    field, grouped_by = spec
+    if field not in fields:
+        return
+
+    chain = tuple(fields.get(key) for key in grouped_by)
+    taken = set()
+    for obj in scene.iter_dkr_objects(context):
+        if str(obj.get(scene.PROP_ID)) != object_id:
+            continue
+        if tuple(obj.get(key) for key in grouped_by) != chain:
+            continue
+        value = obj.get(field)
+        if isinstance(value, int):
+            taken.add(value)
+
+    candidate = 0
+    while candidate in taken:
+        candidate += 1
+    fields[field] = candidate
+
+
 def object_type_items(self, context):
     """Every object type, grouped so the featured ones come first."""
     try:
@@ -65,11 +106,14 @@ class DKR_OT_place_object(bpy.types.Operator):
             self.report({"ERROR"}, "unknown object type %r" % object_id)
             return {"CANCELLED"}
 
+        fields = object_type.fresh_fields()
+        _assign_free_index(context, object_id, fields)
+
         placed = MapObject(
             object_id=object_id,
             name=object_type.node_name,
             translation=scene.to_map(context.scene.cursor.location),
-            fields=object_type.fresh_fields(),
+            fields=fields,
         )
 
         root = scene.ensure_root(context)
@@ -95,6 +139,19 @@ class DKR_OT_place_object(bpy.types.Operator):
         return {"FINISHED"}
 
 
+#: Blender's enum callbacks hand their strings to C without taking a reference,
+#: so a list built fresh on every call can be collected while the menu is still
+#: using it - the documented symptom being a picker that opens empty. Holding the
+#: last list returned for each key is what keeps them alive.
+_ITEMS = {}
+
+
+def _keep(key, items):
+    """Hold a reference to what an enum callback returned, and return it."""
+    _ITEMS[key] = items
+    return items
+
+
 class DKR_OT_set_enum_field(bpy.types.Operator):
     """Pick a value for an enum field from the full set the game defines"""
 
@@ -107,25 +164,28 @@ class DKR_OT_set_enum_field(bpy.types.Operator):
     def _items(self, context):
         obj = context.active_object
         if obj is None or scene.PROP_ID not in obj:
-            return [("", "", "")]
+            return _keep("field", [("NONE", "no object selected", "")])
         catalog = _catalog()
         object_type = catalog.get(str(obj[scene.PROP_ID]))
         if object_type is None:
-            return [("", "", "")]
+            return _keep("field", [("NONE", "type not in the catalogue", "")])
         field = object_type.field(self.field)
         if field is None:
-            return [("", "", "")]
+            return _keep("field", [("NONE", "no such field", "")])
         members = catalog.enum_members(field)
         seen = set(field.values)
-        return [
+        return _keep("field", [
             (m, m, "used by retail tracks" if m in seen else "")
             for m in members
-        ]
+        ] or [("NONE", "this enum has no members", "")])
 
     value: EnumProperty(name="Value", items=_items)
 
     def invoke(self, context, event):
-        return context.window_manager.invoke_search_popup(self)
+        # A dialog rather than a search popup: it draws the enum as an ordinary
+        # dropdown, which types-to-filter the same way and does not depend on
+        # the search UI reading the operator's other properties.
+        return context.window_manager.invoke_props_dialog(self)
 
     def execute(self, context):
         obj = context.active_object

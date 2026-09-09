@@ -473,6 +473,8 @@ if(DKR_RUNTIME_BUILD_GENERATED)
     endif()
     if(DKR_RUNTIME_BUILD_RT64)
         list(APPEND DKR_GAME_SOURCES
+            src/game/custom_tracks.cpp
+            src/game/custom_tracks_hooks.cpp
             src/game/f3ddkr_rt64.cpp
             src/game/generated/jumpman_font.c
             src/game/generated/racing_banana_font.c
@@ -1071,6 +1073,18 @@ if(BUILD_TESTING)
     add_test(NAME DKRInterpolationStatePolicy
           COMMAND DKRInterpolationStatePolicyTests)
 
+    if(DKR_RUNTIME_BUILD_RT64)
+        add_executable(DKRCustomTracksTests
+            tests/custom_tracks_tests.cpp
+            src/game/custom_tracks.cpp
+        )
+        target_include_directories(DKRCustomTracksTests PRIVATE
+            "${CMAKE_CURRENT_LIST_DIR}/src/game"
+            "${DKR_RT64_SOURCE}/src/contrib"
+        )
+        add_test(NAME DKRCustomTracks COMMAND DKRCustomTracksTests)
+    endif()
+
       add_executable(DKRRiceTexturePackPolicyTests
           tests/rice_texture_pack_policy_tests.cpp
       )
@@ -1210,6 +1224,9 @@ if(BUILD_TESTING)
         DKRDeterminismStateHash77Tests
         DKRDeterminismStateHash80Tests
     )
+    if(DKR_RUNTIME_BUILD_RT64)
+        list(APPEND DKR_ASSERT_TEST_TARGETS DKRCustomTracksTests)
+    endif()
     foreach(DKR_ASSERT_TEST_TARGET IN LISTS DKR_ASSERT_TEST_TARGETS)
         if(MSVC)
             target_compile_options(${DKR_ASSERT_TEST_TARGET} PRIVATE /UNDEBUG)

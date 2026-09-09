@@ -36,6 +36,9 @@ class DKR_OT_validate(bpy.types.Operator):
             entry.severity = issue.severity
             entry.message = issue.message
             entry.object_id = issue.object_id
+            entry.objects = ",".join(
+                str(o) for o in issue.objects if o is not None
+            )
         settings.has_validated = True
 
         if report.errors:
@@ -50,4 +53,44 @@ class DKR_OT_validate(bpy.types.Operator):
         return {"FINISHED"}
 
 
-CLASSES = (DKR_OT_validate,)
+class DKR_OT_select_issue(bpy.types.Operator):
+    """Select the objects a validation result is about"""
+
+    bl_idname = "dkr.select_issue"
+    bl_label = "Select"
+    bl_options = {"REGISTER", "UNDO"}
+
+    objects: bpy.props.StringProperty(options={"HIDDEN"})
+
+    def execute(self, context):
+        wanted = {int(p) for p in self.objects.split(",") if p.strip().isdigit()}
+        if not wanted:
+            self.report({"WARNING"}, "this result does not name any object")
+            return {"CANCELLED"}
+
+        found = None
+        for obj in scene.iter_dkr_objects(context):
+            match = int(obj.get("dkr_order", -1)) in wanted
+            obj.select_set(match)
+            if match:
+                found = obj
+        if found is None:
+            self.report({"ERROR"}, "those objects are no longer in the scene")
+            return {"CANCELLED"}
+
+        context.view_layer.objects.active = found
+        # Frame them, since a duplicate is usually sitting exactly on top of the
+        # object it was copied from and is invisible until the view moves.
+        for area in context.screen.areas:
+            if area.type == "VIEW_3D":
+                with context.temp_override(area=area, region=area.regions[-1]):
+                    try:
+                        bpy.ops.view3d.view_selected()
+                    except RuntimeError:
+                        pass
+                break
+        self.report({"INFO"}, "selected %d object(s)" % len(wanted))
+        return {"FINISHED"}
+
+
+CLASSES = (DKR_OT_validate, DKR_OT_select_issue)

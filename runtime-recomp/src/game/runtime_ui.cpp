@@ -4,6 +4,7 @@
 #include "generated/jumpman_font.h"
 #include "generated/racing_banana_font.h"
 #include "countdown_tone_policy.hpp"
+#include "custom_tracks.hpp"
 #include "magic_code_policy.hpp"
 #include "modern_camera_policy.hpp"
 #include "rom_revision.hpp"
@@ -8303,6 +8304,202 @@ void DrawMagicCodes(float width) {
     }
 }
 
+std::string g_track_import_status;
+
+// A track is a folder, not a file, so this is a folder picker rather than the
+// file picker the ROM and texture-pack flows use.
+void ImportTrackWithDialog() {
+    if (NFD_Init() != NFD_OKAY) {
+        g_track_import_status =
+            "The system folder picker could not be initialized.";
+        return;
+    }
+    nfdu8char_t* result = nullptr;
+    const nfdresult_t dialog = NFD_PickFolderU8(&result, nullptr);
+    if (dialog == NFD_OKAY) {
+        const std::filesystem::path source = std::filesystem::u8path(result);
+        NFD_FreePathU8(result);
+        std::string error;
+        if (dkr::runtime::custom_tracks::install(source, error)) {
+            g_track_import_status =
+                "Installed " + source.filename().string() + ".";
+        } else {
+            g_track_import_status = error;
+        }
+    } else if (dialog == NFD_ERROR) {
+        g_track_import_status = NFD_GetError();
+    }
+    NFD_Quit();
+}
+
+void ChooseWorkingFolderWithDialog() {
+    if (NFD_Init() != NFD_OKAY) {
+        g_track_import_status =
+            "The system folder picker could not be initialized.";
+        return;
+    }
+    nfdu8char_t* result = nullptr;
+    const nfdresult_t dialog = NFD_PickFolderU8(&result, nullptr);
+    if (dialog == NFD_OKAY) {
+        const std::filesystem::path chosen = std::filesystem::u8path(result);
+        NFD_FreePathU8(result);
+        // The folder holds .dkrmap directories; it is not one itself. Accept
+        // either, so picking the track folder by mistake still works.
+        dkr::runtime::custom_tracks::set_working_directory(
+            chosen.extension() == ".dkrmap" ? chosen.parent_path() : chosen);
+        const std::size_t found =
+            dkr::runtime::custom_tracks::tracks().size();
+        g_track_import_status =
+            found == 0 ? "No .dkrmap folders found there yet."
+                       : std::to_string(found) + " track(s) loaded.";
+    } else if (dialog == NFD_ERROR) {
+        g_track_import_status = NFD_GetError();
+    }
+    NFD_Quit();
+}
+
+// Track Lab. Arming a track makes get_track_id_to_load resolve to it, so any
+// race the player starts lands on that track. Pairing that with the retail
+// L+Z restart gives an authoring loop that never returns to a menu.
+void DrawTrackLabControls(float width) {
+    namespace tracks_ns = dkr::runtime::custom_tracks;
+    const std::vector<tracks_ns::Track> installed = tracks_ns::tracks();
+    const std::string armed = tracks_ns::armed_track_id();
+
+    // Two ways in, because they answer different questions. Importing takes a
+    // snapshot, which is what you want for a track you intend to keep. While
+    // authoring it is the wrong shape: a re-export would leave the copy stale.
+    // The working folder is read in place, so exporting again IS the update.
+    const std::filesystem::path working = tracks_ns::working_directory();
+    const float half = (width - 8.0F) * 0.5F;
+
+    if (ImGui::Button("SET WORKING FOLDER", {half, 34.0F})) {
+        ChooseWorkingFolderWithDialog();
+    }
+    ImGui::SameLine(0.0F, 8.0F);
+    ImGui::BeginDisabled(working.empty());
+    if (ImGui::Button("STOP WATCHING", {half, 34.0F})) {
+        tracks_ns::set_working_directory({});
+    }
+    ImGui::EndDisabled();
+
+    ImGui::PushStyleColor(ImGuiCol_Text, working.empty() ? kMuted : kWarm);
+    if (working.empty()) {
+        ImGui::TextWrapped(
+            "Point this at the folder your exporter writes to. Tracks there "
+            "are read in place, so exporting again is the update - no copying "
+            "and nothing to reinstall.");
+    } else {
+        ImGui::TextWrapped("Watching %s", working.string().c_str());
+    }
+    ImGui::PopStyleColor();
+    ImGui::Dummy({0.0F, 6.0F});
+
+    // The authoring loop: export from the editor, rescan here, restart in
+    // place with L+Z. Without this the only way to pick up a re-export is a
+    // relaunch, which throws away the armed track and the auto boot state.
+    if (ImGui::Button("RESCAN", {width, 28.0F})) {
+        tracks_ns::reload();
+        const std::size_t found = tracks_ns::tracks().size();
+        g_track_import_status =
+            std::to_string(found) + " track(s) after rescan.";
+    }
+    ImGui::Dummy({0.0F, 6.0F});
+
+    if (ImGui::Button("IMPORT A COPY", {width, 28.0F})) {
+        ImportTrackWithDialog();
+    }
+    ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
+    ImGui::TextWrapped(
+        "Copies a .dkrmap in to keep. A later re-export will not reach the "
+        "copy - use the working folder while you are still editing.");
+    ImGui::PopStyleColor();
+    if (!g_track_import_status.empty()) {
+        ImGui::Dummy({0.0F, 4.0F});
+        ImGui::PushStyleColor(ImGuiCol_Text, kWarm);
+        ImGui::TextWrapped("%s", g_track_import_status.c_str());
+        ImGui::PopStyleColor();
+    }
+    ImGui::Dummy({0.0F, 10.0F});
+
+    if (installed.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
+        ImGui::TextWrapped("No custom tracks installed yet.");
+        ImGui::PopStyleColor();
+        return;
+    }
+
+    ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
+    ImGui::TextWrapped(
+        "Arming a track sends every race you start to it. Restart in place "
+        "with L+Z to reload after editing.");
+    ImGui::PopStyleColor();
+    ImGui::Dummy({0.0F, 8.0F});
+
+    const float button_width = 132.0F;
+    for (const tracks_ns::Track& track : installed) {
+        const bool is_armed = !armed.empty() && armed == track.id;
+        const std::int32_t level = tracks_ns::resolved_level_id(track.id);
+
+        ImGui::PushID(track.id.c_str());
+        ImGui::BeginGroup();
+        ImGui::TextUnformatted(track.name.c_str());
+        ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
+        if (level >= 0) {
+            ImGui::Text("%s  -  level %d",
+                        track.author.empty() ? "unknown author"
+                                             : track.author.c_str(),
+                        level);
+        } else {
+            // Before the first level load the extended table has not been
+            // built, so no id exists yet. Arming still works; it resolves
+            // when the game asks.
+            ImGui::Text("%s  -  level assigned at launch",
+                        track.author.empty() ? "unknown author"
+                                             : track.author.c_str());
+        }
+        ImGui::PopStyleColor();
+        ImGui::EndGroup();
+
+        ImGui::SameLine(width - button_width);
+        if (is_armed) {
+            ImGui::PushStyleColor(ImGuiCol_Button,
+                                  ImVec4{0.92F, 0.43F, 0.06F, 1.0F});
+            if (ImGui::Button("STOP TESTING", {button_width, 30.0F})) {
+                tracks_ns::arm_track_override(std::string{});
+            }
+            ImGui::PopStyleColor();
+        } else if (ImGui::Button("RACE THIS", {button_width, 30.0F})) {
+            tracks_ns::arm_track_override(track.id);
+        }
+        ImGui::PopID();
+        ImGui::Dummy({0.0F, 6.0F});
+    }
+
+    if (armed.empty()) {
+        return;
+    }
+
+    ImGui::PushStyleColor(ImGuiCol_Text, kWarm);
+    ImGui::TextWrapped(
+        "Track Lab is active. Start any race and it will load the armed "
+        "track instead.");
+    ImGui::PopStyleColor();
+    ImGui::Dummy({0.0F, 8.0F});
+
+    bool auto_boot = tracks_ns::auto_boot_enabled();
+    if (ImGui::Checkbox("Skip the menus on the next launch", &auto_boot)) {
+        tracks_ns::set_auto_boot(auto_boot);
+    }
+    ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
+    ImGui::TextWrapped(
+        "Boots past the logos, title, file select and character select "
+        "straight into the armed track, as Diddy, single player. Fires once "
+        "per launch; restart in place with L+Z to keep reloading, or quit to "
+        "return to the menus.");
+    ImGui::PopStyleColor();
+}
+
 void DrawModsHacks(float width) {
     DrawPageHeading("MODS / HACKS");
     ImGui::TextDisabled(
@@ -8338,6 +8535,41 @@ void DrawModsHacks(float width) {
             ImGui::TextWrapped(
                 "Texture-pack management is available in the Modern "
                 "presentation profile. Accurate mode remains unchanged.");
+            ImGui::PopStyleColor();
+        }
+    }
+    ImGui::Dummy({0.0F, 10.0F});
+
+    static bool track_lab_expanded = true;
+    if (DrawDisclosureButton("TRACK LAB", "track-lab", track_lab_expanded,
+                             width)) {
+        ImGui::Dummy({0.0F, 6.0F});
+        if (dkr::runtime::enhancements::modern_presentation_enabled()) {
+            DrawTrackLabControls(width);
+        } else {
+            // Deliberately loud. This section is empty in Accurate, and a
+            // muted line here reads as "the feature is broken" rather than
+            // "the feature is elsewhere".
+            ImGui::PushStyleColor(ImGuiCol_Text, kWarm);
+            ImGui::TextWrapped("Track Lab needs the Modern profile.");
+            ImGui::PopStyleColor();
+            ImGui::Dummy({0.0F, 4.0F});
+            ImGui::TextWrapped(
+                "Open the GRAPHICS page and set Presentation to Modern, then "
+                "come back here. Custom tracks stay out of Accurate so it "
+                "remains the untouched regression baseline.");
+            const std::size_t installed =
+                dkr::runtime::custom_tracks::tracks().size();
+            ImGui::Dummy({0.0F, 4.0F});
+            ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
+            if (installed == 0) {
+                ImGui::TextWrapped("No custom tracks are installed yet.");
+            } else if (installed == 1) {
+                ImGui::TextWrapped("1 custom track is installed and waiting.");
+            } else {
+                ImGui::Text("%zu custom tracks are installed and waiting.",
+                            installed);
+            }
             ImGui::PopStyleColor();
         }
     }

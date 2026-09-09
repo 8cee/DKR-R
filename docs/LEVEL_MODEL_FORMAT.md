@@ -34,7 +34,12 @@ up after loading.
 0x0C unkC                0x20 minimapSpriteIndex      s32
 0x10 segmentsBitfields   0x28 minimapXScale/YScale    f32
 0x14 segmentsBspTree     0x3C lowerXBounds .. bounds  s16
+                         0x48 modelSize               s32
 ```
+
+The header is 0x4C bytes. `modelSize` is the whole inflated length and the
+loader treats it as the start of its scratch arena, so it is not optional; see
+"What the file owns" below.
 
 Ancient Lake: 25 textures, **24 segments**, 7 animated textures, bounds
 X -5918..-23, Y -56..885, Z -12559..-2048.
@@ -49,13 +54,44 @@ bspTree       0x9C80..0x9D40 = 192 bytes / 24 =  8  -> BspTreeNode
 ## Segments and the BSP tree
 
 A `LevelModelSegment` is 0x44 bytes and points at its own vertex, triangle and
-batch arrays. Bounding boxes tile the world, and the BSP splits exactly on
-those boundaries:
+batch arrays. Bounding boxes tile the world, and the BSP splits on those
+boundaries.
+
+**There are no separate leaf nodes.** The earlier note here — that a leaf is a
+node with `leftNode == rightNode == -1` — reads the tree as leaves holding
+segments under internal nodes holding splits, and that is wrong. The array holds
+**one node per segment**: `segmentIndex` names the segment the node *is*,
+`splitType` and `splitValue` partition space at it, and `leftNode` / `rightNode`
+are child node indices with `-1` meaning no subtree on that side. A node with
+both children `-1` is simply a segment that subdivides nothing further.
+
+Ancient Lake's root, and the two shapes:
 
 ```text
-seg0 X -5918..-4764     seg1 X -4764..-2623
-bsp node0: axis=X split=-2623 left=1 right=12    (leaf nodes use left=right=-1)
+node  0: left=1  right=12  axis=X  segment=12  split=-2623   seg12 X -2623..-239
+node 19: left=20 right=-1  axis=Z  segment=23  split=-3864   seg23 Z -3864..-2128
+node  4: left=-1 right=-1  axis=X  segment=1   split=-4764   seg1  X -4764..-2623
 ```
+
+Two things follow, both verified across every extracted model:
+
+- **`segmentIndex` never repeats among the nodes reachable from node 0.** True
+  in all 110 models. The array is sized `numberOfSegments`, so a tree that uses
+  fewer leaves the rest as junk — only 10 of the 110 models reach every slot.
+  Reading unreachable slots is what produces `splitType` values like 223 and 255.
+- **`splitValue` is usually the node's own segment's lower box edge on the split
+  axis** — 1854 of 2192 reachable nodes — but not always, so it is a
+  construction habit rather than an invariant an encoder must reproduce.
+
+### The BSP does not contain its segments
+
+It reads like a containment tree and it is not one. Walking every model and
+checking each node's box against the half-spaces on its path from the root:
+**199 of 3911 constraints are violated, in 34 of the 55 models**, by a median of
+11 units and as much as 5440. It partitions the camera, not the geometry, so a
+segment poking out of its own half-space is ordinary. Any check that a segment
+stays inside its half-space would fire on most retail tracks; and a BSP built by
+recursive median split would be no worse than the data the game ships.
 
 ## Batches, triangles, vertices
 
@@ -73,8 +109,11 @@ Two rules an encoder must respect:
   same size-by-difference convention governs the asset tables.
 - **Triangle vertex indices are batch-local, not segment-local.** Triangle 3 of
   Ancient Lake's segment 0 indexes `(0,1,2)` inside a batch whose window starts
-  at vertex 5. Because the index is a `u8`, a batch can address at most 256
-  vertices.
+  at vertex 5. Because the index is a `u8`, the format allows a batch to address
+  256 vertices — but no retail batch comes near that. Across all 110 extracted
+  models the widest is **24** and the mean is about 9, which reads like the RSP
+  vertex buffer rather than the field width. An encoder should aim at retail's
+  ceiling, not the format's.
 
 Vertex colour is the baked lighting; level geometry carries no normals.
 
@@ -88,10 +127,55 @@ table, an array of 8-byte `DkrTextureInfo` whose `id` indexes the global
 Decoding all of that is what lets the Blender addon show a track as it looks
 rather than as a grey shell; see `tools/blender/dkr_track_editor/level_model.py`.
 
-## Collision is generated, not authored
+## Segment visibility: `segmentsBitfields` is a PVS
 
-`collisionFacets` and `collisionPlanes` are **NULL in the asset**. The game
-allocates and derives both at load time from the triangles:
+`segmentsBitfields` holds one bitmask per segment saying which segments are
+visible from it — a potentially visible set. Its size follows from the segment
+count alone:
+
+```text
+numberOfSegments * ceil(numberOfSegments / 8) bytes
+```
+
+Verified against every extracted level model as the distance from
+`segmentsBitfields` to `unkC`, which is exactly that figure up to the alignment
+slack that follows it: Windmill Plains 288 for 48 segments, Wizpig 2 464 for 58,
+Snowball Valley 504 for 63, Pirate Lagoon 1760 for 117 (rule: 1755).
+
+It is read in `render_level_segments` (`tracks.c`) to skip segments the camera
+cannot see, and written by the same file when a track opens or closes a route.
+An encoder that keeps a model's segmentation keeps this array unchanged; one
+that re-segments has to recompute it, and "every bit set" is the conservative
+fallback, correct but paid for in draw calls.
+
+## Collision is derived at load, into space the asset reserves
+
+The earlier claim here — that `collisionFacets` and `collisionPlanes` are both
+NULL in the asset — is **wrong for `collisionFacets`**, and the difference
+matters to an encoder.
+
+`collisionFacets` is a real offset that the loader fixes up like any other, in
+the pointer-fixup loop after `gzip_inflate` in `tracks.c`:
+
+```c
+LOCAL_OFFSET_TO_RAM_ADDRESS(CollisionFacetPlanes *, gCurrentLevelModel->segments[k].collisionFacets);
+```
+
+So the asset **reserves the storage** — `numberOfTriangles * 8` bytes per
+segment, laid out consecutively from `unkC` to the end of the blob, which is
+where roughly a fifth of a level model goes. Measured across every extracted
+model, the region from `unkC` to EOF is the sum of `numberOfTriangles * 8` plus
+a little slack: Jungle Falls 20,740 against 20,736, Ancient Lake 9,316 against
+9,248.
+
+The *contents* are uninitialised — whatever the build machine left there — and
+`track_init_collision` fills them at load. `collisionPlanes` genuinely is
+runtime-only: the loader assigns it from the scratch arena past `modelSize`,
+never from the file.
+
+**An encoder therefore never computes collision, but it must reserve the facet
+array and write correct offsets to it.** It only decides which batches are
+solid. The game derives both from the triangles:
 
 ```c
 if (model->collisionFacets != NULL) return;
@@ -109,16 +193,106 @@ plane plus three edge bisectors. A batch opts out with
 `RENDER_NO_COLLISION = 1 << 9` (`textures_sprites.h`), which shares bit 9 with
 coverage because level geometry ignores coverage.
 
-**An encoder therefore never computes collision.** It only decides which
-batches are solid.
+## What the file owns, and what the loader overwrites
+
+The fixup loop in `tracks.c` settles this field by field, and it is the list an
+encoder works from. Anything the loader assigns is scratch: the asset carries
+whatever was in the build machine's memory, which is why `unk8` holds the same
+value in every segment of every model.
+
+| | Written by the encoder | Overwritten at load |
+|---|---|---|
+| `LevelModel` | `textures`, `segments`, `segmentsBoundingBoxes`, `unkC`, `segmentsBitfields`, `segmentsBspTree`, `modelSize` (0x48) | — |
+| `LevelModelSegment` | `vertices`, `triangles`, `batches`, `collisionFacets`, the three counts, `numberofOpaqueBatches` | `unk10`, `collisionPlanes`, `unk30`, `unk32`, `unk34` |
+
+`modelSize` is not decoration: the loader allocates its scratch arena starting
+at `gCurrentLevelModel + modelSize`, so a wrong value has the game write
+collision planes over the model it just loaded.
+
+## Memory budget
+
+`LEVEL_MODEL_MAX_SIZE` is `0x82A00` — 535,040 bytes — and it covers the inflated
+blob *plus* everything the loader allocates past it. The dominant term is
+collision: `collisionPlanes` is 16 floats per collidable facet, so each triangle
+costs 8 bytes in the file and 64 bytes at runtime. Bluey, the largest retail
+model, lands around 80% of the budget; the median track is near 34%. Triangle
+count, not file size, is what runs a track out of memory, and
+`track_load_model` only reports it as `ERROR!! TrackMem overflow`.
 
 ## What an encoder actually has to do
 
 | Task | Notes |
 |---|---|
 | Container | DEFLATE plus the five byte header |
-| Header and texture table | direct field writes |
+| Header and texture table | direct field writes, `modelSize` included |
 | Segment the mesh spatially | the author's choice of partition |
 | Build the BSP over segments | standard axis/split-value tree |
-| Batch triangles | group by texture and flags, at most 256 vertices each |
-| Collision | nothing to do; runtime derives it |
+| Batch triangles | group by texture and flags |
+| Reserve collision facets | `numberOfTriangles * 8` per segment, contents irrelevant |
+| Recompute the PVS | only when segmentation changes |
+| Collision planes | nothing to do; runtime derives them |
+
+Two limits bound a batch. The vertex index is `u8` and **batch-local**, so the
+format allows 256 vertices; but the widest batch in any of the 110 extracted
+models is **24**, and the mean is around 9. The ceiling that matters in practice
+is the retail one, not the field width.
+
+`tools/blender/dkr_track_editor/level_model_encoder.py` implements the
+layout-preserving half of this table, and
+`tools/blender/tests/test_level_model_roundtrip.py` holds every extracted model
+to byte equality through it.
+`level_model_layout.py` is the other half — it lays a model out afresh when the
+counts change — gated by `tests/test_level_model_layout.py`.
+
+## Layout rules, for a builder that generates offsets
+
+The section order is the same in all 55 models, and within a segment so is the
+order of its three arrays:
+
+```text
+header < textures < segments < bbox < bsp < segmentsBitfields < unkC < facets
+                    per segment:  batches < triangles < vertices
+```
+
+Whether the per-segment arrays are interleaved or grouped is *not* consistent —
+31 models interleave and 19 group — so a builder is free to choose. Padding
+between arrays is not derivable either: it runs 0, 4, 8, 10, 12 and on to 770
+bytes with no rule, which is why an encoder can reproduce retail's layout only
+by preserving it, never by regenerating it.
+
+Three invariants a builder has to maintain, each measured across every extracted
+model:
+
+- **`modelSize` at 0x48 equals the inflated length.** All 55 models.
+- **The batch terminator holds `(numberOfVertices, numberOfTriangles)`.** All
+  1146 segments.
+- **Batch windows tile a segment exactly.** Zero gaps and zero overlaps in all
+  2292 segments, on both the vertex and the face windows. So no vertex is shared
+  between batches, and a re-batcher must duplicate rather than share — which the
+  `u8` batch-local index makes mandatory anyway.
+
+## Opacity is authored, not derivable
+
+`numberofOpaqueBatches` is a split point: `render_level_segment` draws `[0, k)`
+then `[k, n)`. Nothing in the data says which side a batch belongs on.
+
+- No flag bit separates them. Intersecting the flags of every non-opaque batch
+  gives zero, so there is no bit they all share.
+- Neither does the texture format. Eight of the fourteen formats in use appear
+  on both sides; only the rare ones happen to fall on one.
+
+An encoder therefore has to carry a batch's side along with it and must never
+infer it.
+
+## Two shapes Blender cannot round trip
+
+Relevant only to the addon, not to the format:
+
+- **Degenerate triangles.** Eight across the extracted set, four per revision —
+  `smokey` segment 10, `darkmoon_caverns` segment 2, `bluey` segment 12,
+  `temple_track` segment 22 — each naming one vertex twice. Blender's mesh
+  structure has no room for one, so a model rebuilt from a Blender mesh loses
+  them. A rebuild that stays in Python keeps them.
+- **Duplicate faces.** 134 across the set, once batch-local indices are resolved
+  to segment-local. These are fine: BMesh keeps them, and they survive an edit
+  session unchanged.

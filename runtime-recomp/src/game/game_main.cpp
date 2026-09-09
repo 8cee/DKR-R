@@ -9,6 +9,7 @@
 #include "startup_performance.hpp"
 #include "virtual_pak.hpp"
 #if DKR_RUNTIME_HAS_RT64
+#include "custom_tracks.hpp"
 #include "rt64_renderer.hpp"
 #include "runtime_texture_packs.hpp"
 #include "runtime_ui.hpp"
@@ -665,6 +666,18 @@ int DkrMain(int argc, char** argv) {
         dkr::runtime::pak::configure(config_directory);
         dkr::runtime::saves::configure(config_directory);
         dkr::runtime::platform::configure_input(config_directory);
+#if DKR_RUNTIME_HAS_RT64
+        // Custom tracks are user content beside the other imported assets, so
+        // they live in the configuration directory rather than next to the
+        // executable. Scanning here keeps the registry populated before the
+        // first asset table load reaches the Patch Pipeline hooks.
+        //
+        // Deliberately not "mods": librecomp owns that directory for its own
+        // .nrm mod format and reports "Mod is missing a mod.json" for anything
+        // else it finds there, which would surface as an error for every user
+        // who installs a track.
+        dkr::runtime::custom_tracks::scan(config_directory / "custom-tracks");
+#endif
     }
 
     {

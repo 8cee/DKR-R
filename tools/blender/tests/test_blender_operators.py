@@ -14,8 +14,10 @@ import json
 import os
 import shutil
 import sys
+import traceback
 import tempfile
 
+import bmesh
 import bpy
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -55,6 +57,9 @@ def test_registration():
                  "ai_from_curve", "ai_add_branch", "validate", "export_dkrmap",
                  "set_enum_field", "reset_field", "select_by_type",
                  "import_geometry", "drop_to_surface", "toggle_walls",
+                 "edit_geometry", "check_geometry",
+                 "header_defaults", "set_header_choice", "clear_header_choice",
+                 "set_surface_type", "resegment", "track_from_mesh",
                  "refresh_artwork", "set_slot"):
         check(hasattr(bpy.ops.dkr, name), "operator dkr.%s exists" % name)
     check(hasattr(bpy.types.Scene, "dkr"), "scene settings registered")
@@ -152,7 +157,10 @@ def test_ai_limits():
         ai_graph.build_from_path(line, 1.0, closed=False)
         check(False, "over-long line is refused")
     except ai_graph.AiGraphError as error:
-        check("255" in str(error), "over-long line is refused with the real limit")
+        check(str(ai_graph.MAX_NODES) in str(error),
+              "over-long line is refused with the real limit, which is the %d "
+              "the game keeps rather than the 255 a u8 could hold"
+              % ai_graph.MAX_NODES)
 
     graph = ai_graph.AiGraph()
     hub = graph.add((0.0, 0.0, 0.0))
@@ -538,79 +546,1414 @@ def test_partial_export_is_safe():
         shutil.rmtree(temporary, ignore_errors=True)
 
 
-def test_geometry_import():
-    print("geometry import")
+def _import_lake(**options):
+    """A fresh scene holding Ancient Lake's geometry, and the mesh object."""
+    path = find_ancient_lake()
+    if path is None:
+        return None, None
+    fresh()
+    bpy.ops.dkr.import_geometry(filepath=path, **options)
+    from dkr_track_editor.operators import geometry as geometry_ops
+    objects = geometry_ops.geometry_objects(bpy.context)
+    return path, (objects[0] if objects else None)
+
+
+def _identity(mesh):
+    """``[(segment, vertex), ...]`` indexed by Blender vertex, unbiased.
+
+    Stored biased by one, so that a vertex conjured from nothing - which
+    Blender fills with zeroes - reads as "no source" rather than as segment 0
+    vertex 0.
+    """
+    count = len(mesh.vertices)
+    segments = [0] * count
+    indices = [0] * count
+    mesh.attributes["dkr_segment"].data.foreach_get("value", segments)
+    mesh.attributes["dkr_vertex"].data.foreach_get("value", indices)
+    return [(s - 1, v - 1) for s, v in zip(segments, indices)]
+
+
+def _edit_mesh(obj):
+    """Open the geometry for editing and hand back its bmesh."""
+    import bmesh
+    obj.hide_select = False
+    bpy.context.view_layer.objects.active = obj
+    bpy.ops.object.mode_set(mode="EDIT")
+    bm = bmesh.from_edit_mesh(obj.data)
+    bm.faces.ensure_lookup_table()
+    bm.verts.ensure_lookup_table()
+    for face in bm.faces:
+        face.select = False
+    for edge in bm.edges:
+        edge.select = False
+    for vertex in bm.verts:
+        vertex.select = False
+    return bm
+
+
+def _face_batches(mesh, model):
+    """``[(segment, batch), ...]`` indexed by face, mirroring the exporter."""
     from dkr_track_editor.operators import geometry as geometry_ops
 
-    path = find_ancient_lake()
+    owners = geometry_ops.batch_of_vertex(model)
+    vertex_batch = [None] * len(mesh.vertices)
+    for at, (segment, vertex) in enumerate(_identity(mesh)):
+        owner = owners[segment][vertex] if vertex < len(owners[segment]) else -1
+        if owner >= 0:
+            vertex_batch[at] = (segment, owner)
+    return [
+        geometry_ops.batch_of_polygon(polygon.vertices, vertex_batch)
+        for polygon in mesh.polygons
+    ]
+
+
+def _read_flags(mesh):
+    values = [0] * len(mesh.polygons)
+    mesh.attributes["dkr_flags"].data.foreach_get("value", values)
+    return values
+
+
+def test_geometry_import():
+    """One mesh, every file vertex in it exactly once, and nothing duplicated.
+
+    This is the contract the exporter rests on: an edit is addressed as
+    ``(segment, vertex index)`` in the file, so a Blender vertex that appears
+    twice - which is what the old three-mesh import produced for any segment
+    holding batches of more than one kind - leaves "which one did the author
+    move" with no answer.
+    """
+    print("geometry import")
+    from dkr_track_editor import level_model
+    from dkr_track_editor.operators import geometry as geometry_ops
+
+    path, obj = _import_lake(include_hidden=True)
     if path is None:
         print("  skip: no extracted level models")
         return
+    check(obj is not None, "a geometry object was built")
+    if obj is None:
+        return
 
-    fresh()
-    result = bpy.ops.dkr.import_geometry(filepath=path, include_hidden=True)
-    check(result == {"FINISHED"}, "import_geometry returns FINISHED")
+    objects = geometry_ops.geometry_objects(bpy.context)
+    check(len(objects) == 1,
+          "the track is one mesh, not one per kind (got %d)" % len(objects))
+    check(str(obj[geometry_ops.PROP_GEOMETRY]) == geometry_ops.GEOMETRY_KIND,
+          "it is marked as track geometry")
+    check(str(obj.get(geometry_ops.PROP_MODEL_PATH, "")) == path,
+          "the object records the .bin it was decoded from")
 
-    meshes = [o for o in bpy.context.scene.objects if geometry_ops.PROP_GEOMETRY in o]
-    check(len(meshes) >= 1, "geometry objects created (%d)" % len(meshes))
-    kinds = {str(o[geometry_ops.PROP_GEOMETRY]) for o in meshes}
-    check(geometry_ops.SURFACE in kinds, "the drivable surface was built")
+    mesh = obj.data
+    model = level_model.load(path)
 
-    surface = [o for o in meshes if o[geometry_ops.PROP_GEOMETRY] == geometry_ops.SURFACE]
-    if surface:
-        mesh = surface[0].data
-        check(len(mesh.polygons) > 100,
-              "surface has real geometry (%d faces)" % len(mesh.polygons))
-        check("baked" in [a.name for a in mesh.color_attributes],
-              "baked vertex lighting imported as a colour attribute")
-        check(surface[0].hide_select,
-              "geometry is locked against selection so it is not picked by mistake")
+    check(len(mesh.vertices) == model.vertex_count,
+          "every file vertex is in the mesh exactly once (%d vs %d)"
+          % (len(mesh.vertices), model.vertex_count))
+    check(len(mesh.polygons) > 100,
+          "the track has real geometry (%d faces)" % len(mesh.polygons))
 
-    walls = [o for o in meshes if o[geometry_ops.PROP_GEOMETRY] == geometry_ops.INVISIBLE_WALLS]
-    if walls:
-        check(walls[0].hide_get(), "invisible walls start hidden")
-        bpy.ops.dkr.toggle_walls()
-        check(not walls[0].hide_get(), "toggle shows them")
-        bpy.ops.dkr.toggle_walls()
-        check(walls[0].hide_get(), "toggle hides them again")
+    for name, domain, kind in (
+        (geometry_ops.ATTR_SEGMENT, "POINT", "INT"),
+        (geometry_ops.ATTR_VERTEX, "POINT", "INT"),
+        (geometry_ops.ATTR_COLOUR, "POINT", "INT"),
+        (geometry_ops.ATTR_FLAGS, "FACE", "INT"),
+        (geometry_ops.ATTR_SERIAL, "FACE", "INT"),
+        (geometry_ops.ATTR_TRI_FLAGS, "FACE", "INT"),
+        (geometry_ops.ATTR_TEXTURE, "FACE", "INT"),
+        (geometry_ops.ATTR_OPAQUE, "FACE", "BOOLEAN"),
+        (geometry_ops.ATTR_UV, "CORNER", "INT32_2D"),
+    ):
+        attribute = mesh.attributes.get(name)
+        check(attribute is not None and attribute.domain == domain
+              and attribute.data_type == kind,
+              "%s is a %s attribute on the %s domain" % (name, kind, domain))
+
+    raw = [0] * len(mesh.vertices)
+    mesh.attributes["dkr_segment"].data.foreach_get("value", raw)
+    check(min(raw) >= 1,
+          "identities are stored biased by one, so zero can mean \"no source\"")
+    check(int(mesh[geometry_ops.PROP_SCHEMA]) == geometry_ops.SCHEMA,
+          "the mesh stamps the schema its attributes are written to")
+
+    identity = _identity(mesh)
+    check(len(set(identity)) == len(identity),
+          "no two vertices claim the same (segment, vertex) pair")
+    expected = {
+        (index, at)
+        for index, segment in enumerate(model.segments)
+        for at in range(len(segment.vertices))
+    }
+    check(set(identity) == expected,
+          "the identities are exactly the file's own, none missing or invented")
+
+    # A segment holding batches of more than one kind is what used to duplicate.
+    mixed = sum(
+        1 for s in model.segments
+        if len({geometry_ops.category_of(b.flags) for b in s.batches}) > 1
+    )
+    check(mixed > 0,
+          "Ancient Lake really does mix kinds within a segment (%d segments), "
+          "so this is the case that used to duplicate" % mixed)
+
+    check(geometry_ops.COLOUR_ATTRIBUTE in [a.name for a in mesh.color_attributes],
+          "baked vertex lighting imported as a colour attribute")
+
+    # The three-way split survives as material slots rather than as objects.
+    categories = set(geometry_ops.slot_categories(obj))
+    check(geometry_ops.SURFACE in categories, "surface faces have their own slot")
+    check(geometry_ops.INVISIBLE_WALLS in categories,
+          "invisible walls have their own slot")
+    check(None not in categories, "every slot names the kind it draws")
+
+    check(obj.hide_select,
+          "geometry is locked against selection so it is not picked by mistake")
 
     # Geometry must never be mistaken for a placed object.
     check(len(scene.iter_dkr_objects(bpy.context)) == 0,
           "geometry is not collected as an exportable object")
-
     check(bpy.context.scene.dkr.geometry_path == path, "geometry path remembered")
+
+
+def test_wall_visibility():
+    """Walls stay in the mesh and out of the way.
+
+    They cannot be a separate object any more, and they cannot simply be left
+    out either - their vertices are file vertices and have to be exportable. So
+    they are masked, which is only sound because batch vertex windows never
+    overlap: a wall vertex is never also a surface vertex.
+    """
+    print("invisible walls")
+    from dkr_track_editor.operators import geometry as geometry_ops
+
+    path, obj = _import_lake(include_hidden=True)
+    if path is None:
+        print("  skip: no extracted level models")
+        return
+    if obj is None or geometry_ops.WALL_GROUP not in obj.vertex_groups:
+        print("  skip: this track has no invisible walls")
+        return
+
+    modifier = obj.modifiers.get(geometry_ops.WALL_MASK)
+    check(modifier is not None and modifier.type == "MASK",
+          "a mask modifier hides the walls without deleting them")
+    check(modifier is not None and modifier.show_viewport,
+          "invisible walls start hidden")
+
+    before = len(obj.data.vertices)
+    bpy.ops.dkr.toggle_walls()
+    check(not obj.modifiers[geometry_ops.WALL_MASK].show_viewport, "toggle shows them")
+    bpy.ops.dkr.toggle_walls()
+    check(obj.modifiers[geometry_ops.WALL_MASK].show_viewport, "toggle hides them again")
+    check(len(obj.data.vertices) == before,
+          "and the mesh itself never loses a vertex either way")
+
+
+def test_geometry_roundtrip():
+    """Import, change nothing, export: the bytes must be the ones that came in.
+
+    Compared inflated rather than as containers: our DEFLATE stream will differ
+    from Rare's and that says nothing about the model.
+    """
+    print("geometry round trip")
+    from dkr_track_editor import level_model, level_model_encoder
+    from dkr_track_editor.operators import geometry_export
+
+    path, obj = _import_lake(include_hidden=True)
+    if path is None:
+        print("  skip: no extracted level models")
+        return
+
+    edit = geometry_export.build_edited_model(bpy.context)
+    check(edit is not None, "the exporter found the geometry")
+    if edit is None:
+        return
+    check(not edit.edited,
+          "an untouched import reports no changes (got %r)" % edit.describe())
+    check(not edit.notes, "and nothing worth warning about (%r)" % (edit.notes,))
+
+    with open(path, "rb") as handle:
+        base = level_model.decompress(handle.read())
+    written = level_model.decompress(level_model_encoder.pack(edit.model))
+    check(written == base,
+          "the re-encoded model is byte-identical to the shipped one "
+          "(%d vs %d bytes)" % (len(written), len(base)))
+
+    # And the operator that reports it agrees.
+    check(bpy.ops.dkr.check_geometry() == {"FINISHED"},
+          "check_geometry runs on an untouched import")
+
+
+def test_geometry_vertex_edit():
+    """Move one vertex: exactly that one moves, and its box follows.
+
+    The bounding box matters more than it looks. The game culls a segment
+    against it before drawing, so a vertex moved outside a stale box comes out
+    as scenery that vanishes rather than as a bounding box bug.
+    """
+    print("moving a vertex")
+    from dkr_track_editor import level_model, level_model_encoder
+    from dkr_track_editor.operators import geometry_export
+
+    path, obj = _import_lake(include_hidden=True)
+    if path is None:
+        print("  skip: no extracted level models")
+        return
+
+    mesh = obj.data
+    base_model = level_model.load(path)
+    moved_at = 7
+    segment_index, vertex_index = _identity(mesh)[moved_at]
+    # Blender Z is the file's Y, so lifting it here raises it there.
+    mesh.vertices[moved_at].co.z += 4000.0
+
+    edit = geometry_export.build_edited_model(bpy.context)
+    check(edit.summary.moved == 1,
+          "exactly one vertex is reported moved (got %d)" % edit.summary.moved)
+    check(edit.summary.bounds > 0,
+          "and the derived bounds were brought back in line")
+
+    differing = [
+        (s, v)
+        for s, segment in enumerate(base_model.segments)
+        for v in range(len(segment.vertices))
+        if segment.vertices[v] != edit.model.segments[s].vertices[v]
+    ]
+    check(differing == [(segment_index, vertex_index)],
+          "exactly the moved vertex differs in the file (got %r)" % (differing,))
+
+    was = base_model.segments[segment_index].vertices[vertex_index]
+    now = edit.model.segments[segment_index].vertices[vertex_index]
+    check(now[1] == was[1] + 4000 and now[0] == was[0] and now[2] == was[2],
+          "it moved 4000 up the file's Y and nowhere else (%r -> %r)" % (was, now))
+
+    box = edit.model.bounding_boxes[segment_index]
+    check(box[4] >= now[1],
+          "its segment's bounding box followed it (upper Y %d, vertex Y %d)"
+          % (box[4], now[1]))
+    check(tuple(box) != tuple(base_model.bounding_boxes[segment_index]),
+          "which means the box actually changed")
+
+    # And it survives the file.
+    reparsed = level_model.parse(
+        level_model.decompress(level_model_encoder.pack(edit.model))
+    )
+    check(reparsed.segments[segment_index].vertices[vertex_index] == now,
+          "the moved vertex reads back from the encoded model")
+    check(tuple(reparsed.bounding_boxes[segment_index]) == tuple(box),
+          "so does the recomputed box")
+    check(reparsed.bounds == edit.model.bounds,
+          "and the header bounds it recomputed")
+
+
+def test_geometry_refuses_orphans():
+    """A vertex with no segment and no face has nowhere to go, and says so.
+
+    A duplicated identity is no longer an error: Blender gives an extruded
+    vertex the identity of the one it was pulled from, which is how it says
+    "this came from that", so the same pair legitimately appears twice. What
+    still has no answer is a vertex conjured from nothing and attached to
+    nothing - it names no segment and no face names it.
+    """
+    print("refusing an orphaned vertex")
+    from dkr_track_editor.operators import geometry_export
+
+    path, obj = _import_lake(include_hidden=True)
+    if path is None:
+        print("  skip: no extracted level models")
+        return
+
+    mesh = obj.data
+    before = len(mesh.vertices)
+    bm = _edit_mesh(obj)
+    bm.verts.new((0.0, 0.0, 9000.0))
+    import bmesh
+    bmesh.update_edit_mesh(mesh)
+    bpy.ops.object.mode_set(mode="OBJECT")
+    check(len(mesh.vertices) == before + 1, "a loose vertex really was added")
+
+    try:
+        geometry_export.build_edited_model(bpy.context)
+        check(False, "an orphaned vertex is refused")
+    except geometry_export.GeometryExportError as error:
+        message = str(error)
+        check("not part of any face" in message,
+              "an orphaned vertex is refused, saying why (%s)" % message[:70])
+        check(str(before) in message, "and names which vertex it means")
+        # An index alone is no use: Blender gives an author no way to jump to
+        # vertex 1671, so the message has to name the command that finds it.
+        check("Loose Geometry" in message,
+              "and names the Blender command that selects them")
+
+    # A new island that does have faces is a different mistake with a different
+    # fix, and used to be reported as "belongs to no face", which was false.
+    path, obj = _import_lake(include_hidden=True)
+    mesh = obj.data
+    bm = _edit_mesh(obj)
+    made = [bm.verts.new((float(i) * 100.0, 0.0, 9000.0)) for i in range(3)]
+    bm.faces.new(made)
+    bmesh.update_edit_mesh(mesh)
+    bpy.ops.object.mode_set(mode="OBJECT")
+    try:
+        geometry_export.build_edited_model(bpy.context)
+        check(False, "a detached island is refused")
+    except geometry_export.GeometryExportError as error:
+        message = str(error)
+        check("no face joins to the track" in message,
+              "a detached island is refused as detached, not as loose (%s)"
+              % message[:70])
+        check("not part of any face" not in message,
+              "and is not described as having no faces, because it has one")
+
+
+def test_geometry_reaches_chained_new_faces():
+    """New geometry several faces out from the road still finds its segment.
+
+    A vertex built from nothing inherits nothing, so only the faces around it
+    can say where it belongs - and that answer has to spread outwards. Reading
+    it once would place only what touches the existing track and refuse a ramp
+    built two faces further on, which is an ordinary thing to model.
+    """
+    print("new geometry chained away from the track")
+    from mathutils import Vector
+
+    from dkr_track_editor.operators import geometry_export
+
+    path, obj = _import_lake(include_hidden=True)
+    if path is None:
+        print("  skip: no extracted level models")
+        return
+
+    mesh = obj.data
+    bm = _edit_mesh(obj)
+    anchor = bm.faces[8]
+    first, second = list(anchor.verts)[:2]
+    one = bm.verts.new(first.co + Vector((0.0, 0.0, 300.0)))
+    two = bm.verts.new(second.co + Vector((0.0, 0.0, 300.0)))
+    three = bm.verts.new(one.co + Vector((0.0, 0.0, 300.0)))
+    bm.faces.new((first, second, one))   # touches the track, so names `one`
+    bm.faces.new((second, one, two))     # names `two`, but only once `one` is known
+    bm.faces.new((one, two, three))      # names `three`, one step further out
+    bmesh.update_edit_mesh(mesh)
+    bpy.ops.object.mode_set(mode="OBJECT")
+
+    edit = geometry_export.build_edited_model(bpy.context)
+    check(edit.rebuilt, "it exports through the rebuilding path")
+    check(edit.summary.faces_added == 3,
+          "all three new triangles reached the model (got %d)"
+          % edit.summary.faces_added)
+
+
+def test_geometry_schema_guard():
+    """A mesh from an older addon is refused, not read one slot off.
+
+    The identities went biased by one, so an older mesh would not fail to
+    read - it would name a segment that exists and place every vertex wrong.
+    Silent and wrong is why this is a refusal.
+    """
+    print("schema guard")
+    from dkr_track_editor.operators import geometry as geometry_ops
+    from dkr_track_editor.operators import geometry_export
+
+    path, obj = _import_lake(include_hidden=True)
+    if path is None:
+        print("  skip: no extracted level models")
+        return
+
+    del obj.data[geometry_ops.PROP_SCHEMA]
+    try:
+        geometry_export.build_edited_model(bpy.context)
+        check(False, "an unstamped mesh is refused")
+    except geometry_export.GeometryExportError as error:
+        check("import the track again" in str(error),
+              "an unstamped mesh is refused, telling the author to re-import")
+
+    obj.data[geometry_ops.PROP_SCHEMA] = geometry_ops.SCHEMA - 1
+    try:
+        geometry_export.build_edited_model(bpy.context)
+        check(False, "an older schema is refused")
+    except geometry_export.GeometryExportError as error:
+        check("schema" in str(error), "an older schema is refused by number")
+
+
+def test_geometry_batch_flags():
+    """Render flags are per batch, so all of a batch's faces have to agree."""
+    print("batch render flags")
+    from dkr_track_editor import level_model
+    from dkr_track_editor.operators import geometry as geometry_ops
+    from dkr_track_editor.operators import geometry_export
+
+    path, obj = _import_lake(include_hidden=True)
+    if path is None:
+        print("  skip: no extracted level models")
+        return
+
+    mesh = obj.data
+    model = level_model.load(path)
+    batches = _face_batches(mesh, model)
+
+    counts = {}
+    for key in batches:
+        if key is not None:
+            counts[key] = counts.get(key, 0) + 1
+    target = next(
+        (key for key, count in sorted(counts.items())
+         if count > 1
+         and not (model.segments[key[0]].batches[key[1]].flags
+                  & level_model.RENDER_HIDDEN)),
+        None,
+    )
+    if target is None:
+        print("  skip: no visible batch with more than one face")
+        return
+
+    was = model.segments[target[0]].batches[target[1]].flags
+    now = was | level_model.RENDER_HIDDEN
+
+    values = _read_flags(mesh)
+    faces = [i for i, key in enumerate(batches) if key == target]
+    for index in faces:
+        values[index] = geometry_ops.to_signed32(now)
+    mesh.attributes[geometry_ops.ATTR_FLAGS].data.foreach_set("value", values)
+
+    edit = geometry_export.build_edited_model(bpy.context)
+    check(edit.summary.flags == 1,
+          "one batch is reported reflagged (got %d)" % edit.summary.flags)
+    check(edit.summary.moved == 0, "and nothing moved")
+    check(edit.model.segments[target[0]].batches[target[1]].flags == now,
+          "the batch carries its new flags")
+    check(geometry_ops.category_of(now) == geometry_ops.INVISIBLE_WALLS,
+          "setting RENDER_HIDDEN with collision left on makes an invisible wall")
+
+    # The whole u32 has to survive, not just the two bits that name the kind.
+    check(edit.model.segments[target[0]].batches[target[1]].flags & ~0x300
+          == was & ~0x300,
+          "every other flag bit came through untouched")
+
+    check(not edit.rebuilt,
+          "reflagging a whole batch keeps the in-place path, so the rest of "
+          "the file stays byte-identical")
+
+    # One face flagged differently from the rest of its batch used to be
+    # refused, because a batch is one draw call and the layout could not be
+    # changed. It can now: the odd face gets a batch of its own.
+    values[faces[0]] = geometry_ops.to_signed32(was)
+    mesh.attributes[geometry_ops.ATTR_FLAGS].data.foreach_set("value", values)
+    split = geometry_export.build_edited_model(bpy.context)
+    check(split.rebuilt,
+          "a batch flagged two ways takes the rebuilding path instead")
+    kept = [b for b in split.model.segments[target[0]].batches if b.flags == was]
+    made = [b for b in split.model.segments[target[0]].batches if b.flags == now]
+    check(kept and made,
+          "and the segment ends up with both flag values in it (%d and %d "
+          "batches)" % (len(kept), len(made)))
+
+
+def test_geometry_in_package():
+    """A .dkrmap ships a model payload when, and only when, geometry changed.
+
+    A track that only reworks objects must ship none: its header then keeps
+    pointing at the base track's geometry, and the package stays small and
+    stays correct.
+    """
+    print("geometry in the package")
+    from dkr_track_editor import level_model, prefs
+
+    path, obj = _import_lake(include_hidden=True)
+    if path is None:
+        print("  skip: no extracted level models")
+        return
+    if prefs.resolve(bpy.context) is None:
+        print("  skip: no decomp assets")
+        return
+
+    bpy.ops.dkr.place_object(object_id="ASSET_OBJECT_SETUPPOINT")
+    settings = bpy.context.scene.dkr
+    settings.track_name = "Ancient Lake Reshaped"
+    settings.track_id = "ancient-lake-reshaped"
+
+    temporary = tempfile.mkdtemp(prefix="dkr-geometry-")
+    try:
+        target = os.path.join(temporary, "ancient-lake-reshaped.dkrmap")
+        result = bpy.ops.dkr.export_dkrmap(filepath=target, validate_first=False)
+        check(result == {"FINISHED"}, "export with untouched geometry succeeds")
+
+        model_bin = os.path.join(target, "model.bin")
+        check(not os.path.isfile(model_bin),
+              "unchanged geometry ships no model payload")
+        with open(os.path.join(target, "manifest.json"), "r", encoding="utf-8") as h:
+            manifest = json.load(h)
+        check(not any(e["section"] == "LEVEL_MODELS" for e in manifest["adds"]),
+              "and the manifest does not claim one")
+
+        # Now reshape it, and the payload has to appear.
+        obj.data.vertices[11].co.z += 2500.0
+        result = bpy.ops.dkr.export_dkrmap(filepath=target, validate_first=False)
+        check(result == {"FINISHED"}, "export with edited geometry succeeds")
+        check(os.path.isfile(model_bin), "edited geometry ships model.bin")
+
+        with open(os.path.join(target, "manifest.json"), "r", encoding="utf-8") as h:
+            manifest = json.load(h)
+        entries = [e for e in manifest["adds"] if e["section"] == "LEVEL_MODELS"]
+        check(len(entries) == 1 and entries[0]["file"] == "model.bin",
+              "the manifest claims it under LEVEL_MODELS")
+
+        claimed = {entry["file"] for entry in manifest["adds"]}
+        present = {n for n in os.listdir(target) if n.endswith(".bin")}
+        check(claimed == present,
+              "the manifest still claims exactly what is on disk "
+              "(claims %s, has %s)" % (sorted(claimed), sorted(present)))
+
+        if os.path.isfile(model_bin):
+            with open(model_bin, "rb") as handle:
+                shipped = level_model.parse(level_model.decompress(handle.read()))
+            source = level_model.load(path)
+            differing = [
+                (s, v)
+                for s, segment in enumerate(source.segments)
+                for v in range(len(segment.vertices))
+                if segment.vertices[v] != shipped.segments[s].vertices[v]
+            ]
+            check(len(differing) == 1,
+                  "the shipped model differs from the base by exactly the one "
+                  "vertex that moved (got %r)" % (differing,))
+    finally:
+        shutil.rmtree(temporary, ignore_errors=True)
+
+
+def test_stale_object_maps():
+    """An export that could not compile the maps must not pass for success.
+
+    The addon writes ``objects_*.bin`` itself, and the only reason it cannot is
+    that the decomp assets are unreachable. A file left from an earlier export
+    then no longer matches the scene. Dropping it would be worse than keeping
+    it - a header whose slot has no payload points at another level's objects
+    and hangs - so it ships, and the package has to say so.
+    """
+    print("stale object maps")
+    from dkr_track_editor import prefs
+
+    if prefs.resolve(bpy.context) is None:
+        print("  skip: no decomp assets")
+        return
+
+    fresh()
+    bpy.ops.dkr.place_object(object_id="ASSET_OBJECT_SETUPPOINT")
+    settings = bpy.context.scene.dkr
+    settings.track_name = "Stale Maps"
+    settings.track_id = "stale-maps"
+
+    temporary = tempfile.mkdtemp(prefix="dkr-stale-")
+    original = prefs.resolve
+    try:
+        target = os.path.join(temporary, "stale-maps.dkrmap")
+        bpy.ops.dkr.export_dkrmap(filepath=target, validate_first=False)
+        compiled = os.path.join(target, "objects_structure.bin")
+        check(os.path.isfile(compiled), "the first export compiled the maps")
+        if not os.path.isfile(compiled):
+            return
+        with open(compiled, "rb") as handle:
+            first = handle.read()
+
+        # Change the scene, then export with the asset tree out of reach.
+        bpy.ops.dkr.place_object(object_id="ASSET_OBJECT_GROUNDZIPPER")
+        prefs.resolve = lambda context=None: None
+        result = bpy.ops.dkr.export_dkrmap(filepath=target, validate_first=False)
+        check(result == {"FINISHED"}, "the export still finishes")
+
+        with open(compiled, "rb") as handle:
+            second = handle.read()
+        check(second == first,
+              "the payload is the earlier one, because nothing recompiled it")
+
+        source = gltf_io.load(os.path.join(target, "source",
+                                           "objects_structure.gltf"))
+        check(len(source.objects) == 2,
+              "while source/ did get the object that was added (%d)"
+              % len(source.objects))
+
+        # That mismatch is the whole problem, so the package has to record it.
+        with open(os.path.join(target, "HOW-TO-BUILD.md"), "r",
+                  encoding="utf-8") as handle:
+            notes = handle.read()
+        check("could not be compiled this time" in notes,
+              "HOW-TO-BUILD.md says the shipped maps are from an earlier export")
+        check("objects_structure.bin" in notes.split("could not be compiled")[-1],
+              "and names which payload it means")
+    finally:
+        prefs.resolve = original
+        shutil.rmtree(temporary, ignore_errors=True)
+
+
+def test_memory_budget():
+    """The load budget has to be visible before an export, not after a crash.
+
+    The game reserves a fixed arena for a level model and the heaviest retail
+    track already sits at 68% of it, so an author adding geometry needs the
+    ceiling in front of them. The figures come from level_model_layout so the
+    panel cannot drift from what the encoder believes.
+    """
+    print("memory budget")
+    from dkr_track_editor import level_model, level_model_layout as layout
+    from dkr_track_editor.operators import geometry as geometry_ops
+
+    path, obj = _import_lake(include_hidden=True)
+    if path is None:
+        print("  skip: no extracted level models")
+        return
+
+    model = level_model.load(path)
+    check(int(obj[geometry_ops.PROP_RUNTIME_SIZE]) == layout.runtime_size(model),
+          "the object records what the layout module says it costs")
+    check(int(obj[geometry_ops.PROP_HEADROOM]) == layout.headroom_triangles(model),
+          "and how many more triangles fit")
+
+    budget = geometry_ops.budget_of(obj)
+    check(budget is not None, "the panel can read it back")
+    if budget is None:
+        return
+    fraction, headroom = budget
+    check(0.0 < fraction < 1.0,
+          "Ancient Lake fits the budget, at %d%%" % round(fraction * 100))
+    check(headroom > 0, "with room to spare (%d triangles)" % headroom)
+
+    # The quieter ceiling, and the more dangerous one: a memory overflow at
+    # least writes a debug print, while crowding the collision candidate list
+    # produces no diagnostic at all and shows up as falling through the floor
+    # somewhere other than the cause.
+    pressure = geometry_ops.collision_pressure(obj)
+    check(pressure is not None, "the collision pressure is recorded too")
+    if pressure is not None:
+        count, tolerated, candidates = pressure
+        check(count == len(layout.oversized_segments(model)),
+              "and matches what the layout module counts")
+        check(count <= tolerated,
+              "Ancient Lake does not crowd the %d collision slots (%d oversized)"
+              % (candidates, count))
+        check(not layout.check_collision_pressure(model),
+              "so it raises no collision warning")
+
+    # The invariant the face-to-batch lookup rests on, checked where it is used.
+    check(not layout.check_windows(model),
+          "the batch windows tile every segment, which is what the face kinds "
+          "and the wall mask are resolved through")
+
+
+def test_geometry_add_geometry():
+    """Extruding a face adds geometry, which means the blob is laid out afresh.
+
+    Extrude is how anyone actually adds to a mesh, and it produces quads out of
+    the sides it sweeps - so the export has to fan them into triangles rather
+    than refuse, or the commonest modelling operation there is would be
+    unusable.
+    """
+    print("adding geometry")
+    from dkr_track_editor import level_model, level_model_layout as layout
+    from dkr_track_editor.operators import geometry_export
+
+    path, obj = _import_lake(include_hidden=True)
+    if path is None:
+        print("  skip: no extracted level models")
+        return
+
+    import bmesh
+    mesh = obj.data
+    before_vertices, before_faces = len(mesh.vertices), len(mesh.polygons)
+    bm = _edit_mesh(obj)
+    bm.faces[8].select = True
+    bmesh.update_edit_mesh(mesh)
+    bpy.ops.mesh.extrude_region_move(
+        TRANSFORM_OT_translate={"value": (0.0, 0.0, 400.0)})
+    bpy.ops.object.mode_set(mode="OBJECT")
+
+    check(len(mesh.vertices) > before_vertices, "the extrude added vertices")
+    quads = sum(1 for p in mesh.polygons if len(p.vertices) > 3)
+    check(quads > 0, "and it made quads, which the file cannot store (%d)" % quads)
+
+    edit = geometry_export.build_edited_model(bpy.context)
+    check(edit.rebuilt, "so the export lays the model out afresh")
+    check(edit.ships, "and has something to ship")
+
+    base = level_model.load(path)
+    check(edit.model.vertex_count > base.vertex_count,
+          "the model gained vertices (%d -> %d)"
+          % (base.vertex_count, edit.model.vertex_count))
+    check(edit.model.triangle_count == base.triangle_count + 7,
+          "and gained 7 triangles: one new cap plus three quads fanned into "
+          "two each (got %d)" % (edit.model.triangle_count - base.triangle_count))
+
+    # The rebuilt model has to be a model, not merely bytes.
+    from dkr_track_editor import level_model_encoder
+    blob = level_model.decompress(level_model_encoder.pack(edit.model))
+    reparsed = level_model.parse(blob)
+    check(reparsed.vertex_count == edit.model.vertex_count,
+          "it re-encodes and re-parses with the same vertex count")
+    check(reparsed.model_size == len(blob),
+          "modelSize matches the blob it declares (%d vs %d)"
+          % (reparsed.model_size, len(blob)))
+    check(not layout.check_windows(reparsed),
+          "and the batch windows still tile every segment, which the importer "
+          "and the wall mask both rely on")
+
+    # Every original vertex still has to be somewhere in the rebuilt model.
+    kept = {v for segment in reparsed.segments for v in segment.vertices}
+    missing = [v for segment in base.segments for v in segment.vertices
+               if v not in kept]
+    check(not missing,
+          "no original vertex position was lost in the rebuild (%d missing)"
+          % len(missing))
+
+
+def test_geometry_remove_geometry():
+    """Deleting faces has to shrink the track rather than be ignored."""
+    print("removing geometry")
+    from dkr_track_editor import level_model
+    from dkr_track_editor.operators import geometry_export
+
+    path, obj = _import_lake(include_hidden=True)
+    if path is None:
+        print("  skip: no extracted level models")
+        return
+
+    import bmesh
+    mesh = obj.data
+    before = len(mesh.polygons)
+    bm = _edit_mesh(obj)
+    for face in bm.faces[:3]:
+        face.select = True
+    bmesh.update_edit_mesh(mesh)
+    bpy.ops.mesh.delete(type="ONLY_FACE")
+    bpy.ops.object.mode_set(mode="OBJECT")
+    check(len(mesh.polygons) == before - 3, "three faces really were deleted")
+
+    edit = geometry_export.build_edited_model(bpy.context)
+    check(edit.rebuilt, "the export rebuilds the layout")
+    base = level_model.load(path)
+    check(edit.model.triangle_count == base.triangle_count - 3,
+          "and the model lost exactly those three triangles (%d -> %d)"
+          % (base.triangle_count, edit.model.triangle_count))
+    check(edit.summary.faces_removed == 3,
+          "which is what it reports (%r)" % edit.describe())
+
+
+def test_geometry_rebuild_needs_the_whole_track():
+    """A partial import must never be allowed to rebuild the model.
+
+    Importing without the invisible walls leaves their faces out of the mesh.
+    Reshaping is still safe - the file keeps its own triangles - but rebuilding
+    a segment from that mesh would delete 986 walls from the retail set without
+    anyone asking. So the rebuilding path refuses what the reshaping path
+    allows.
+    """
+    print("rebuild refuses a partial import")
+    from dkr_track_editor.operators import geometry as geometry_ops
+    from dkr_track_editor.operators import geometry_export
+
+    path, obj = _import_lake(include_hidden=False)
+    if path is None:
+        print("  skip: no extracted level models")
+        return
+    omitted = int(obj.get(geometry_ops.PROP_OMITTED, 0) or 0)
+    if not omitted:
+        print("  skip: this track has no hidden faces to leave out")
+        return
+    check(omitted > 0, "the import recorded the faces it left out (%d)" % omitted)
+
+    # Reshaping is still fine, because the file keeps its own triangles.
+    obj.data.vertices[7].co.z += 100.0
+    edit = geometry_export.build_edited_model(bpy.context)
+    check(not edit.rebuilt and edit.summary.moved == 1,
+          "moving a vertex still takes the in-place path")
+
+    # Adding geometry is not.
+    import bmesh
+    mesh = obj.data
+    bm = _edit_mesh(obj)
+    bm.faces[8].select = True
+    bmesh.update_edit_mesh(mesh)
+    bpy.ops.mesh.extrude_region_move(
+        TRANSFORM_OT_translate={"value": (0.0, 0.0, 400.0)})
+    bpy.ops.object.mode_set(mode="OBJECT")
+    try:
+        geometry_export.build_edited_model(bpy.context)
+        check(False, "a rebuild from a partial import is refused")
+    except geometry_export.GeometryExportError as error:
+        check("Include Invisible Walls" in str(error),
+              "a rebuild from a partial import is refused, naming the option "
+              "to turn on (%s)" % str(error)[:80])
+
+
+def test_unusable_mesh_is_named():
+    """A mesh the author modelled has to be named, not skipped in silence.
+
+    It is the first thing anyone building a track from scratch will do, and the
+    export cannot use it - a vertex has to name the segment it belongs to and a
+    Blender mesh names none. Saying nothing leaves them with an empty package
+    and no reason for it.
+    """
+    print("unusable meshes")
+    from dkr_track_editor.operators import geometry as geometry_ops
+
+    fresh()
+    bpy.ops.mesh.primitive_cube_add(size=500.0)
+    cube = bpy.context.active_object
+    check(geometry_ops.unusable_meshes(bpy.context) == [cube],
+          "a mesh the author modelled is spotted")
+
+    # The addon's own objects are not attempts at geometry and must not be
+    # reported: a placed object drawn with its artwork is a mesh too.
+    bpy.ops.dkr.place_object(object_id="ASSET_OBJECT_SETUPPOINT")
+    bpy.ops.dkr.place_object(object_id="ASSET_OBJECT_COIN")
+    check(geometry_ops.unusable_meshes(bpy.context) == [cube],
+          "placed objects are not reported, whatever they are drawn with")
+
+    path = find_ancient_lake()
+    if path is not None:
+        bpy.ops.dkr.import_geometry(filepath=path, replace_existing=True)
+        check(cube in geometry_ops.unusable_meshes(bpy.context),
+              "and imported track geometry is not reported either")
+        check(all(geometry_ops.PROP_GEOMETRY not in o
+                  for o in geometry_ops.unusable_meshes(bpy.context)),
+              "only the author's own mesh is")
+
+
+def test_identified_fields_are_visible():
+    """A field the decomp has identified must not stay hidden as a raw byte.
+
+    The catalogue keeps ``unkB`` as the name, because that name is the custom
+    property key an existing .blend already holds and renaming it would drop the
+    author's value in silence. The meaning rides alongside as a label - and the
+    label is what has to bring the field out from behind Show Raw Bytes, or a
+    checkpoint's per-lane offsets stay buried under a name that says nothing.
+    """
+    print("identified fields")
+    from dkr_track_editor.ui import panels
+
+    catalog = catalog_module.load()
+    checkpoint = catalog.get("ASSET_OBJECT_CHECKPOINT")
+    if checkpoint is None:
+        print("  skip: no checkpoint in the catalogue")
+        return
+
+    labelled = [f for f in checkpoint.fields if f.label != f.name]
+    check(len(labelled) >= 12,
+          "the checkpoint's per-lane fields carry labels (%d)" % len(labelled))
+    check(all(f.is_raw for f in labelled),
+          "and they are all still named unk*, so the raw filter would catch them")
+    check(not any(panels.is_hidden_raw(f, False) for f in labelled),
+          "yet none is hidden with Show Raw Bytes off")
+
+    unlabelled = [f for f in checkpoint.fields if f.is_raw and f.label == f.name]
+    check(all(panels.is_hidden_raw(f, False) for f in unlabelled),
+          "while %d genuinely unidentified byte(s) stay hidden" % len(unlabelled))
+    check(not any(panels.is_hidden_raw(f, True) for f in unlabelled),
+          "and Show Raw Bytes still reveals those")
+
+
+def _pick(subject):
+    """Any valid member of an enum, so a test can answer a choice."""
+    catalog = catalog_module.load()
+    members = sorted(catalog.raw.get("enumValues", {}).get(subject, {}))
+    return members[0] if members else None
+
+
+def test_header_from_scratch():
+    """A track with no ancestor can now produce a header, and must answer first.
+
+    A remix inherits two hundred bytes from the track it is built on. A track
+    modelled from scratch inherits nothing, and the header is what points at the
+    geometry - so without one the package has nothing to load even once the
+    geometry exists.
+    """
+    print("level header from scratch")
+    from dkr_track_editor import level_header_template as template
+    from dkr_track_editor.operators import header as header_ops
+
+    fresh()
+    check(not header_ops.overrides(bpy.context),
+          "a fresh scene answers nothing")
+    check(sorted(header_ops.unanswered(bpy.context)) == ["/race-type", "/world"],
+          "and the two fields with no default are the ones outstanding (%r)"
+          % (header_ops.unanswered(bpy.context),))
+
+    check(bpy.ops.dkr.header_defaults() == {"FINISHED"}, "Fill Defaults runs")
+    filled = header_ops.overrides(bpy.context)
+    check(len(filled) >= 10, "it answers most of the form (%d)" % len(filled))
+    check(sorted(header_ops.unanswered(bpy.context)) == ["/race-type", "/world"],
+          "but never invents a world or a race type, because zero is a real "
+          "value for both rather than an absence")
+
+    world = _pick("World")
+    race = _pick("RaceType")
+    if not world or not race:
+        print("  skip: the catalogue has no World/RaceType enum")
+        return
+    bpy.context.scene[header_ops.key_for("/world")] = world
+    bpy.context.scene[header_ops.key_for("/race-type")] = race
+    check(not header_ops.unanswered(bpy.context),
+          "answering those two completes the header")
+
+    # The template has to accept what the panel collected, unchanged.
+    document = template.document(header_ops.overrides(bpy.context))
+    check(document.get("world") == world,
+          "the answer reaches the document (%r)" % document.get("world"))
+
+
+def test_header_reaches_the_package():
+    """The authored header has to end up in the .dkrmap, and a partial one must not."""
+    print("authored header in the package")
+    from dkr_track_editor import prefs
+    from dkr_track_editor.operators import header as header_ops
+
+    if prefs.resolve(bpy.context) is None:
+        print("  skip: no decomp assets")
+        return
+    world, race = _pick("World"), _pick("RaceType")
+    if not world or not race:
+        print("  skip: the catalogue has no World/RaceType enum")
+        return
+
+    fresh()
+    bpy.ops.dkr.place_object(object_id="ASSET_OBJECT_SETUPPOINT")
+    settings = bpy.context.scene.dkr
+    settings.track_name = "Scratch Track"
+    settings.track_id = "scratch-track"
+
+    temporary = tempfile.mkdtemp(prefix="dkr-header-")
+    try:
+        target = os.path.join(temporary, "scratch-track.dkrmap")
+
+        # Answering only some of it is refused, not filled in: the two fields
+        # with no default are world and race type, and shipping zero for them
+        # would quietly make the track something else.
+        bpy.ops.dkr.header_defaults()
+        try:
+            bpy.ops.dkr.export_dkrmap(filepath=target, validate_first=False)
+            check(False, "a partly answered header is refused")
+        except RuntimeError as error:
+            check("unanswered" in str(error),
+                  "a partly answered header is refused (%s)" % str(error)[:70])
+            check("/world" in str(error) and "/race-type" in str(error),
+                  "and the message names which fields")
+
+        bpy.context.scene[header_ops.key_for("/world")] = world
+        bpy.context.scene[header_ops.key_for("/race-type")] = race
+        result = bpy.ops.dkr.export_dkrmap(filepath=target, validate_first=False)
+        check(result == {"FINISHED"}, "a complete header exports")
+
+        header_bin = os.path.join(target, "header.bin")
+        check(os.path.isfile(header_bin), "header.bin is written")
+        if os.path.isfile(header_bin):
+            with open(header_bin, "rb") as handle:
+                payload = handle.read()
+            check(len(payload) > 0, "and it holds %d bytes" % len(payload))
+
+        with open(os.path.join(target, "manifest.json"), "r", encoding="utf-8") as h:
+            manifest = json.load(h)
+        check(any(e["section"] == "LEVEL_HEADERS" for e in manifest["adds"]),
+              "the manifest claims it")
+        # A header authored from nothing points at no geometry: the template
+        # leaves /model for the runtime to patch from a LEVEL_MODELS payload,
+        # and a scratch track has none. The package is well formed and would
+        # still not load, so the export has to say so.
+        check(not any(e["section"] == "LEVEL_MODELS" for e in manifest["adds"]),
+              "and the package really does ship without geometry, which is the "
+              "case the warning is for")
+        claimed = {e["file"] for e in manifest["adds"]}
+        present = {n for n in os.listdir(target) if n.endswith(".bin")}
+        check(claimed == present,
+              "and still claims exactly what is on disk (%s vs %s)"
+              % (sorted(claimed), sorted(present)))
+    finally:
+        shutil.rmtree(temporary, ignore_errors=True)
+
+
+def test_surface_types():
+    """What the ground behaves like rides on the texture table entry.
+
+    Not on the triangle and not on the texture file - so two entries can show
+    one image and behave differently, which is how the game gets a picture that
+    is grass in one place and road in another. A material keyed by image would
+    merge exactly the entries the format keeps apart, so they are keyed by entry.
+    """
+    print("surface types")
+    from dkr_track_editor import level_model
+    from dkr_track_editor.operators import geometry as geometry_ops
+    from dkr_track_editor.operators import geometry_export
+
+    path, obj = _import_lake(include_hidden=True)
+    if path is None:
+        print("  skip: no extracted level models")
+        return
+
+    model = level_model.load(path)
+    found = geometry_ops.surface_types(obj)
+    check(bool(found), "the materials carry surface types (%d)" % len(found))
+
+    wrong = [
+        (i, v) for i, v in found.items()
+        if i >= len(model.textures) or model.textures[i].surface_type != v
+    ]
+    check(not wrong,
+          "and every one matches its texture table entry (%r)" % (wrong[:3],))
+
+    # Keyed by kind AND entry, so one entry drawn as both surface and
+    # decoration is two materials - but they must agree about the entry, since
+    # the surface type belongs to it rather than to either of them.
+    pairs = [(m.get(geometry_ops.PROP_CATEGORY),
+              int(m.get(geometry_ops.PROP_TEXTURE_INDEX, -1)))
+             for m in obj.data.materials if m is not None]
+    real = [p for p in pairs if p[1] >= 0]
+    check(len(real) == len(set(real)),
+          "no two materials share a (kind, texture entry) pair")
+    check(not geometry_ops.surface_conflicts(obj),
+          "and an import never disagrees with itself")
+
+    # Untouched, it must report nothing - this runs on every export now, so a
+    # mistake here would break the byte-identical round trip everywhere.
+    edit = geometry_export.build_edited_model(bpy.context)
+    check(not edit.edited and edit.summary.surfaces == 0,
+          "an untouched import reports no surface change (%r)" % edit.describe())
+
+    # Now change one and it has to reach the model.
+    target = sorted(found)[0]
+    material = next(
+        m for m in obj.data.materials
+        if m is not None and int(m.get(geometry_ops.PROP_TEXTURE_INDEX, -1)) == target
+    )
+    was = int(material[geometry_ops.PROP_SURFACE])
+    now = 1 if was != 1 else 13
+    material[geometry_ops.PROP_SURFACE] = now
+
+    edit = geometry_export.build_edited_model(bpy.context)
+    check(edit.summary.surfaces == 1,
+          "changing one reports one (%r)" % edit.describe())
+    check(edit.ships, "and the package would ship it")
+    check(edit.model.textures[target].surface_type == now,
+          "the texture table entry carries the new type")
+    check(not edit.rebuilt,
+          "and it stays on the in-place path, because a surface type changes "
+          "no counts")
+
+    # It has to survive the file, since the byte is written on the entry.
+    from dkr_track_editor import level_model_encoder
+    reparsed = level_model.parse(
+        level_model.decompress(level_model_encoder.pack(edit.model))
+    )
+    check(reparsed.textures[target].surface_type == now,
+          "and reads back from the encoded model")
+    check(geometry_ops.surface_name(now) != "surface %d" % now,
+          "the picker can name it (%s)" % geometry_ops.surface_name(now))
+
+    # Two materials drawing one entry must not be allowed to disagree. Ancient
+    # Lake has no entry drawn as two kinds, so the state is built rather than
+    # found - leaving the refusal unexercised because no retail track happens to
+    # reach it is how a guard rots.
+    twin = next(
+        (m for m in obj.data.materials
+         if m is not None and m is not material),
+        None,
+    )
+    if twin is None:
+        print("  skip: only one material on this mesh")
+        return
+    twin[geometry_ops.PROP_TEXTURE_INDEX] = target
+    twin[geometry_ops.PROP_SURFACE] = was
+    try:
+        geometry_export.build_edited_model(bpy.context)
+        check(False, "a disagreement about one entry is refused")
+    except geometry_export.GeometryExportError as error:
+        check("surface types" in str(error),
+              "a disagreement about one entry is refused (%s)" % str(error)[:80])
+
+
+def test_resegment_makes_the_track_its_own_base():
+    """Re-segmenting renumbers every vertex, so the shipped .bin stops being the base.
+
+    That is not a side effect to tidy up afterwards - an export against the old
+    file would place geometry by indices that now mean something else. Writing
+    the re-segmented model out beside the .blend is what makes this a checkpoint
+    rather than a one-way door: reshaping afterwards is back on the in-place
+    path and byte-exact against the new file.
+    """
+    print("re-segmenting")
+    from dkr_track_editor import level_model, level_model_layout as layout
+    from dkr_track_editor.operators import geometry as geometry_ops
+    from dkr_track_editor.operators import geometry_export
+
+    path, obj = _import_lake(include_hidden=True)
+    if path is None:
+        print("  skip: no extracted level models")
+        return
+
+    # It refuses without somewhere to write the new base.
+    try:
+        bpy.ops.dkr.resegment()
+        check(False, "an unsaved .blend is refused")
+    except RuntimeError as error:
+        check("save the .blend first" in str(error),
+              "an unsaved .blend is refused, saying why")
+
+    temporary = tempfile.mkdtemp(prefix="dkr-reseg-")
+    try:
+        blend = os.path.join(temporary, "track.blend")
+        bpy.ops.wm.save_as_mainfile(filepath=blend)
+
+        before_segments = len(level_model.load(path).segments)
+        result = bpy.ops.dkr.resegment()
+        check(result == {"FINISHED"}, "resegment returns FINISHED")
+
+        written = os.path.join(temporary, "track-geometry.bin")
+        check(os.path.isfile(written),
+              "the re-segmented model is written beside the .blend")
+        if not os.path.isfile(written):
+            return
+
+        rebuilt = geometry_ops.geometry_objects(bpy.context)
+        check(len(rebuilt) == 1, "the mesh was rebuilt as one object")
+        check(str(rebuilt[0].get(geometry_ops.PROP_MODEL_PATH, "")) == written,
+              "and now points at the new base rather than the shipped .bin")
+        check(bpy.context.scene.dkr.geometry_path == written,
+              "so does the scene")
+
+        model = level_model.load(written)
+        check(len(model.segments) != before_segments,
+              "the segmentation really changed (%d -> %d)"
+              % (before_segments, len(model.segments)))
+        check(not layout.check_windows(model),
+              "batch windows still tile every segment")
+        check(not layout.check_collision_pressure(model),
+              "and nothing crowds the collision candidate list")
+
+        # The checkpoint property: an untouched export is byte-exact against
+        # the file just written, on the in-place path.
+        edit = geometry_export.build_edited_model(bpy.context)
+        check(edit is not None and not edit.rebuilt,
+              "a following export takes the in-place path")
+        if edit is not None:
+            check(not edit.edited,
+                  "and reports no change (%r)" % edit.describe())
+            from dkr_track_editor import level_model_encoder
+            with open(written, "rb") as handle:
+                base = level_model.decompress(handle.read())
+            again = level_model.decompress(level_model_encoder.pack(edit.model))
+            check(again == base,
+                  "re-encoding it reproduces the new base byte for byte")
+    finally:
+        shutil.rmtree(temporary, ignore_errors=True)
+        fresh()
+
+
+def test_track_from_mesh():
+    """A mesh an author modelled becomes real track geometry.
+
+    The last piece of the from-scratch path. Everything before it started from a
+    track the game ships; this one starts from nothing, so the model is built
+    blank, filled with the author's faces, and then partitioned into segments
+    with the boxes, BSP and PVS to match.
+    """
+    print("track from a mesh")
+    from dkr_track_editor import level_model, level_model_layout as layout
+    from dkr_track_editor.operators import geometry as geometry_ops
+    from dkr_track_editor.operators import geometry_export
+    from dkr_track_editor.operators import new_track as new_track_ops
+
+    donor = find_ancient_lake()
+    if donor is None:
+        print("  skip: no extracted level models to take a texture table from")
+        return
+
+    fresh()
+    bpy.ops.mesh.primitive_grid_add(size=4000.0, x_subdivisions=4, y_subdivisions=4)
+    source = bpy.context.active_object
+    quads = len(source.data.polygons)
+    check(new_track_ops.convertible(bpy.context) == [source],
+          "the author's mesh is offered for conversion")
+
+    temporary = tempfile.mkdtemp(prefix="dkr-scratch-")
+    try:
+        blend = os.path.join(temporary, "mytrack.blend")
+        bpy.ops.wm.save_as_mainfile(filepath=blend)
+
+        result = bpy.ops.dkr.track_from_mesh(filepath=donor)
+        check(result == {"FINISHED"}, "track_from_mesh returns FINISHED")
+
+        written = os.path.join(temporary, "mytrack-geometry.bin")
+        check(os.path.isfile(written), "a level model was written beside the .blend")
+        if not os.path.isfile(written):
+            return
+
+        model = level_model.load(written)
+        check(model.triangle_count == quads * 2,
+              "every quad was fanned into two triangles (%d from %d quads)"
+              % (model.triangle_count, quads))
+        check(len(model.segments) >= 1,
+              "it was partitioned into %d segment(s)" % len(model.segments))
+        check(not layout.check_windows(model), "the batch windows tile")
+        check(len(model.bounding_boxes) == len(model.segments)
+              and len(model.bsp) == len(model.segments),
+              "boxes and BSP nodes match the segment count")
+        check(model.textures, "it carries the donor's texture table (%d)"
+              % len(model.textures))
+        check(model.bounds != (0, 0, 0, 0, 0, 0),
+              "and bounds derived from the geometry (%r)" % (model.bounds,))
+
+        # The author's own mesh is kept, and stops being reported as unusable.
+        check(new_track_ops.PROP_CONVERTED in source,
+              "the source mesh is marked as converted")
+        check(source not in geometry_ops.unusable_meshes(bpy.context),
+              "so the export no longer reports it as geometry it cannot use")
+
+        # And the result is ordinary editable geometry.
+        built = geometry_ops.geometry_objects(bpy.context)
+        check(len(built) == 1, "the converted track was imported back")
+        if built:
+            mesh = built[0].data
+            check(mesh.attributes.get(geometry_ops.ATTR_SEGMENT) is not None,
+                  "with the identity attributes every other operator needs")
+            check(str(built[0].get(geometry_ops.PROP_MODEL_PATH, "")) == written,
+                  "and its own file as the base")
+
+        edit = geometry_export.build_edited_model(bpy.context)
+        check(edit is not None and not edit.rebuilt and not edit.edited,
+              "an export straight afterwards reports no change (%r)"
+              % (edit.describe() if edit else None))
+        if edit is not None:
+            from dkr_track_editor import level_model_encoder
+            with open(written, "rb") as handle:
+                base = level_model.decompress(handle.read())
+            again = level_model.decompress(level_model_encoder.pack(edit.model))
+            check(again == base, "and reproduces the file byte for byte")
+    finally:
+        shutil.rmtree(temporary, ignore_errors=True)
+        fresh()
+
+
+def test_track_from_mesh_refuses_a_giant():
+    """A mesh larger than s16 is refused, not wrapped around the world."""
+    print("track from a mesh that is too big")
+    from dkr_track_editor.operators import new_track as new_track_ops
+
+    donor = find_ancient_lake()
+    if donor is None:
+        print("  skip: no extracted level models")
+        return
+
+    fresh()
+    bpy.ops.mesh.primitive_grid_add(size=200000.0)
+    source = bpy.context.active_object
+    bpy.context.view_layer.update()
+    from dkr_track_editor import level_model
+    textures = level_model.load(donor).textures
+    try:
+        new_track_ops.read_source_mesh(source, textures)
+        check(False, "a mesh outside s16 is refused")
+    except ValueError as error:
+        check("outside the s16" in str(error),
+              "a mesh outside s16 is refused (%s)" % str(error)[:70])
+        check("Scale the mesh down" in str(error),
+              "and says what to do about it")
+    fresh()
+
+
+def test_scratch_track_ships_its_geometry():
+    """A track built from a mesh must ship its model, unchanged or not.
+
+    "Nothing changed, so send no geometry" is right for a remix - the header
+    goes on naming the track the game already has. It is wrong the moment the
+    base is the author's own file, because then the only copy of the geometry is
+    that file and leaving it out ships a header pointing at nothing. The whole
+    package looked correct when this was wrong: manifest honest, header present,
+    export reporting success, and no track in it.
+    """
+    print("a scratch track ships its geometry")
+    from dkr_track_editor import prefs
+    from dkr_track_editor.operators import geometry as geometry_ops
+    from dkr_track_editor.operators import header as header_ops
+
+    donor = find_ancient_lake()
+    if donor is None or prefs.resolve(bpy.context) is None:
+        print("  skip: no extracted assets")
+        return
+    world, race = _pick("World"), _pick("RaceType")
+    if not world or not race:
+        print("  skip: the catalogue has no World/RaceType enum")
+        return
+
+    fresh()
+    bpy.ops.mesh.primitive_grid_add(size=4000.0, x_subdivisions=4, y_subdivisions=4)
+    temporary = tempfile.mkdtemp(prefix="dkr-e2e-")
+    try:
+        bpy.ops.wm.save_as_mainfile(filepath=os.path.join(temporary, "mytrack.blend"))
+        bpy.ops.dkr.track_from_mesh(filepath=donor)
+
+        built = geometry_ops.geometry_objects(bpy.context)
+        check(built and built[0].get(geometry_ops.PROP_AUTHORED_BASE),
+              "the converted geometry knows its base is the author's own")
+
+        bpy.ops.dkr.place_object(object_id="ASSET_OBJECT_SETUPPOINT")
+        bpy.ops.dkr.header_defaults()
+        bpy.context.scene[header_ops.key_for("/world")] = world
+        bpy.context.scene[header_ops.key_for("/race-type")] = race
+        settings = bpy.context.scene.dkr
+        settings.track_name = "Scratch"
+        settings.track_id = "scratch"
+
+        target = os.path.join(temporary, "scratch.dkrmap")
+        result = bpy.ops.dkr.export_dkrmap(filepath=target, validate_first=False)
+        check(result == {"FINISHED"}, "it exports")
+
+        with open(os.path.join(target, "manifest.json"), "r", encoding="utf-8") as h:
+            manifest = json.load(h)
+        sections = sorted(e["section"] for e in manifest["adds"])
+        check("LEVEL_MODELS" in sections,
+              "and ships its geometry even though nothing was edited after the "
+              "conversion (got %r)" % sections)
+        check("LEVEL_HEADERS" in sections, "along with the header it authored")
+        check(os.path.isfile(os.path.join(target, "model.bin")),
+              "model.bin is on disk")
+        claimed = {e["file"] for e in manifest["adds"]}
+        present = {n for n in os.listdir(target) if n.endswith(".bin")}
+        check(claimed == present,
+              "and the manifest claims exactly what is there (%s vs %s)"
+              % (sorted(claimed), sorted(present)))
+    finally:
+        shutil.rmtree(temporary, ignore_errors=True)
+        fresh()
 
 
 def test_drop_to_surface():
     print("drop to surface")
     from dkr_track_editor.operators import geometry as geometry_ops
 
-    path = find_ancient_lake()
+    path, obj = _import_lake(include_hidden=False)
     if path is None:
         print("  skip: no extracted level models")
         return
-
-    fresh()
-    bpy.ops.dkr.import_geometry(filepath=path, include_hidden=False)
-    surface = [
-        o for o in bpy.context.scene.objects
-        if geometry_ops.PROP_GEOMETRY in o
-        and o[geometry_ops.PROP_GEOMETRY] == geometry_ops.SURFACE
-    ]
-    if not surface:
-        print("  skip: no surface built")
+    if obj is None:
+        print("  skip: no geometry built")
         return
 
-    # Put the cursor above a real face, place a zipper there, then drop it.
-    mesh = surface[0].data
-    centre = surface[0].matrix_world @ mesh.polygons[len(mesh.polygons) // 2].center
+    # Surface, decoration and walls share one mesh now, so the face to aim at
+    # has to be picked by its kind rather than by which object it is in.
+    mesh = obj.data
+    categories = geometry_ops.slot_categories(obj)
+    polygon = next(
+        (p for p in mesh.polygons
+         if 0 <= p.material_index < len(categories)
+         and categories[p.material_index] == geometry_ops.SURFACE),
+        None,
+    )
+    if polygon is None:
+        print("  skip: no drivable surface in this track")
+        return
+
+    centre = obj.matrix_world @ polygon.center
     bpy.context.scene.cursor.location = (centre.x, centre.y, centre.z + 5000.0)
     bpy.ops.dkr.place_object(object_id="ASSET_OBJECT_GROUNDZIPPER")
 
     zipper = [o for o in scene.iter_dkr_objects(bpy.context)][0]
     before = zipper.location.z
-    for obj in bpy.context.selected_objects:
-        obj.select_set(False)
+    for other in bpy.context.selected_objects:
+        other.select_set(False)
     zipper.select_set(True)
     bpy.context.view_layer.objects.active = zipper
 
@@ -634,6 +1977,28 @@ def main():
         test_dkrmap_export()
         test_import_export_operators()
         test_geometry_import()
+        test_wall_visibility()
+        test_geometry_roundtrip()
+        test_geometry_vertex_edit()
+        test_geometry_refuses_orphans()
+        test_geometry_reaches_chained_new_faces()
+        test_geometry_schema_guard()
+        test_geometry_batch_flags()
+        test_geometry_add_geometry()
+        test_geometry_remove_geometry()
+        test_geometry_rebuild_needs_the_whole_track()
+        test_geometry_in_package()
+        test_stale_object_maps()
+        test_memory_budget()
+        test_unusable_mesh_is_named()
+        test_identified_fields_are_visible()
+        test_header_from_scratch()
+        test_header_reaches_the_package()
+        test_surface_types()
+        test_resegment_makes_the_track_its_own_base()
+        test_track_from_mesh()
+        test_track_from_mesh_refuses_a_giant()
+        test_scratch_track_ships_its_geometry()
         test_drop_to_surface()
         test_place_shows_artwork()
         test_balloon_variants()
@@ -653,4 +2018,14 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # What vanishes under Blender is an **uncaught exception**, not sys.exit:
+    # measured on 5.2, a bare sys.exit(3) exits 3 and so does sys.exit(main()),
+    # while a NameError makes Blender print the traceback and still exit 0. So a
+    # crashing test read as a pass, stopped the suite where it stood, and hid
+    # every check after it - which is what this catch repairs.
+    try:
+        _code = main()
+    except BaseException:  # noqa: BLE001 - the point is to report anything
+        traceback.print_exc()
+        _code = 1
+    sys.exit(_code)

@@ -36,7 +36,8 @@ def _module_classes():
     on a plain Python.
     """
     from . import prefs, props
-    from .operators import ai, checks, edit, geometry, io_objects, pack
+    from .operators import (ai, checks, edit, geometry, header, io_objects,
+                            new_track, pack)
     from .ui import panels
 
     classes = []
@@ -47,6 +48,8 @@ def _module_classes():
     classes += list(edit.CLASSES)
     classes += list(ai.CLASSES)
     classes += list(checks.CLASSES)
+    classes += list(header.CLASSES)
+    classes += list(new_track.CLASSES)
     classes += list(pack.CLASSES)
     classes += list(panels.CLASSES)
     return classes

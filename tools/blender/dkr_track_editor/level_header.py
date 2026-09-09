@@ -321,7 +321,17 @@ class LevelHeaderEncoder:
         return out
 
     def _asset(self, section, value) -> int:
-        """An asset index, or -1 when the field names nothing."""
+        """An asset index, or -1 when the field names nothing.
+
+        A number is already an index and is taken as one - which is what makes
+        a header encodable with no asset tree configured. The sentinel matters:
+        an unset asset field defaults to -1, and treating that as a name to
+        resolve made every header without a skybox refuse rather than write
+        "nothing here". Same shape as ``_enum``, which passes a number through
+        for the same reason.
+        """
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return int(value)
         name = str(value or "")
         if not name:
             return -1
