@@ -119,11 +119,20 @@ class DKR_CustomTexture(bpy.types.PropertyGroup):
     #: for anyone on 4.2, which is the version this addon says it needs.
     #: :func:`..operators.custom_textures.resolve` is the other half.
     png: StringProperty(name="Image", default="")
+    #: The same picture at full resolution, as a PNG, stored the way ``png`` is.
+    #: The track never reads it; the high-resolution texture pack the export
+    #: writes beside the ``.dkrmap`` does. Empty for a texture added before the
+    #: pack existed, which the export then rebuilds from ``source`` if it can.
+    original: StringProperty(name="Original", default="")
     width: IntProperty(default=0)
     height: IntProperty(default=0)
     #: A ``FORMAT_CODES`` value, stored as the number the file stores.
     format: IntProperty(default=1)
     render_mode: StringProperty(default="OPAQUE")
+    #: Which invisible bit the export flips to tell this texture apart from
+    #: another that reduced to the same pixels; 0 for none. See
+    #: :func:`..textures.nudge_texels`.
+    nudge: IntProperty(default=0)
 
 
 class DKR_ValidationEntry(bpy.types.PropertyGroup):

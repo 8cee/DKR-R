@@ -240,6 +240,13 @@ Colour-indexed formats are excluded. Their palettes are loaded from
 `ASSET_EMPTY_14` by a byte offset into that section, and a track cannot add
 one.
 
+The reduction those limits force is undone outside the track, not inside it.
+The Blender addon's export also writes `<track>-hd.zip` beside the package: a
+Rice texture pack of the author's originals, each named by the identity RT64
+computes for the payload the package ships. The track neither needs nor
+references it, and without it draws exactly what it always did. See
+`docs/TEXTURE_PACKS.md`.
+
 A payload is also refused if it is shorter than 40 bytes or not a multiple of
 16. `load_texture` reads `sizeof(TempTexHeader)` - 40 bytes - before it knows
 how large the texture is, and it puts the display list it builds at

@@ -18,7 +18,9 @@ of a second path that happens to look similar:
    package will be built from;
 3. every face is given it and projected flat - ``dkr.apply_texture``, because a
    face with no mapping draws one texel stretched over the whole of it;
-4. the package is written - ``dkr.export_dkrmap``.
+4. the package is written - ``dkr.export_dkrmap`` - and beside it
+   ``<out>-hd.zip``, the texture pack that has DKR-R draw the picture at the
+   resolution it was made rather than the 64x32 the track carries.
 
 **What the result is and is not.** It is a level model and a texture payload,
 which is the half this script exists to demonstrate. It is not a playable
@@ -216,9 +218,25 @@ def report(out):
               "ROM's texture count plus 0, 1, ... as the model is served"
               % ", ".join("0x%04X" % value for value in own))
 
+    pack = os.path.splitext(out)[0] + "-hd.zip"
+    if os.path.isfile(pack):
+        import zipfile
+
+        with zipfile.ZipFile(pack) as archive:
+            names = [name for name in archive.namelist() if name.endswith(".png")]
+        print("")
+        print("  hd pack:   %s, %d replacement(s), %d bytes"
+              % (os.path.basename(pack), len(names), os.path.getsize(pack)))
+        for name in names:
+            print("             %s" % name)
+
     print("")
     print("Install: copy the .dkrmap into DKR-R's custom-tracks/, or point")
     print("Track Lab's working directory at the folder it is in.")
+    if os.path.isfile(pack):
+        print("Then import %s under Graphics > Custom Texture Packs and"
+              % os.path.basename(pack))
+        print("enable it, for the full-resolution picture (Modern preset).")
     print("See HOW-TO-BUILD.md inside it for what a playable track still needs.")
 
 

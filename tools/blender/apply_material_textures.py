@@ -162,110 +162,43 @@ def _donor(context, obj):
 def _image_of(material):
     """``(image, node)`` for the picture a material draws, or ``(None, None)``.
 
-    Walked back from the output rather than taken from the first image node in
-    the tree, because a material often carries images nothing is linked to - a
-    roughness map, a leftover - and the one that reaches the surface is the one
-    the author sees.
+    The addon's own rule - walked back from the output - so this script and
+    *Track From Mesh* agree on which picture a material is.
     """
-    if material is None or not material.use_nodes or material.node_tree is None:
-        return None, None
-    tree = material.node_tree
-    output = next((node for node in tree.nodes
-                   if node.type == "OUTPUT_MATERIAL" and node.is_active_output),
-                  None)
-    found = _walk(output, set())
-    if found[0] is not None:
-        return found
-    for node in tree.nodes:
-        if node.type == "TEX_IMAGE" and node.image is not None:
-            return node.image, node
-    return None, None
-
-
-def _walk(node, seen):
-    if node is None or node.name in seen:
-        return None, None
-    seen.add(node.name)
-    if node.type == "TEX_IMAGE" and node.image is not None:
-        return node.image, node
-    for socket in node.inputs:
-        for link in socket.links:
-            found = _walk(link.from_node, seen)
-            if found[0] is not None:
-                return found
-    return None, None
-
-
-def _source_path(image, directory):
-    """A file on disk for an image, writing one out if it is packed or generated.
-
-    Through a copy of the datablock, because setting ``filepath_raw`` on the
-    image itself and saving would unpack the one the scene is using.
-    """
-    try:
-        path = bpy.path.abspath(image.filepath_from_user())
-    except (AttributeError, RuntimeError, ValueError):
-        path = ""
-    if path and os.path.isfile(path):
-        return path
-
-    out = os.path.join(directory, "_src-%s.png" % custom_textures._slug(image.name))
-    copy = image.copy()
-    try:
-        copy.file_format = "PNG"
-        copy.filepath_raw = out
-        copy.save()
-    finally:
-        bpy.data.images.remove(copy)
-    return out
+    node = custom_textures.image_node(material)
+    return (node.image, node) if node is not None else (None, None)
 
 
 def _import_image(context, image, code, directory, cache):
-    """One Blender image as a texture the track ships. Cached per run and per scene."""
+    """One Blender image as a texture the track ships. Cached per run and per scene.
+
+    Through :func:`custom_textures.add_image`, the one importer the Add button
+    and *Track From Mesh* use too - which also keeps the full-resolution
+    original the export's HD pack is built from.
+    """
     if image.name in cache:
         return cache[image.name]
 
-    settings = context.scene.dkr
-    source = _source_path(image, directory)
-
     # Added by an earlier run? The stored source is what says so, and re-adding
     # would spend one of the 255 ordinals on a duplicate.
+    source = custom_textures.image_source(image)
     for entry in custom_textures.entries(context):
-        if entry.source and os.path.normcase(entry.source) == os.path.normcase(source):
+        if custom_textures.same_source(entry.source, source):
             cache[image.name] = entry
             print("  %-28s already in this track's artwork" % image.name)
             return entry
 
-    if len(settings.custom_textures) >= texture_module.CUSTOM_ID_COUNT:
-        raise SystemExit("a track can add at most %d textures of its own"
-                         % texture_module.CUSTOM_ID_COUNT)
+    try:
+        texture, was = custom_textures.add_image(
+            context, custom_textures.image_path(image), code, SIZE,
+            name=custom_textures.image_label(image), note=source,
+        )
+    except custom_textures.CustomTextureError as error:
+        raise SystemExit("%s: %s" % (image.name, error))
 
-    stem = custom_textures._slug(
-        os.path.splitext(os.path.basename(source))[0] or image.name
-    )
-    destination = custom_textures._unique(directory, stem)
-
-    was = custom_textures._probe(source)
-    width, height = custom_textures._parse_size(SIZE, code, was)
-    texture_module.check_size(width, height, code)
-    was = custom_textures.resample(source, destination, width, height)
-    # Straight back through the addon's own decoder, so a PNG Blender wrote that
-    # the encoder cannot read fails here and not at export.
-    texture_module.encode_texture(destination, code)
-
-    record = settings.custom_textures.add()
-    record.name = image.name
-    record.source = source
-    record.png = custom_textures._stored_path(destination)
-    record.width = width
-    record.height = height
-    record.format = code
-    record.render_mode = "OPAQUE"
-
-    texture = custom_textures.entries(context)[-1]
     cache[image.name] = texture
-    print("  %-28s %dx%d, down from %dx%d" % (image.name, width, height,
-                                              was[0], was[1]))
+    print("  %-28s %dx%d, down from %dx%d" % (image.name, texture.width,
+                                              texture.height, was[0], was[1]))
     return texture
 
 

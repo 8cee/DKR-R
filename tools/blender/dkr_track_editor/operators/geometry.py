@@ -58,7 +58,8 @@ from bpy.props import BoolProperty, EnumProperty, FloatProperty, StringProperty
 from bpy_extras.io_utils import ImportHelper
 from mathutils import Vector
 
-from .. import assets, level_model, level_model_layout, prefs, scene
+from .. import (assets, level_model, level_model_layout, prefs, scene,
+                textures as texture_module)
 from ..preview import _image, _srgb_to_linear, reset_node_tree
 
 #: Marks a mesh as decoded track geometry. Its value used to name which of the
@@ -343,6 +344,15 @@ def _track_material(stem: str, category: str, png, texture_index: int,
         existing[PROP_CATEGORY] = category
         existing[PROP_TEXTURE_INDEX] = texture_index
         existing[PROP_SURFACE] = surface
+        # And may show another picture. The name is (track, kind, table
+        # entry), and a track converted a second time - from another donor, or
+        # keeping its mesh's own pictures - can put a different image at the
+        # same entry. Reused as it stood, the viewport would show the old one
+        # over a file that holds the new.
+        try:
+            _show_image(existing, category, image)
+        except Exception:  # noqa: BLE001 - appearance only
+            traceback.print_exc()
         return existing
 
     material = bpy.data.materials.new(name)
@@ -365,6 +375,20 @@ def material_for(stem: str, category: str, texture_index: int, png, surface: int
     off the file - same naming, same properties, same node tree.
     """
     return _track_material(stem, category, png, texture_index, surface)
+
+
+def _show_image(material, category, image):
+    """Point a material at ``image``, building its nodes if it drew none."""
+    if image is None or category == INVISIBLE_WALLS:
+        return
+    tree = getattr(material, "node_tree", None)
+    nodes = [node for node in tree.nodes if node.type == "TEX_IMAGE"] if tree else []
+    if not nodes:
+        _build_material_nodes(material, category, image)
+        return
+    for node in nodes:
+        if node.image is not image:
+            node.image = image
 
 
 def _build_material_nodes(material, category, image):
@@ -444,8 +468,28 @@ def batch_of_vertex(model) -> list:
     return table
 
 
-def _build_geometry(stem, model, collection, tree=None, include_hidden=True):
+def texture_png(texture_id, tree=None, own=()):
+    """The PNG a texture table entry shows, or ``None``.
+
+    The track's own artwork is looked up in ``own`` - the scene's
+    :func:`.custom_textures.entries` - and never in the asset tree, which
+    only knows the ROM: asked for ``0x7000`` it has nothing, and a track whose
+    file names its own pictures correctly would come back looking untextured.
+    """
+    ordinal = texture_module.custom_ordinal(texture_id)
+    if ordinal is not None:
+        own = list(own or ())
+        return own[ordinal].png if 0 <= ordinal < len(own) else None
+    return tree.texture_3d_png(texture_id) if tree is not None else None
+
+
+def _build_geometry(stem, model, collection, tree=None, include_hidden=True,
+                    own=()):
     """Build the one mesh, and return ``(object, stats)``.
+
+    ``tree`` draws the ROM's textures and ``own`` - the scene's
+    :func:`.custom_textures.entries` - the track's own; see
+    :func:`texture_png`.
 
     Vertices go in first and unconditionally, every segment in file order, so
     the mapping from a Blender index to ``(segment, vertex)`` is decided before
@@ -524,9 +568,8 @@ def _build_geometry(stem, model, collection, tree=None, include_hidden=True):
                     continue
             texture = model.texture_for(batch)
             png = (
-                tree.texture_3d_png(texture.texture_id)
-                if (tree is not None and texture is not None
-                    and category != INVISIBLE_WALLS)
+                texture_png(texture.texture_id, tree, own)
+                if texture is not None and category != INVISIBLE_WALLS
                 else None
             )
             index_of_texture = (batch.texture_index
@@ -1019,10 +1062,13 @@ class DKR_OT_import_geometry(bpy.types.Operator, ImportHelper):
                 "vertex colours instead of its textures",
             )
 
+        from . import custom_textures  # noqa: PLC0415 - it imports this module
+
         obj, stats = _build_geometry(
             stem, model, collection,
             tree if self.textured else None,
             include_hidden=self.include_hidden,
+            own=custom_textures.entries(context) if self.textured else (),
         )
         obj[PROP_MODEL_PATH] = path
         record_budget(obj, model)
@@ -1356,9 +1402,12 @@ class DKR_OT_resegment(bpy.types.Operator):
             if PROP_GEOMETRY in existing:
                 bpy.data.objects.remove(existing, do_unlink=True)
 
+        from . import custom_textures  # noqa: PLC0415 - it imports this module
+
         tree = assets.AssetTree.find(target) or prefs.resolve(context)
         rebuilt, stats = _build_geometry(
-            stem, edit.model, collection, tree, include_hidden=include_hidden
+            stem, edit.model, collection, tree, include_hidden=include_hidden,
+            own=custom_textures.entries(context),
         )
         rebuilt[PROP_MODEL_PATH] = target
         rebuilt[PROP_AUTHORED_BASE] = True

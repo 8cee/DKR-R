@@ -19,19 +19,24 @@ identity attributes, the material slots and the base file that every other
 operator here already understands, and there is exactly one importer to keep
 correct instead of two.
 
-**The ceiling this cannot lift, and the one it no longer has.** A ``.dkrmap``
-has no texture section - the runtime's table has four entries and none of them
-is textures - so a new track can only draw with textures the ROM already holds.
-That much stands.
+**Where the textures come from.** Three places, and a conversion can use more
+than one:
 
-What used to sit on top of it, and does not any more, is that the new track was
-stuck with the *donor's* table: two or three dozen images picked once and
-unchangeable. A level model's table stores indices into the ROM's global 3D
-texture list, so it can name any texture the ROM holds, and :mod:`..textures`
-and the Textures panel are how an author picks them. A donor table is therefore a
-starting point and a convenience - it brings a coherent set of images and their
-surface types with it - which is why :class:`DKR_OT_track_from_mesh_blank`
-exists beside it for authors who would rather choose everything themselves.
+* **The mesh's own materials.** A mesh an author textured in Blender carries
+  its pictures on its materials, and :func:`_adopt_images` makes each of them
+  one of the track's own textures - resampled to what the RDP can load, with
+  the original kept for the export's high-resolution pack. This is the flow
+  the whole feature exists for: model, ``Ctrl+J``, *Track From Mesh*, export,
+  and the track draws what the author drew. It happens here, before any
+  triangulating, because this is the one moment a polygon and its material
+  and its UVs are all still in hand - ``apply_material_textures.py`` has to
+  match faces back by position precisely because it runs after that moment.
+* **A donor track's table**, for :class:`DKR_OT_track_from_mesh`: a coherent
+  set of the ROM's images with their surface types, and whatever a material
+  that came off an imported track already names.
+* **Nothing**, for a material with no picture. Its faces come out untextured,
+  and the Textures panel - where all 1401 of the ROM's textures are available
+  rather than one track's table - is where they get their look.
 """
 
 from __future__ import annotations
@@ -44,12 +49,16 @@ from bpy.props import BoolProperty, StringProperty
 from bpy_extras.io_utils import ImportHelper
 
 from .. import (assets, level_model, level_model_encoder, level_model_layout,
-                prefs, scene)
-from . import geometry
+                prefs, rice_identity, scene, textures as texture_module)
+from . import custom_textures, geometry
 
 #: Where the marker lives, so both this module and the export's "meshes I cannot
 #: use" check read one name rather than two that have to agree.
 PROP_CONVERTED = geometry.PROP_CONVERTED
+
+#: Two UVs closer than this are the same point. A face whose corners all share
+#: one has no mapping - it draws a single texel of its texture.
+_SAME_UV = 1e-9
 
 
 def convertible(context) -> list:
@@ -60,16 +69,20 @@ def convertible(context) -> list:
     ]
 
 
-def _texture_for(material, slot: int, count: int) -> int:
+def _texture_for(material, slot: int, count: int, own=None) -> int:
     """Which entry of the starting texture table a material draws.
 
-    A material that came from an imported track already names one. A material an
-    author made does not, so it falls back to its slot position - which is
-    arbitrary, and is why the operator says which textures it used. With no
-    starting table at all every face comes out untextured, which is the honest
-    answer: the author picks the textures afterwards, in the Textures panel,
-    where the whole ROM is available rather than one track's table.
+    A material whose picture became one of the track's own textures names that
+    entry, through ``own``. A material that came from an imported track already
+    names one. Any other falls back to its slot position in the ``count``
+    borrowed entries - which is arbitrary, and is why the operator says which
+    textures it used. With nothing borrowed it comes out untextured, which is
+    the honest answer: the author picks the textures afterwards, in the
+    Textures panel, where the whole ROM is available rather than one track's
+    table.
     """
+    if material is not None and own and material.name in own:
+        return own[material.name]
     if material is not None and geometry.PROP_TEXTURE_INDEX in material:
         index = int(material[geometry.PROP_TEXTURE_INDEX])
         if 0 <= index < count:
@@ -106,16 +119,83 @@ def _raw_uv(uv, texture):
     )
 
 
-def read_source_mesh(obj, textures):
+def _fit(uvs, texture):
+    """``(uvs, fits)``: moved by whole repeats into the s16 the file stores.
+
+    A raw UV is absolute, so an unwrap that sits sixty repeats out - common
+    once an author scales an island up to tile - is past what an s16 holds. A
+    shift by a whole number of repeats cannot be seen on a texture that wraps,
+    so the triangle is moved back towards zero by exactly that; only one whose
+    own span is too wide is clamped, and counted.
+    """
+    if texture is None or texture_module.fits_s16(uvs):
+        return uvs, True
+    repeat_s = int(level_model.UV_FRACTIONAL_BITS * texture.width)
+    repeat_t = int(level_model.UV_FRACTIONAL_BITS * texture.height)
+    offset_s = (min(s for s, _t in uvs) // repeat_s) * repeat_s
+    offset_t = (min(t for _s, t in uvs) // repeat_t) * repeat_t
+    moved = [(s - offset_s, t - offset_t) for s, t in uvs]
+    if texture_module.fits_s16(moved):
+        return moved, True
+    return [(max(-32768, min(32767, s)), max(-32768, min(32767, t)))
+            for s, t in moved], False
+
+
+def _flat(uvs) -> bool:
+    """Whether every corner shares one UV - a face with no mapping at all."""
+    first = uvs[0]
+    return all(abs(u - first[0]) < _SAME_UV and abs(v - first[1]) < _SAME_UV
+               for u, v in uvs[1:])
+
+
+def _polygon_uvs(mesh, polygon, stats):
+    """The UVs a face was mapped with, one per corner, or ``None``.
+
+    The active map, unless the face has no mapping there and another map does
+    - which is what ``Ctrl+J`` leaves behind when the pieces' maps had different
+    names: it matches maps by name, so the joined mesh has one per name and
+    each piece's faces are mapped in only one of them. Reading the active map
+    alone would drop the mapping of every other piece without a word.
+    """
+    layers = mesh.uv_layers
+    active = layers.active
+    if active is None:
+        return None
+    corners = list(polygon.loop_indices)
+    uvs = [tuple(active.data[corner].uv) for corner in corners]
+    if len(layers) > 1 and _flat(uvs):
+        for layer in layers:
+            if layer.name == active.name:
+                continue
+            other = [tuple(layer.data[corner].uv) for corner in corners]
+            if not _flat(other):
+                stats["uv_rescued"] += 1
+                stats.setdefault("uv_layers_used", set()).add(layer.name)
+                return other
+    return uvs
+
+
+def read_source_mesh(obj, textures, own=None, borrowed=None, stats=None):
     """``(faces, positions, colours)`` for :func:`rebatch_segment`.
 
     Quads are fanned into triangles rather than refused, for the same reason the
     geometry export fans them: the file stores triangles and Blender's modelling
     tools produce quads, so refusing would make the ordinary way of building a
     mesh unusable.
+
+    ``own`` maps a material's name to the table entry its picture became;
+    ``borrowed`` is how many of ``textures`` came from a donor, which is what a
+    material with no picture of its own falls back into. ``stats``, if given,
+    is filled with what the UVs needed: ``uv_rescued`` faces whose mapping was
+    in a map other than the active one, ``uv_unmapped`` textured faces with no
+    mapping anywhere, and ``uv_clamped`` faces too wide for the s16 a UV is.
     """
     mesh = obj.data
     matrix = obj.matrix_world
+    borrowed = len(textures) if borrowed is None else int(borrowed)
+    stats = {} if stats is None else stats
+    for key in ("uv_rescued", "uv_unmapped", "uv_clamped"):
+        stats.setdefault(key, 0)
 
     positions = []
     for index, vertex in enumerate(mesh.vertices):
@@ -131,29 +211,35 @@ def read_source_mesh(obj, textures):
         positions.append(rounded)
 
     colours = _read_colours(mesh)
-    uv_layer = mesh.uv_layers.active
 
     faces = []
     for polygon in mesh.polygons:
         material = (mesh.materials[polygon.material_index]
                     if polygon.material_index < len(mesh.materials) else None)
-        index = _texture_for(material, polygon.material_index, len(textures))
+        index = _texture_for(material, polygon.material_index, borrowed, own)
         texture = textures[index] if 0 <= index < len(textures) else None
         key = level_model_layout.BatchKey(
             index, _flags_for(material), 0, 0, 0, True, None,
         )
-        corners = list(polygon.loop_indices)
+        mapping = _polygon_uvs(mesh, polygon, stats)
+        if texture is not None and (mapping is None or _flat(mapping)):
+            stats["uv_unmapped"] += 1
         vertices = list(polygon.vertices)
+        clamped = False
         for corner in range(1, len(vertices) - 1):
             picks = (0, corner, corner + 1)
-            uvs = tuple(
-                _raw_uv(uv_layer.data[corners[p]].uv, texture) if uv_layer
-                else (0, 0)
-                for p in picks
-            )
+            if mapping is None:
+                uvs = [(0, 0)] * 3
+            else:
+                uvs, fits = _fit([_raw_uv(mapping[p], texture) for p in picks],
+                                 texture)
+                clamped = clamped or not fits
             faces.append(level_model_layout.Face(
-                key, tuple(vertices[p] for p in picks), uvs, 0
+                key, tuple(vertices[p] for p in picks),
+                tuple(tuple(pair) for pair in uvs), 0
             ))
+        if clamped:
+            stats["uv_clamped"] += 1
     return faces, positions, colours
 
 
@@ -189,6 +275,193 @@ def _read_colours(mesh) -> list:
     return colours
 
 
+# ---------------------------------------------------------------------------
+# The mesh's own pictures
+# ---------------------------------------------------------------------------
+
+def material_images(obj) -> list:
+    """``[(material, image), ...]`` for the pictures the mesh's faces draw.
+
+    Only materials some face actually uses, since each picture spends one of
+    the track's 255 ordinals; and not a material the addon made itself - one
+    carrying a texture table index already names its entry.
+    """
+    mesh = obj.data
+    used = {polygon.material_index for polygon in mesh.polygons}
+    found = []
+    for slot, material in enumerate(mesh.materials):
+        if slot not in used or material is None:
+            continue
+        if geometry.PROP_TEXTURE_INDEX in material:
+            continue
+        image = custom_textures.image_of(material)
+        if image is not None:
+            found.append((material, image))
+    return found
+
+
+class Adoption:
+    """What :func:`_adopt_images` did, for the operator to act on and report."""
+
+    def __init__(self, table):
+        #: The starting texture table: whatever was borrowed, then the entries
+        #: the mesh's pictures became.
+        self.table = list(table)
+        #: Material name -> the entry of ``table`` it draws.
+        self.own = {}
+        #: How many textures were added to the scene - the tail of its list,
+        #: which is what is taken back if the conversion fails afterwards.
+        self.added = 0
+        self.reused = 0
+        #: ``(picture, reason, [material, ...])`` for the ones that could not
+        #: be read. Their faces stay untextured; the rest go ahead.
+        self.failed = []
+        #: ``(texture name, reason)`` for textures with no high-resolution form.
+        self.no_hd = []
+
+    @property
+    def pictures(self) -> int:
+        return self.added + self.reused
+
+
+def _format_code(settings) -> int:
+    try:
+        return int(settings.custom_format)
+    except (TypeError, ValueError):
+        return texture_module.FORMAT_CODES["RGBA16"]
+
+
+def _adopt_images(context, obj, textures) -> Adoption:
+    """Make each picture the mesh draws one of the track's own textures.
+
+    One texture per *picture*, however many materials show it, and one table
+    entry per picture and surface type - the surface lives on the entry. A
+    picture the scene already holds, from an earlier conversion or the Add
+    button, is reused rather than added again.
+
+    The two ceilings - 255 textures of a track's own, and 255 entries in a
+    model's table - are checked **before** anything is written, and hitting one
+    refuses the whole conversion with the materials named: a track is never
+    left half converted. A picture Blender cannot read is different: its faces
+    stay untextured and the rest go ahead, because refusing a whole track over
+    one unreadable file is the worse answer.
+    """
+    result = Adoption(textures)
+    pairs = material_images(obj)
+    if not pairs:
+        return result
+
+    settings = context.scene.dkr
+    code = _format_code(settings)
+    size = settings.custom_size
+
+    pictures = {}
+    order = []
+    for material, image in pairs:
+        source = custom_textures.image_source(image)
+        key = os.path.normcase(os.path.normpath(source))
+        if key not in pictures:
+            pictures[key] = (source, image, [])
+            order.append(key)
+        pictures[key][2].append(material)
+
+    held = {}
+    for ordinal, record in enumerate(settings.custom_textures):
+        if record.source:
+            held.setdefault(os.path.normcase(os.path.normpath(record.source)),
+                            ordinal)
+    new = [key for key in order if key not in held]
+
+    room = texture_module.CUSTOM_ID_COUNT - len(settings.custom_textures)
+    if len(new) > room:
+        left = sorted({material.name for key in new[room:]
+                       for material in pictures[key][2]})
+        raise custom_textures.CustomTextureError(
+            "the mesh's materials draw %d picture(s) this track does not have "
+            "yet, and a track can hold %d of its own - there is room for %d. "
+            "%d material(s) would be left out: %s. Nothing was converted; give "
+            "materials that should look alike one picture, or turn off Keep "
+            "The Mesh's Textures"
+            % (len(new), texture_module.CUSTOM_ID_COUNT, room, len(left),
+               ", ".join(left[:8]) + (" ..." if len(left) > 8 else ""))
+        )
+
+    entries_needed = len({
+        (key, int(material.get(geometry.PROP_SURFACE, 0)) & 0xFF)
+        for key in order for material in pictures[key][2]
+    })
+    if len(textures) + entries_needed > level_model.MAX_TEXTURES:
+        raise custom_textures.CustomTextureError(
+            "the mesh's pictures need %d texture table entries on top of the %d "
+            "borrowed, and a model's table holds %d. Nothing was converted; "
+            "give materials that should look alike one picture, or start from "
+            "no donor" % (entries_needed, len(textures),
+                          level_model.MAX_TEXTURES)
+        )
+
+    ordinals = {}
+    window = context.window_manager
+    window.progress_begin(0, max(1, len(new)))
+    try:
+        for key in order:
+            if key in held:
+                ordinals[key] = held[key]
+                result.reused += 1
+                continue
+            source, image, materials = pictures[key]
+            try:
+                path = custom_textures.image_path(image)
+                entry, _was = custom_textures.add_image(
+                    context, path, code, size,
+                    name=custom_textures.image_label(image), note=source,
+                )
+            except custom_textures.CustomTextureError as error:
+                result.failed.append((image.name, str(error),
+                                      [m.name for m in materials]))
+                continue
+            except Exception as error:  # noqa: BLE001 - Blender image errors vary
+                traceback.print_exc()
+                result.failed.append((image.name, str(error),
+                                      [m.name for m in materials]))
+                continue
+            ordinals[key] = entry.ordinal
+            result.added += 1
+            window.progress_update(result.added)
+    finally:
+        window.progress_end()
+
+    found = custom_textures.entries(context)
+    entry_of = {}
+    for key in order:
+        if key not in ordinals:
+            continue
+        entry = found[ordinals[key]]
+        for material in pictures[key][2]:
+            surface = int(material.get(geometry.PROP_SURFACE, 0)) & 0xFF
+            if (key, surface) not in entry_of:
+                result.table.append(level_model.TextureRef(
+                    entry.index, entry.width, entry.height, entry.format, surface,
+                ))
+                entry_of[(key, surface)] = len(result.table) - 1
+            result.own[material.name] = entry_of[(key, surface)]
+        problem = rice_identity.hd_problem(entry.width, entry.height, entry.format)
+        if problem:
+            result.no_hd.append((entry.name, problem))
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Operators
+# ---------------------------------------------------------------------------
+
+_KEEP_TEXTURES_DESCRIPTION = (
+    "Make the pictures the mesh's materials draw into this track's own "
+    "textures, mapped with the UVs you gave them. Each is reduced to what the "
+    "console can load, and the export's HD pack gives DKR-R the original. "
+    "Materials with no picture are unaffected"
+)
+
+
 class DKR_OT_track_from_mesh(bpy.types.Operator, ImportHelper):
     """Turn the selected mesh into DKR track geometry, borrowing a track's textures"""
 
@@ -211,6 +484,12 @@ class DKR_OT_track_from_mesh(bpy.types.Operator, ImportHelper):
             "work and the addon does not delete it; the converted geometry is a "
             "separate object"
         ),
+        default=True,
+    )
+
+    keep_textures: BoolProperty(
+        name="Keep The Mesh's Textures",
+        description=_KEEP_TEXTURES_DESCRIPTION,
         default=True,
     )
 
@@ -244,7 +523,9 @@ class DKR_OT_track_from_mesh(bpy.types.Operator, ImportHelper):
             note = layout.box()
             note.label(text="Converting: %s" % sources[0].name, icon="MESH_DATA")
             note.label(text="%d faces" % len(sources[0].data.polygons))
+            _draw_pictures(note, sources[0], self.keep_textures)
 
+        layout.prop(self, "keep_textures")
         layout.prop(self, "keep_source")
 
     def execute(self, context):
@@ -271,7 +552,29 @@ class DKR_OT_track_from_mesh(bpy.types.Operator, ImportHelper):
             return {"CANCELLED"}
 
         return build_track(self, context, obj, textures, self.keep_source,
-                           donor=donor)
+                           donor=donor, keep_textures=self.keep_textures)
+
+
+def _distinct_pictures(obj) -> int:
+    return len({os.path.normcase(custom_textures.image_source(image))
+                for _material, image in material_images(obj)})
+
+
+def _draw_pictures(layout, obj, keep):
+    count = _distinct_pictures(obj)
+    if not count:
+        return
+    if keep:
+        layout.label(text="%d picture(s) from its materials" % count,
+                     icon="IMAGE_DATA")
+        layout.label(text="become this track's own")
+        layout.label(text="textures, at the size the")
+        layout.label(text="console loads. The export's")
+        layout.label(text="HD pack restores the rest.")
+    else:
+        layout.label(text="%d picture(s) on its materials" % count,
+                     icon="IMAGE_DATA")
+        layout.label(text="will be left behind.")
 
 
 def _source_mesh(operator, context):
@@ -292,31 +595,54 @@ def _source_mesh(operator, context):
             {"ERROR"},
             "save the .blend first. A converted track is written as its own "
             "model file beside it, because that file becomes the base every "
-            "later export is applied to",
+            "later export is applied to - and a texture the mesh brings is "
+            "written beside it too",
         )
         return None
     return obj
 
 
-def build_track(operator, context, obj, textures, keep_source, donor=None):
+def build_track(operator, context, obj, textures, keep_source, donor=None,
+                keep_textures=False):
     """Build a level model out of one mesh and import it back as geometry.
 
     Shared by the two ways in, which differ only in where the starting texture
     table comes from: a donor track's, or nothing at all. Everything after that
     point is the same, which is the reason it is one function - the segmenting,
     the layout and the re-import are exactly what must not drift between them.
+
+    With ``keep_textures`` the mesh's own pictures are added to the table
+    first. Anything that fails after that takes them back out again, so a
+    refused conversion leaves the scene holding what it held before.
     """
     context.view_layer.update()
-    try:
-        faces, positions, colours = read_source_mesh(obj, textures)
-    except ValueError as error:
-        operator.report({"ERROR"}, str(error))
+    borrowed = len(textures)
+    adopted = None
+    if keep_textures:
+        try:
+            adopted = _adopt_images(context, obj, textures)
+        except custom_textures.CustomTextureError as error:
+            operator.report({"ERROR"}, str(error))
+            return {"CANCELLED"}
+        textures = adopted.table
+
+    def refuse(message):
+        if adopted is not None and adopted.added:
+            custom_textures.discard_last(context, adopted.added)
+        operator.report({"ERROR"}, message)
         return {"CANCELLED"}
 
+    stats = {}
+    try:
+        faces, positions, colours = read_source_mesh(
+            obj, textures, own=adopted.own if adopted else None,
+            borrowed=borrowed, stats=stats,
+        )
+    except ValueError as error:
+        return refuse(str(error))
+
     if not faces:
-        operator.report({"ERROR"},
-                        "%s has no faces to build a track from" % obj.name)
-        return {"CANCELLED"}
+        return refuse("%s has no faces to build a track from" % obj.name)
 
     try:
         model = level_model_layout.blank_model(textures)
@@ -327,8 +653,7 @@ def build_track(operator, context, obj, textures, keep_source, donor=None):
         payload = level_model_encoder.pack(model)
     except (level_model_layout.LayoutError,
             level_model_encoder.LevelModelEncodeError) as error:
-        operator.report({"ERROR"}, "could not build the track: %s" % error)
-        return {"CANCELLED"}
+        return refuse("could not build the track: %s" % error)
 
     stem = os.path.splitext(os.path.basename(bpy.data.filepath))[0]
     target = os.path.join(
@@ -338,10 +663,10 @@ def build_track(operator, context, obj, textures, keep_source, donor=None):
         with open(target, "wb") as handle:
             handle.write(payload)
     except OSError as error:
-        operator.report({"ERROR"}, "could not write %s: %s" % (target, error))
-        return {"CANCELLED"}
+        return refuse("could not write %s: %s" % (target, error))
 
     name = obj.name
+    uv_layers = [layer.name for layer in obj.data.uv_layers]
     obj[PROP_CONVERTED] = target
     if keep_source:
         obj.hide_set(True)
@@ -357,7 +682,8 @@ def build_track(operator, context, obj, textures, keep_source, donor=None):
     collection = geometry._geometry_collection(context)
     tree = (assets.AssetTree.find(donor) if donor else None) or prefs.resolve(context)
     built, _stats = geometry._build_geometry(
-        stem, model, collection, tree, include_hidden=True
+        stem, model, collection, tree, include_hidden=True,
+        own=custom_textures.entries(context),
     )
     built[geometry.PROP_MODEL_PATH] = target
     built[geometry.PROP_AUTHORED_BASE] = True
@@ -366,8 +692,22 @@ def build_track(operator, context, obj, textures, keep_source, donor=None):
 
     for warning in _budget_warnings(model, textures):
         operator.report({"WARNING"}, warning)
+    for warning in _texture_warnings(adopted, stats, uv_layers):
+        operator.report({"WARNING"}, warning)
 
-    source = "%s's %d textures" % (os.path.basename(donor), len(textures))         if donor else "no textures yet"
+    parts = []
+    if donor:
+        parts.append("%s's %d textures" % (os.path.basename(donor), borrowed))
+    if adopted is not None and adopted.pictures:
+        parts.append("%d picture(s) of the mesh's own" % adopted.pictures)
+        # The one thing a material cannot say is what the ground is made of,
+        # and finding out by driving is the wrong way to learn it.
+        operator.report(
+            {"INFO"},
+            "the mesh's pictures all start as road (SURFACE_DEFAULT): select a "
+            "material and use Set Surface Type for grass, sand, ice and the rest",
+        )
+    source = " and ".join(parts) if parts else "no textures yet"
     operator.report(
         {"INFO"},
         "built %d triangles into %d segments from %s, with %s, and wrote %s"
@@ -375,6 +715,45 @@ def build_track(operator, context, obj, textures, keep_source, donor=None):
            source, os.path.basename(target)),
     )
     return {"FINISHED"}
+
+
+def _texture_warnings(adopted, stats, uv_layers) -> list:
+    messages = []
+    if adopted is not None:
+        for picture, reason, materials in adopted.failed:
+            messages.append(
+                "%s could not be made a texture, so the faces of %s stay "
+                "untextured: %s" % (picture, ", ".join(materials), reason)
+            )
+        if adopted.no_hd:
+            name, reason = adopted.no_hd[0]
+            messages.append(
+                "%d texture(s) will have no high-resolution version (%s): %s"
+                % (len(adopted.no_hd), ", ".join(n for n, _r in adopted.no_hd),
+                   reason)
+            )
+    if stats.get("uv_rescued"):
+        messages.append(
+            "the mesh has %d UV maps (%s), and %d face(s) had no mapping in the "
+            "active one - what Ctrl+J leaves when the joined pieces' maps had "
+            "different names. Their mapping was taken from %s. Renaming the "
+            "maps to match before joining avoids this"
+            % (len(uv_layers), ", ".join(uv_layers), stats["uv_rescued"],
+               ", ".join(sorted(stats.get("uv_layers_used", ()))))
+        )
+    if stats.get("uv_unmapped"):
+        messages.append(
+            "%d textured face(s) have no UV mapping in any map, so each shows a "
+            "single texel of its texture. Unwrap them, or select them and use "
+            "Project Flat in the Textures panel" % stats["uv_unmapped"]
+        )
+    if stats.get("uv_clamped"):
+        messages.append(
+            "%d face(s) stretch their texture across more repeats than the s16 "
+            "a UV is stored in can reach, and were clamped. Scale those UV "
+            "islands down" % stats["uv_clamped"]
+        )
+    return messages
 
 
 def _budget_warnings(model, textures) -> list:
@@ -398,16 +777,16 @@ def _budget_warnings(model, textures) -> list:
 
 
 class DKR_OT_track_from_mesh_blank(bpy.types.Operator):
-    """Turn the selected mesh into DKR track geometry, choosing textures later
+    """Turn the selected mesh into DKR track geometry, keeping the pictures its materials draw"""
 
-    The same conversion, without borrowing a starting texture table. Every face
-    comes out untextured and the Textures panel is where they get their look -
-    which is the honest shape of the job now that a track can name any texture
-    in the ROM rather than only the ones a donor happened to ship with.
-    """
+    # The same conversion as DKR_OT_track_from_mesh, without borrowing a
+    # starting texture table. A face whose material draws a picture keeps it,
+    # as one of the track's own textures; any other comes out untextured, and
+    # the Textures panel is where it gets its look - which is the honest shape
+    # of the job now that a track can name any texture in the ROM.
 
     bl_idname = "dkr.track_from_mesh_blank"
-    bl_label = "Track From Mesh, No Textures"
+    bl_label = "Track From Mesh"
     bl_options = {"REGISTER"}
 
     keep_source: BoolProperty(
@@ -417,6 +796,12 @@ class DKR_OT_track_from_mesh_blank(bpy.types.Operator):
             "work and the addon does not delete it; the converted geometry is a "
             "separate object"
         ),
+        default=True,
+    )
+
+    keep_textures: BoolProperty(
+        name="Keep The Mesh's Textures",
+        description=_KEEP_TEXTURES_DESCRIPTION,
         default=True,
     )
 
@@ -434,20 +819,23 @@ class DKR_OT_track_from_mesh_blank(bpy.types.Operator):
             box = layout.box()
             box.label(text="Converting: %s" % sources[0].name, icon="MESH_DATA")
             box.label(text="%d faces" % len(sources[0].data.polygons))
+            _draw_pictures(box, sources[0], self.keep_textures)
 
         box = layout.box()
-        box.label(text="Every face comes out", icon="INFO")
-        box.label(text="untextured. Pick textures in")
-        box.label(text="the Textures panel afterwards -")
-        box.label(text="any texture in the ROM will do.")
+        box.label(text="A face with no picture comes", icon="INFO")
+        box.label(text="out untextured. Pick textures")
+        box.label(text="for those in the Textures")
+        box.label(text="panel - any in the ROM will do.")
 
+        layout.prop(self, "keep_textures")
         layout.prop(self, "keep_source")
 
     def execute(self, context):
         obj = _source_mesh(self, context)
         if obj is None:
             return {"CANCELLED"}
-        return build_track(self, context, obj, [], self.keep_source)
+        return build_track(self, context, obj, [], self.keep_source,
+                           keep_textures=self.keep_textures)
 
 
 CLASSES = (DKR_OT_track_from_mesh, DKR_OT_track_from_mesh_blank)

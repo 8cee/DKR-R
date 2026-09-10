@@ -73,17 +73,22 @@ class DKR_PT_geometry(DkrPanel, bpy.types.Panel):
         layout.operator("dkr.import_geometry", icon="MESH_DATA")
 
         from ..operators import new_track as new_track_ops
-        if new_track_ops.convertible(context):
+        sources = new_track_ops.convertible(context)
+        if sources:
             box = layout.box()
             box.label(text="A mesh of your own is in", icon="INFO")
             box.label(text="the scene. Track From Mesh")
-            box.label(text="turns it into geometry. Start")
-            box.label(text="from a track's textures, or")
-            box.label(text="from none and pick your own -")
-            box.label(text="any of the ROM's will load.")
+            box.label(text="turns it into geometry, and")
+            box.label(text="the pictures its materials")
+            box.label(text="draw become the track's own.")
+            box.label(text="Or start from a shipped")
+            box.label(text="track's texture table.")
             column = box.column(align=True)
-            column.operator("dkr.track_from_mesh", icon="MESH_MONKEY")
-            column.operator("dkr.track_from_mesh_blank", icon="MESH_MONKEY")
+            column.operator("dkr.track_from_mesh_blank", text="Track From Mesh",
+                            icon="MESH_MONKEY")
+            column.operator("dkr.track_from_mesh",
+                            text="Track From Mesh + A Track's Textures",
+                            icon="MESH_MONKEY")
 
         if not settings.geometry_path:
             box = layout.box()

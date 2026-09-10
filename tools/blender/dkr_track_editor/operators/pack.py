@@ -136,7 +136,7 @@ class DKR_OT_export_dkrmap(bpy.types.Operator, ExportHelper):
             # these by position and a failure to compile one has to stop the
             # export rather than ship a model pointing at a payload that is
             # not there.
-            _encode_textures(self, context, package)
+            own, texture_payloads = _encode_textures(self, context, package)
             _encode_geometry(self, context, package)
             _warn_header_without_geometry(self, context, package)
 
@@ -156,6 +156,11 @@ class DKR_OT_export_dkrmap(bpy.types.Operator, ExportHelper):
                 )
                 package.notes.append(message)
                 self.report({"WARNING"}, message)
+            # Last before the manifest, which records the pack's digest, and
+            # after everything that can still refuse the export - a pack left
+            # beside a package that was never written would belong to nothing.
+            hd_pack = _write_hd_pack(self, context, package, own,
+                                     texture_payloads)
             package.write()
         except geometry_export.GeometryExportError as error:
             self.report(
@@ -179,20 +184,27 @@ class DKR_OT_export_dkrmap(bpy.types.Operator, ExportHelper):
             )
             return {"CANCELLED"}
 
+        # The track and its pack are two files installed through two doors, so
+        # the one line that says the export worked names both.
+        pack_note = (
+            "; and %s - import it in DKR-R under Graphics > Custom Texture Packs"
+            % hd_pack if hd_pack else ""
+        )
         missing = package.missing_sections()
         if missing:
             self.report(
                 {"WARNING"},
                 "wrote %s with %d object(s). Still missing %s, which the "
-                "addon does not write yet - see HOW-TO-BUILD.md"
+                "addon does not write yet - see HOW-TO-BUILD.md%s"
                 % (os.path.basename(directory), len(object_map.objects),
-                   ", ".join(missing)),
+                   ", ".join(missing), pack_note),
             )
         else:
             self.report(
                 {"INFO"},
-                "wrote %s: %d objects, ready to install in custom-tracks/"
-                % (os.path.basename(directory), len(object_map.objects)),
+                "wrote %s: %d objects, ready to install in custom-tracks/%s"
+                % (os.path.basename(directory), len(object_map.objects),
+                   pack_note),
             )
         return {"FINISHED"}
 
@@ -205,6 +217,9 @@ def _encode_textures(operator, context, package):
     author sees in the panel identical to the numbering the runtime hands out -
     and dropping the unused ones would renumber the used ones, which is the one
     thing that silently repaints a track.
+
+    Returns ``(entries, payloads)`` in ordinal order, both empty for a track
+    with none, for :func:`_write_hd_pack` to name its replacements after.
     """
     from .. import textures as texture_module  # noqa: PLC0415
     from . import custom_textures, geometry as geometry_ops  # noqa: PLC0415
@@ -215,10 +230,12 @@ def _encode_textures(operator, context, package):
     # failure here that the game cannot survive: the id falls outside the
     # extended table and load_texture reads whatever is past the end of it.
     # It happens if the scene is opened without the images, so it is checked
-    # against what is about to be written rather than assumed away.
+    # against what is about to be written rather than assumed away - in the
+    # base table as well as the additions, because a track converted from a
+    # textured mesh keeps its own textures in the base model it wrote.
     dangling = set()
     for obj in geometry_ops.geometry_objects(context):
-        for record in geometry_ops.extra_textures(obj):
+        for record in geometry_ops.texture_table(obj):
             ordinal = texture_module.custom_ordinal(record.get("id", 0))
             if ordinal is not None and ordinal >= len(own):
                 dangling.add(ordinal + 1)
@@ -231,7 +248,7 @@ def _encode_textures(operator, context, package):
         )
 
     if not own:
-        return
+        return [], []
 
     missing = [entry.name for entry in own
                if not entry.png or not os.path.isfile(entry.png)]
@@ -242,6 +259,16 @@ def _encode_textures(operator, context, package):
             % (", ".join(missing), custom_textures.folder(context))
         )
 
+    separated = _separate_identical(context, own)
+    if separated:
+        own = custom_textures.entries(context)
+        package.notes.append(
+            "%s reduced to the same pixels as another of this track's textures "
+            "with a different original, so one invisible bit was flipped to "
+            "give each a high-resolution replacement of its own"
+            % ", ".join(separated)
+        )
+
     payloads = package.encode_textures(own)
     package.notes.append(
         "%d texture(s) of this track's own, %d bytes: %s"
@@ -249,6 +276,159 @@ def _encode_textures(operator, context, package):
            ", ".join("%s %dx%d" % (entry.name, entry.width, entry.height)
                      for entry in own))
     )
+    return own, payloads
+
+
+def _separate_identical(context, own) -> list:
+    """Give every texture with its own original its own replacement name.
+
+    A replacement is named by a hash of the texels, so two textures that reduce
+    to the same 64x32 share one - and if their originals differ, only one of
+    those could ever be drawn. Rather than tell the author about a problem they
+    cannot see, the second is nudged: one bit of blue flipped, which nobody can
+    see at that size (:func:`..textures.nudge_texels`). The nudge is kept on the
+    texture, so every export after this one writes the same bytes.
+
+    Returns the names of the textures nudged.
+    """
+    import hashlib  # noqa: PLC0415
+
+    from .. import rice_identity, textures as texture_module  # noqa: PLC0415
+    from . import custom_textures  # noqa: PLC0415
+
+    def original_digest(ordinal):
+        path = custom_textures.original_for(context, ordinal)
+        if not path or not os.path.isfile(path):
+            return None
+        with open(path, "rb") as handle:
+            return hashlib.sha256(handle.read()).hexdigest()
+
+    current = {}
+    for entry in own:
+        try:
+            current[entry.ordinal] = rice_identity.rice_identity(
+                entry.texels(), entry.width, entry.height, entry.format
+            )
+        except (rice_identity.IdentityError, texture_module.TextureEncodeError):
+            continue
+
+    taken = set(current.values())
+    holders = {}
+    moved = []
+    settings = context.scene.dkr
+    for entry in own:
+        identity = current.get(entry.ordinal)
+        if identity is None:
+            continue
+        digest = original_digest(entry.ordinal)
+        holder = holders.get(identity)
+        if holder is not None and holder and digest and holder != digest:
+            nudge, identity = rice_identity.free_nudge(
+                entry.texels(nudge=0), entry.width, entry.height, entry.format,
+                taken,
+            )
+            settings.custom_textures[entry.ordinal].nudge = nudge
+            taken.add(identity)
+            moved.append(entry.name)
+        if not holders.get(identity):
+            holders[identity] = digest
+    return moved
+
+
+def _write_hd_pack(operator, context, package, own, payloads) -> str:
+    """Write the high-resolution texture pack beside the package.
+
+    One replacement per texture of the track's own that can have one, named by
+    the identity RT64 will compute for the payload just written - computed from
+    those very bytes, so the pack and the package cannot disagree about what
+    the texture is. Returns ``"<file> with N HD texture(s)"`` for the export's
+    report, or ``""`` if no pack was written.
+
+    Nothing here can fail the export. A track is whole without its pack, so a
+    texture with no original, one too large for the importer, or a pack that
+    cannot be written is a warning and the track ships regardless.
+    """
+    from .. import rice_identity, rice_pack, textures as texture_module  # noqa: PLC0415
+    from . import custom_textures  # noqa: PLC0415
+
+    target = dkrmap.hd_pack_path(package.directory)
+    chosen = []
+    left_out = []
+    for entry, payload in zip(own, payloads):
+        start = texture_module.TEXTURE_HEADER_SIZE
+        texels = payload[start:start + texture_module.texel_bytes(
+            entry.width, entry.height, entry.format)]
+        try:
+            identity = rice_identity.rice_identity(
+                texels, entry.width, entry.height, entry.format
+            )
+        except rice_identity.IdentityError as error:
+            left_out.append((entry.name, str(error)))
+            continue
+        original = custom_textures.original_for(context, entry.ordinal)
+        problem = (rice_pack.image_problem(original) if original else
+                   "no full-resolution copy was kept, and the file it was "
+                   "added from is not where it was")
+        if problem:
+            left_out.append((entry.name, problem))
+            continue
+        chosen.append((identity, original, entry))
+
+    for name, reason in left_out[:3]:
+        operator.report({"WARNING"},
+                        "no high-resolution version of %s: %s" % (name, reason))
+    if len(left_out) > 3:
+        operator.report({"WARNING"},
+                        "and %d more texture(s) have none" % (len(left_out) - 3))
+
+    if not chosen:
+        if os.path.isfile(target):
+            operator.report(
+                {"WARNING"},
+                "%s is from an earlier export and this one has nothing to put "
+                "in it, so it no longer matches the track. Delete it, and "
+                "remove it from DKR-R's texture packs" % os.path.basename(target),
+            )
+        return ""
+
+    digest = rice_pack.texture_digest(payloads)
+    stamp = {
+        "track": package.track_id,
+        "textureDigest": digest,
+        "textures": [
+            {"ordinal": entry.ordinal, "name": entry.name, "identity": identity}
+            for identity, _original, entry in chosen
+        ],
+    }
+    try:
+        written = rice_pack.write_pack(
+            target, [(identity, original) for identity, original, _e in chosen],
+            stamp,
+        )
+    except (rice_pack.PackError, OSError) as error:
+        operator.report({"WARNING"},
+                        "the high-resolution texture pack was not written: %s"
+                        % error)
+        return ""
+
+    package.hd_pack = {
+        "file": os.path.basename(target),
+        "textureDigest": digest,
+        "textures": written["count"],
+    }
+    megabytes = written["bytes"] / (1024.0 * 1024.0)
+    package.notes.append("%s %.1f MB: %d full-resolution original(s)"
+                         % (os.path.basename(target), megabytes,
+                            written["count"]))
+    if written["bytes"] > rice_pack.LARGE_PACK_BYTES:
+        operator.report(
+            {"WARNING"},
+            "%s is %.0f MB - it carries every original at the size it was "
+            "made. That is allowed; smaller originals make a smaller pack"
+            % (os.path.basename(target), megabytes),
+        )
+    return "%s with %d HD texture(s)" % (os.path.basename(target),
+                                          written["count"])
 
 
 def _encode_geometry(operator, context, package):

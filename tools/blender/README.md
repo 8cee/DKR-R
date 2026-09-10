@@ -117,13 +117,30 @@ Two ceilings are worth knowing about, both shown in the Geometry panel:
   running. The symptom is falling through the floor somewhere else entirely,
   with no diagnostic at all. One giant polygon is enough to do it.
 
-**Or build the track from your own mesh.** Model one in Blender and the Geometry
-panel offers to convert it: *Track From Mesh* starts from a shipped track's
-texture table, which brings a coherent set of images and their surface types
-with it, and *Track From Mesh, No Textures* starts from nothing. Neither decides
-what the track can look like - that is the Textures panel below. The mesh is
-partitioned into segments with the bounding boxes, BSP and PVS to match, written
-out as its own `.bin`, and imported back as ordinary editable geometry.
+**Or build the track from your own mesh.** Model one in Blender - textured, if
+you like, with image materials and a UV unwrap - join the pieces with `Ctrl+J`,
+and the Geometry panel offers to convert it. *Track From Mesh* keeps the
+pictures the materials draw: each becomes one of the track's own textures (see
+*Or with a picture of your own* below), mapped with the UVs you gave it, and the
+viewport shows the result. A material with no picture comes out untextured.
+*Track From Mesh + A Track's Textures* does the same starting from a shipped
+track's texture table, which brings a coherent set of images and their surface
+types with it. Either way the Textures panel can change anything afterwards. The
+mesh is partitioned into segments with the bounding boxes, BSP and PVS to match,
+written out as its own `.bin`, and imported back as ordinary editable geometry.
+
+Three things the conversion reports rather than decides silently:
+
+- A material names a picture, not a kind of ground, so every picture starts as
+  road. Give grass, sand or ice their surface per material with *Set Surface
+  Type*.
+- `Ctrl+J` matches UV maps by name. Pieces whose maps were named differently
+  come out with one map per name, each piece mapped in only one of them. The
+  conversion takes each face's mapping from the map that has it, and says so.
+- A track holds at most 255 textures of its own and a model's table 255
+  entries. A mesh past either is refused whole, with the materials named - never
+  half converted. *Keep The Mesh's Textures*, in the conversion dialog, turns
+  the whole behaviour off.
 
 **Texture the track with anything in the ROM.** The Textures panel browses every
 one of DKR's 3D textures - **1401** of them in the US v1.0 extraction - as
@@ -172,11 +189,22 @@ Two limits are the console's and the addon refuses rather than warns:
   of two up to that, and gives anything else a clamp - the texture stretches
   once across each face instead of repeating.
 
-The reduction is severe and there is no way around it, so look at the thumbnail
-before building a track on it. Everything else is arranged so you do not have
-to think about it: the image is resampled to the largest size that fits, in the
-shape closest to the original's, and written as a PNG in `dkr_textures/` beside
-the `.blend` so the package can be rebuilt from the scene alone.
+The reduction is severe and there is no way around it inside the track, so look
+at the thumbnail before building a track on it. Everything else is arranged so
+you do not have to think about it: the image is resampled to the largest size
+that fits, in the shape closest to the original's, and written as a PNG in
+`dkr_textures/` beside the `.blend` so the package can be rebuilt from the scene
+alone. The original is kept beside it too, at full size, in
+`dkr_textures/original/`.
+
+**The export gives the resolution back.** Beside `my-track.dkrmap` it writes
+`my-track-hd.zip`: a texture pack holding each picture at the size it was made,
+named so that DKR-R's renderer draws it in place of the 64x32. Import it in
+DKR-R under **Graphics > Custom Texture Packs** and enable it - the export's
+report and the package's `HOW-TO-BUILD.md` both say so. The track does not need
+the pack: without it the game draws the 64x32, which is what the Accurate preset
+always does. And the pack replaces only textures the addon wrote, which exist in
+no other track. See `docs/TEXTURE_PACKS.md` in DKR-R.
 
 The **order** of the list is the texture's identity - the runtime hands out ids
 by position - so removing one moves the rest, and removing one the geometry has
@@ -261,7 +289,9 @@ section covers what lands in the package and the one rule about sharing it.
 
 `Export .dkrmap` writes a directory holding the manifest, a compiled
 `header.bin`, both compiled object maps, any textures the track ships in
-`textures/`, and the glTF sources beside them.
+`textures/`, and the glTF sources beside them. A track with pictures of its own
+also gets `<track>-hd.zip` next to the directory - the high-resolution pack,
+installed separately from the track.
 
 **Everything is compiled here**, without the decomp's `dkr_assets_tool` - that
 tool builds a whole `assets.bin` and ships as a Linux binary, so depending on it

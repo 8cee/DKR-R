@@ -434,6 +434,19 @@ TMEM_BYTES = 4096
 #: flags say.
 MAX_WRAP_SIZE = 64
 
+# **An invariant the high-resolution texture packs depend on.** The identity
+# RT64 replaces a texture by (:mod:`.rice_identity`) is hashed over a rectangle
+# the renderer derives from the tile ``material_init`` sets up - its mask, its
+# clamp bits and the DXT of the load - and not from the image's own size. The
+# two agree for every texture :func:`check_size` accepts: a power of two no
+# larger than MAX_WRAP_SIZE makes the mask exactly the side, and
+# ``gDPLoadTextureBlock`` makes the tile exactly the image whichever wrap flags
+# :func:`texture_header` writes. Loosen either rule and every pack already
+# handed out stops matching, silently - the game draws the 64x32 and nothing
+# says why. ``tests/test_rice_identity.py`` derives the rectangle the way the
+# renderer does, for every size and format accepted here, and fails if the two
+# ever part.
+
 #: ``TEXTURE_RENDER_MODES`` in the asset tool, which is what the high nibble of
 #: ``TextureHeader.format`` holds. ``material_init`` reads it: the two
 #: transparent modes set ``RENDER_SEMI_TRANSPARENT`` on the texture.
@@ -822,6 +835,56 @@ def encode_texels(rgba, width, height, texture_format) -> bytes:
     return bytes(out)
 
 
+def _quiet_bit(texture_format, texel):
+    """``(byte, mask)`` of the least visible bit in one texel.
+
+    Never an alpha bit - in RGBA16 that is the lowest bit of the texel, and
+    flipping it would punch a hole - but the lowest bit of blue, or of the
+    intensity.
+    """
+    code = int(texture_format)
+    texel = int(texel)
+    if code == FORMAT_CODES["RGBA32"]:
+        return texel * 4 + 2, 0x01
+    if code == FORMAT_CODES["RGBA16"]:
+        return texel * 2 + 1, 0x02
+    if code == FORMAT_CODES["I8"]:
+        return texel, 0x01
+    if code == FORMAT_CODES["IA16"]:
+        return texel * 2, 0x01
+    if code == FORMAT_CODES["IA8"]:
+        return texel, 0x10
+    if code == FORMAT_CODES["I4"]:
+        return texel // 2, 0x10 if texel % 2 == 0 else 0x01
+    if code == FORMAT_CODES["IA4"]:
+        return texel // 2, 0x20 if texel % 2 == 0 else 0x02
+    raise TextureEncodeError("format %d has no texels to nudge" % code)
+
+
+def nudge_texels(texels, width, height, texture_format, nudge=0) -> bytes:
+    """The texels with one invisible bit flipped, or unchanged for ``nudge`` 0.
+
+    Why this exists: a high-resolution pack names each replacement by a hash of
+    the texels. Two of a track's textures that reduce to the same 64x32 - two
+    photographs of one wall, say - would share a name, and only one of their
+    originals could be drawn. Flipping the lowest bit of one texel's blue is a
+    change no one can see at 64x32 and gives the second its own name.
+
+    Which texel is ``nudge - 1``. Not every nudge changes the name - the CRC
+    adds the first word of each row twice, once XORed with the row number, and
+    a flip there can cancel - so the export tries them in turn
+    (:func:`.rice_identity.free_nudge`) and keeps the first that works.
+    """
+    nudge = int(nudge or 0)
+    if nudge <= 0:
+        return bytes(texels)
+    count = int(width) * int(height)
+    at, mask = _quiet_bit(texture_format, (nudge - 1) % max(1, count))
+    out = bytearray(texels)
+    out[at] ^= mask
+    return bytes(out)
+
+
 def texture_header(width, height, texture_format, render_mode="OPAQUE",
                    frames=1, frame_delay=0, clamp_s=False,
                    clamp_t=False) -> bytes:
@@ -851,13 +914,16 @@ def texture_header(width, height, texture_format, render_mode="OPAQUE",
 
 
 def encode_texture(png_path, texture_format=None, render_mode="OPAQUE",
-                   clamp_s=False, clamp_t=False) -> bytes:
+                   clamp_s=False, clamp_t=False, nudge=0) -> bytes:
     """One PNG as the bytes ``ASSET_TEXTURES_3D`` holds for a texture.
 
     The result is padded to sixteen bytes because ``load_texture`` puts the
     display list it builds at ``align16(tex + assetSize)`` inside an allocation
     of exactly ``assetSize`` plus the display lists - so a payload that is not a
     multiple of sixteen pushes the last one past the end of its own block.
+
+    ``nudge`` is :func:`nudge_texels`'s, and is zero for all but a texture that
+    had to be told apart from another.
     """
     code = FORMAT_CODES["RGBA16"] if texture_format is None else int(texture_format)
     width, height, rgba = read_png(png_path)
@@ -865,7 +931,8 @@ def encode_texture(png_path, texture_format=None, render_mode="OPAQUE",
     payload = bytearray()
     payload += texture_header(width, height, code, render_mode,
                               clamp_s=clamp_s, clamp_t=clamp_t)
-    payload += encode_texels(rgba, width, height, code)
+    payload += nudge_texels(encode_texels(rgba, width, height, code),
+                            width, height, code, nudge)
     while len(payload) % 16:
         payload.append(0)
     if len(payload) < TEMP_HEADER_SIZE:
@@ -888,10 +955,10 @@ class CustomTexture:
     """
 
     __slots__ = ("ordinal", "name", "png", "width", "height", "format",
-                 "render_mode", "source")
+                 "render_mode", "source", "original", "nudge")
 
     def __init__(self, ordinal, name, png, width, height, texture_format,
-                 render_mode="OPAQUE", source=""):
+                 render_mode="OPAQUE", source="", original="", nudge=0):
         self.ordinal = int(ordinal)
         self.name = name
         self.png = png
@@ -902,6 +969,12 @@ class CustomTexture:
         #: The image the author picked, kept so the panel can say where it came
         #: from. The PNG beside it is what is encoded.
         self.source = source
+        #: The picture at the resolution the author made it, as a PNG beside the
+        #: reduced one. Never encoded into the track - it is what the
+        #: high-resolution pack hands RT64 to draw instead.
+        self.original = original
+        #: :func:`nudge_texels`'s, kept so every export writes the same bytes.
+        self.nudge = int(nudge or 0)
 
     @property
     def index(self) -> int:
@@ -930,7 +1003,19 @@ class CustomTexture:
         return "%s  %dx%d" % (self.name, self.width, self.height)
 
     def encode(self) -> bytes:
-        return encode_texture(self.png, self.format, self.render_mode)
+        return encode_texture(self.png, self.format, self.render_mode,
+                              nudge=self.nudge)
+
+    def texels(self, nudge=None) -> bytes:
+        """The image as ``encode`` writes it, without the header.
+
+        ``nudge`` overrides the texture's own; 0 gives the plain reduction.
+        """
+        width, height, rgba = read_png(self.png)
+        check_size(width, height, self.format)
+        return nudge_texels(encode_texels(rgba, width, height, self.format),
+                            width, height, self.format,
+                            self.nudge if nudge is None else nudge)
 
     def __repr__(self):
         return "CustomTexture(%d, %r, %dx%d)" % (

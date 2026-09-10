@@ -34,7 +34,7 @@ import shutil
 from typing import Dict, List, Optional
 
 from . import (gltf_io, level_header, level_model_encoder,
-               object_map_encoder, textures as texture_module)
+               object_map_encoder, rice_pack, textures as texture_module)
 from .gltf_io import ObjectMap
 
 MANIFEST_NAME = "manifest.json"
@@ -118,6 +118,11 @@ class TrackPackage:
         #: A list rather than a mapping because position is the identity here:
         #: see :data:`TEXTURE_SECTION`.
         self.texture_payloads: List[str] = []
+        #: ``{"file", "textureDigest", "textures"}`` once the high-resolution
+        #: texture pack has been written beside the package, else ``None``.
+        #: The pack is not part of the package - see :mod:`.rice_pack` - but
+        #: the manifest names it, so the two can be matched up later.
+        self.hd_pack: Optional[Dict[str, object]] = None
         self.notes: List[str] = []
 
     # -- sources ---------------------------------------------------------
@@ -296,6 +301,14 @@ class TrackPackage:
             manifest["author"] = self.author
         if self.revision:
             manifest["builtFrom"] = self.revision
+        if self.hd_pack:
+            # Informational: the runtime reads the keys it knows and nothing
+            # else. The digest is the pack stamp's, so a pack and a package
+            # from two different exports can be told apart.
+            manifest["hdTexturePack"] = {
+                "file": self.hd_pack["file"],
+                "textureDigest": self.hd_pack["textureDigest"],
+            }
         return manifest
 
     def missing_sections(self) -> List[str]:
@@ -382,6 +395,33 @@ class TrackPackage:
                 "- `%s/%d.bin`" % (TEXTURE_DIR, position)
                 for position in range(len(self.texture_payloads))
             ] + [""]
+        if self.hd_pack:
+            pack = self.hd_pack["file"]
+            lines += [
+                "## High-resolution textures",
+                "",
+                "`%s`, beside this directory, holds the full-resolution" % pack,
+                "originals of %d of this track's own textures. The track carries"
+                % self.hd_pack["textures"],
+                "each at the size the console can load - 64x32 for a colour image -",
+                "and is complete without the pack. With it, DKR-R's renderer draws",
+                "the original in place of the reduction.",
+                "",
+                "1. Install this directory, as below.",
+                "2. In DKR-R, **Graphics > Custom Texture Packs > Import Texture",
+                "   Pack**, choose `%s`, and enable it." % pack,
+                "3. Restart DKR-R if the track was installed while it was running.",
+                "",
+                "The pack applies to the **Modern** preset. Accurate always draws",
+                "the track's own reduced textures, which is correct as well.",
+                "",
+                "The pack belongs to this export: `manifest.json` and the pack's",
+                "`%s` both carry the texture digest `%s`."
+                % (rice_pack.STAMP_NAME, self.hd_pack["textureDigest"]),
+                "A pack from another export matches nothing and changes nothing,",
+                "so export and import the two together.",
+                "",
+            ]
         if missing:
             lines += [
                 "## Still needed",
@@ -433,6 +473,17 @@ class TrackPackage:
             lines += ["## Notes", ""] + ["- %s" % n for n in self.notes] + [""]
         with open(path, "w", encoding="utf-8", newline="\n") as handle:
             handle.write("\n".join(lines))
+
+
+def hd_pack_path(package_directory: str) -> str:
+    """Where a package's high-resolution texture pack goes: beside it.
+
+    ``my-track.dkrmap`` gets ``my-track-hd.zip`` in the same folder. Never
+    inside - the runtime serves a package's files byte for byte, and a pack in
+    there would be carried and never read.
+    """
+    stem = os.path.splitext(os.path.normpath(package_directory))[0]
+    return stem + "-hd.zip"
 
 
 def package_path(directory: str, track_id: str) -> str:

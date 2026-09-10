@@ -2490,11 +2490,13 @@ def _refused(call):
     return None
 
 
-def _write_probe_image(directory, name, width, height):
+def _write_probe_image(directory, name, width, height, file_format="PNG"):
     """A picture on disk to import, made without leaving Blender.
 
     Deliberately not a power of two and deliberately not 2:1, so the import has
-    to resample it and choose a shape rather than pass it through.
+    to resample it and choose a shape rather than pass it through. A JPEG takes
+    the other road through the import: a PNG original is copied as it is, and
+    anything else is written out through Blender.
     """
     image = bpy.data.images.new(name, width, height, alpha=True)
     pixels = [0.0] * (width * height * 4)
@@ -2506,12 +2508,286 @@ def _write_probe_image(directory, name, width, height):
             pixels[at + 2] = 0.25
             pixels[at + 3] = 1.0
     image.pixels.foreach_set(pixels)
-    path = os.path.join(directory, name + ".png")
-    image.file_format = "PNG"
+    path = os.path.join(directory,
+                        name + (".jpg" if file_format == "JPEG" else ".png"))
+    image.file_format = file_format
     image.filepath_raw = path
     image.save()
     bpy.data.images.remove(image)
     return path
+
+
+def _image_material(name, path):
+    """A material drawing ``path`` the way an author's does: image, BSDF, output.
+
+    It also carries a second image node nothing is linked to, added first, as
+    real materials often do - a leftover, a roughness map. The picture that
+    counts is the one that reaches the surface.
+    """
+    material = bpy.data.materials.new(name)
+    material.use_nodes = True
+    tree = material.node_tree
+    output = next((n for n in tree.nodes if n.type == "OUTPUT_MATERIAL"), None)
+    if output is None:
+        output = tree.nodes.new("ShaderNodeOutputMaterial")
+    shader = next((n for n in tree.nodes if n.type == "BSDF_PRINCIPLED"), None)
+    if shader is None:
+        shader = tree.nodes.new("ShaderNodeBsdfPrincipled")
+        tree.links.new(shader.outputs[0], output.inputs["Surface"])
+    stray = tree.nodes.new("ShaderNodeTexImage")
+    stray.image = bpy.data.images.new("%s leftover" % name, 8, 8)
+    node = tree.nodes.new("ShaderNodeTexImage")
+    node.image = bpy.data.images.load(path)
+    tree.links.new(node.outputs["Color"], shader.inputs["Base Color"])
+    return material
+
+
+def _map_key(co):
+    """A Blender position as the whole map units a level model stores it in."""
+    return tuple(int(round(float(c))) for c in scene.to_map(co))
+
+
+def test_track_from_mesh_keeps_material_textures():
+    """The flow the HD texture plan exists for, end to end.
+
+    Make the track with textured materials, convert it with one click, export
+    it: the textures are still there - in the model file, on screen, in the
+    package - and the export leaves the pack that gives DKR-R the originals.
+    Each link is checked at its far end: every corner's UV in the written file
+    against the author's unwrap, the picture each viewport material shows, and
+    the pack's names against the identity of the payload bytes it ships with.
+    """
+    print("a textured mesh keeps its textures through Track From Mesh")
+    import zipfile
+
+    from dkr_track_editor import (level_model, rice_identity, rice_pack,
+                                  textures as texture_module)
+    from dkr_track_editor.operators import custom_textures as custom_ops
+    from dkr_track_editor.operators import geometry as geometry_ops
+
+    fresh()
+    temporary = tempfile.mkdtemp(prefix="dkr-keep-tex-")
+    try:
+        bpy.ops.wm.save_as_mainfile(
+            filepath=os.path.join(temporary, "keeping.blend")
+        )
+        road = _write_probe_image(temporary, "road", 200, 120)
+        # A JPEG, because that is what a photograph usually is - and its
+        # original cannot simply be copied into the pack the way a PNG's is.
+        grass = _write_probe_image(temporary, "grass", 120, 200,
+                                   file_format="JPEG")
+
+        bpy.ops.mesh.primitive_grid_add(size=4000.0, x_subdivisions=4,
+                                        y_subdivisions=4)
+        source = bpy.context.active_object
+        mesh = source.data
+        mesh.materials.append(_image_material("Road", road))
+        mesh.materials.append(_image_material("Grass", grass))
+        half = len(mesh.polygons) // 2
+        for polygon in mesh.polygons:
+            polygon.material_index = 0 if polygon.index < half else 1
+
+        # A grid's unwrap is continuous, so each position has one UV.
+        unwrap = {}
+        layer = mesh.uv_layers.active
+        for loop in mesh.loops:
+            position = source.matrix_world @ mesh.vertices[loop.vertex_index].co
+            unwrap[_map_key(position)] = tuple(layer.data[loop.index].uv)
+
+        result = bpy.ops.dkr.track_from_mesh_blank(keep_source=False)
+        check(result == {"FINISHED"},
+              "the textured mesh converts with one click (%r)" % (result,))
+
+        settings = bpy.context.scene.dkr
+        own = custom_ops.entries(bpy.context)
+        check([(e.width, e.height) for e in own] == [(64, 32), (32, 64)],
+              "each picture became one of the track's own textures, in the "
+              "shape closest to it (%r)" % [(e.width, e.height) for e in own])
+        check([texture_module.png_size(e.original) for e in own]
+              == [(200, 120), (120, 200)],
+              "and each keeps its original at the size it was made (%r)"
+              % [texture_module.png_size(e.original) for e in own])
+        check(bool(own) and custom_ops.same_source(own[0].source, road),
+              "the picture taken is the one reaching the surface, not a "
+              "leftover node (%r)" % (own[0].source if own else None))
+        if len(own) != 2:
+            return
+
+        written = os.path.join(temporary, "keeping-geometry.bin")
+        model = level_model.load(written)
+        check([t.texture_id for t in model.textures]
+              == [texture_module.custom_id(0), texture_module.custom_id(1)],
+              "the model file's table names both, by the ids the runtime "
+              "rewrites (%r)" % [t.texture_id for t in model.textures])
+        untextured = sum(batch.face_count for segment in model.segments
+                         for batch in segment.batches
+                         if batch.texture_index == level_model.NO_TEXTURE)
+        check(untextured == 0,
+              "and no triangle is left untextured (%d are)" % untextured)
+
+        built = geometry_ops.geometry_objects(bpy.context)
+        check(len(built) == 1, "the track was imported back")
+        if not built:
+            return
+        obj = built[0]
+        tri = obj.data
+        table = geometry_ops.texture_table(obj)
+        face_textures = _read_textures(tri)
+        raw = [0] * (len(tri.loops) * 2)
+        tri.attributes[geometry_ops.ATTR_UV].data.foreach_get("value", raw)
+        compared = wrong = 0
+        for polygon in tri.polygons:
+            entry = table[face_textures[polygon.index]]
+            for loop in polygon.loop_indices:
+                vertex = tri.vertices[tri.loops[loop].vertex_index]
+                uv = unwrap.get(_map_key(obj.matrix_world @ vertex.co))
+                if uv is None:
+                    continue
+                want = (int(round(uv[0] * 32 * entry["w"])),
+                        int(round((1.0 - uv[1]) * 32 * entry["h"])))
+                compared += 1
+                if (raw[loop * 2], raw[loop * 2 + 1]) != want:
+                    wrong += 1
+        check(compared >= len(tri.polygons) * 3 and wrong == 0,
+              "every corner's UV in the file is the author's unwrap (%d of %d "
+              "differ)" % (wrong, compared))
+
+        shown = {}
+        for material in tri.materials:
+            index = int(material.get(geometry_ops.PROP_TEXTURE_INDEX, -1))
+            node = custom_ops.image_node(material)
+            if index >= 0 and node is not None:
+                shown[index] = os.path.normcase(os.path.normpath(
+                    bpy.path.abspath(node.image.filepath)))
+        wanted = {
+            index: os.path.normcase(os.path.normpath(
+                own[texture_module.custom_ordinal(entry["id"])].png))
+            for index, entry in enumerate(table)
+        }
+        check(shown == wanted,
+              "and the viewport shows each one's picture rather than an empty "
+              "material (%r)" % shown)
+
+        # -- export ------------------------------------------------------
+        settings.track_name = "Keeping"
+        settings.track_id = "keeping"
+        bpy.ops.dkr.place_object(object_id="ASSET_OBJECT_SETUPPOINT")
+        target = os.path.join(temporary, "keeping.dkrmap")
+        result = bpy.ops.dkr.export_dkrmap(filepath=target, validate_first=False)
+        check(result == {"FINISHED"}, "the package exports (%r)" % (result,))
+
+        pack = os.path.join(temporary, "keeping-hd.zip")
+        check(os.path.isfile(pack),
+              "and the high-resolution pack is written beside it")
+        check(not any(name.endswith(".zip") for name in os.listdir(target)),
+              "not inside it, where the runtime would carry it unread")
+        if not os.path.isfile(pack):
+            return
+
+        payloads = []
+        identities = []
+        for ordinal, entry in enumerate(own):
+            with open(os.path.join(target, "textures", "%d.bin" % ordinal),
+                      "rb") as handle:
+                payload = handle.read()
+            payloads.append(payload)
+            texels = payload[32:32 + texture_module.texel_bytes(
+                entry.width, entry.height, entry.format)]
+            identities.append(rice_identity.rice_identity(
+                texels, entry.width, entry.height, entry.format))
+        with zipfile.ZipFile(pack) as archive:
+            names = set(archive.namelist())
+            check(names == ({rice_pack.entry_name(i) for i in identities}
+                            | {rice_pack.STAMP_NAME}),
+                  "the pack names each original by the identity of the payload "
+                  "the package ships (%r)" % sorted(names))
+            sizes = [struct.unpack(">II", archive.read(
+                         rice_pack.entry_name(i))[16:24])
+                     for i in identities if rice_pack.entry_name(i) in names]
+            check(sizes == [(200, 120), (120, 200)],
+                  "and holds them at full size (%r)" % sizes)
+
+        with open(os.path.join(target, "manifest.json"), encoding="utf-8") as h:
+            manifest = json.load(h)
+        stamp = rice_pack.read_stamp(pack) or {}
+        digest = rice_pack.texture_digest(payloads)
+        check(manifest.get("hdTexturePack", {}).get("textureDigest") == digest
+              and stamp.get("textureDigest") == digest,
+              "the manifest and the pack carry one digest, of these payloads")
+        with open(os.path.join(target, "HOW-TO-BUILD.md"), encoding="utf-8") as h:
+            check("keeping-hd.zip" in h.read(),
+                  "and HOW-TO-BUILD.md says how to import it")
+    finally:
+        shutil.rmtree(temporary, ignore_errors=True)
+        fresh()
+
+
+def test_track_from_mesh_survives_ctrl_j():
+    """Pieces joined with Ctrl+J keep their mapping, whatever their maps were called.
+
+    Joining matches UV maps by name, so pieces whose maps were named apart come
+    out with one map per name and each piece mapped in only one of them.
+    Reading the active map alone would flatten the other piece - every face one
+    texel - and say nothing.
+    """
+    print("a mesh joined from differently mapped pieces")
+    from dkr_track_editor.operators import custom_textures as custom_ops
+    from dkr_track_editor.operators import geometry as geometry_ops
+
+    fresh()
+    temporary = tempfile.mkdtemp(prefix="dkr-ctrl-j-")
+    try:
+        bpy.ops.wm.save_as_mainfile(
+            filepath=os.path.join(temporary, "joined.blend")
+        )
+        left_image = _write_probe_image(temporary, "left", 200, 120)
+        right_image = _write_probe_image(temporary, "right", 120, 200)
+
+        bpy.ops.mesh.primitive_grid_add(size=2000.0, x_subdivisions=2,
+                                        y_subdivisions=2,
+                                        location=(-1500.0, 0.0, 0.0))
+        left = bpy.context.active_object
+        left.data.materials.append(_image_material("Left", left_image))
+        bpy.ops.mesh.primitive_grid_add(size=2000.0, x_subdivisions=2,
+                                        y_subdivisions=2,
+                                        location=(1500.0, 0.0, 0.0))
+        right = bpy.context.active_object
+        right.data.materials.append(_image_material("Right", right_image))
+        right.data.uv_layers.active.name = "Scanned UVs"
+
+        for other in bpy.context.scene.objects:
+            other.select_set(False)
+        left.select_set(True)
+        right.select_set(True)
+        bpy.context.view_layer.objects.active = left
+        bpy.ops.object.join()
+        joined = bpy.context.active_object
+        maps = [layer.name for layer in joined.data.uv_layers]
+        print("  Ctrl+J left %d UV map(s): %s" % (len(maps), ", ".join(maps)))
+
+        result = bpy.ops.dkr.track_from_mesh_blank(keep_source=False)
+        check(result == {"FINISHED"}, "the joined mesh converts (%r)" % (result,))
+        check(len(custom_ops.entries(bpy.context)) == 2,
+              "both pieces' pictures came along")
+
+        built = geometry_ops.geometry_objects(bpy.context)
+        check(len(built) == 1, "the track was imported back")
+        if not built:
+            return
+        tri = built[0].data
+        raw = [0] * (len(tri.loops) * 2)
+        tri.attributes[geometry_ops.ATTR_UV].data.foreach_get("value", raw)
+        flat = sum(
+            1 for polygon in tri.polygons
+            if len({(raw[l * 2], raw[l * 2 + 1])
+                    for l in polygon.loop_indices}) == 1
+        )
+        check(flat == 0,
+              "no face of either piece lost its mapping (%d came out as a "
+              "single texel)" % flat)
+    finally:
+        shutil.rmtree(temporary, ignore_errors=True)
+        fresh()
 
 
 def test_custom_texture_reaches_the_package():
@@ -2728,11 +3004,19 @@ def test_custom_texture_refuses_what_the_hardware_cannot_draw():
               "and it is the only one that was added")
 
         # Nothing that failed may leave a PNG behind: the next import would
-        # number around it and the folder would fill with dead pictures.
+        # number around it and the folder would fill with dead pictures. That
+        # goes for the full-resolution copies kept under original/ as well.
         folder = os.path.join(temporary, "dkr_textures")
-        written = sorted(os.listdir(folder)) if os.path.isdir(folder) else []
+        written = sorted(
+            name for name in (os.listdir(folder) if os.path.isdir(folder) else [])
+            if os.path.isfile(os.path.join(folder, name))
+        )
         check(len(written) == 1,
               "a refused import leaves no file behind (%r)" % written)
+        originals = os.path.join(folder, "original")
+        kept = sorted(os.listdir(originals)) if os.path.isdir(originals) else []
+        check(kept == written,
+              "and keeps an original only for the one that was added (%r)" % kept)
     finally:
         shutil.rmtree(temporary, ignore_errors=True)
         fresh()
@@ -2853,6 +3137,8 @@ def main():
         test_apply_animated_texture()
         test_project_texture_onto_new_geometry()
         test_track_from_mesh_with_its_own_textures()
+        test_track_from_mesh_keeps_material_textures()
+        test_track_from_mesh_survives_ctrl_j()
         test_texture_browser_pieces()
         test_texture_side_operators()
         test_custom_texture_reaches_the_package()
