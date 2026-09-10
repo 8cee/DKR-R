@@ -11,9 +11,13 @@ depending on it would have put a C++ toolchain between an author and their
 track. The encoder is checked against the retail bytes: it reproduces all 136
 shipped object maps exactly.
 
-``LEVEL_HEADERS`` is not written yet, so a package still needs one supplied.
-The glTF sources go in beside the payloads either way, both as the input the
-asset tool would take and as something an author can read.
+``TEXTURES_3D`` is written here too, and it is the one section a track adds
+**many** payloads to. Their order is their identity - the runtime numbers them
+by position and the level model names them by the same position - so they are
+written in ordinal order and never sorted.
+
+The glTF sources go in beside the payloads, both as the input the asset tool
+would take and as something an author can read.
 
 A manifest never claims a payload that is not there: bytes promised and missing
 fail at load time with a far more confusing error than the one reported here.
@@ -29,7 +33,8 @@ import re
 import shutil
 from typing import Dict, List, Optional
 
-from . import gltf_io, level_header, level_model_encoder, object_map_encoder
+from . import (gltf_io, level_header, level_model_encoder,
+               object_map_encoder, textures as texture_module)
 from .gltf_io import ObjectMap
 
 MANIFEST_NAME = "manifest.json"
@@ -52,6 +57,18 @@ OBJECT_MAP_SLOTS = {
     "structure": "objects_structure.bin",
     "collectables": "objects_collectables.bin",
 }
+
+#: The section a track's own artwork goes in. Unlike the four above it takes
+#: **many** payloads rather than one, and their order in ``adds`` is what
+#: decides which texture is which: the runtime assigns ids by position, and the
+#: level model refers to them by the same position through
+#: :data:`..textures.CUSTOM_ID_BASE`. Reordering these entries silently
+#: repaints the track.
+TEXTURE_SECTION = "TEXTURES_3D"
+
+#: ``textures/0.bin``, ``textures/1.bin`` ... - a subdirectory because a track
+#: with a dozen of its own images should not bury its four payloads.
+TEXTURE_DIR = "textures"
 
 #: Where the addon leaves asset-tool input inside the track directory.
 SOURCE_DIR = "source"
@@ -97,6 +114,10 @@ class TrackPackage:
         self.payloads: Dict[str, str] = {}
         #: slot -> absolute path, for the two object maps.
         self.object_maps: Dict[str, str] = {}
+        #: The track's own textures, **in ordinal order**, as absolute paths.
+        #: A list rather than a mapping because position is the identity here:
+        #: see :data:`TEXTURE_SECTION`.
+        self.texture_payloads: List[str] = []
         self.notes: List[str] = []
 
     # -- sources ---------------------------------------------------------
@@ -176,6 +197,55 @@ class TrackPackage:
         self.payloads["LEVEL_MODELS"] = path
         return payload
 
+    def encode_textures(self, entries) -> List[bytes]:
+        """Compile the track's own artwork and attach it, in ordinal order.
+
+        ``entries`` are :class:`..textures.CustomTexture` in the order the model
+        refers to them, which is the order this writes them and the order the
+        manifest lists them. Nothing here reconciles the two: the caller has
+        already written ``CUSTOM_ID_BASE + n`` into the model's texture table
+        for the entry at position ``n``, and if that ever disagreed with this
+        list the track would draw the wrong pictures rather than fail. So the
+        ordinals are checked against their positions instead of trusted.
+        """
+        payloads = []
+        folder = os.path.join(self.directory, TEXTURE_DIR)
+        os.makedirs(folder, exist_ok=True)
+        self.texture_payloads = []
+        for position, entry in enumerate(entries):
+            if int(getattr(entry, "ordinal", position)) != position:
+                raise DkrMapError(
+                    "texture %r says it is number %d but is being written %s, "
+                    "and the runtime assigns ids by position - the track would "
+                    "draw the wrong picture rather than fail"
+                    % (getattr(entry, "name", "?"), entry.ordinal, position)
+                )
+            try:
+                payload = entry.encode()
+            except texture_module.TextureEncodeError as error:
+                raise DkrMapError(
+                    "could not compile the texture %r: %s"
+                    % (getattr(entry, "name", "?"), error)
+                )
+            path = os.path.join(folder, "%d.bin" % position)
+            with open(path, "wb") as handle:
+                handle.write(payload)
+            self.texture_payloads.append(path)
+            payloads.append(payload)
+
+        # A texture the author has since removed leaves its payload behind, and
+        # while the manifest no longer names it, a stale numbered file next to
+        # the live ones invites exactly the misreading this numbering cannot
+        # survive. Clear the tail rather than leave it.
+        position = len(payloads)
+        while True:
+            stale = os.path.join(folder, "%d.bin" % position)
+            if not os.path.isfile(stale):
+                break
+            os.remove(stale)
+            position += 1
+        return payloads
+
     def add_payload(self, section: str, path: str) -> None:
         """Attach a compiled section payload produced by the asset tool."""
         if section not in SECTIONS:
@@ -206,6 +276,15 @@ class TrackPackage:
             }
             for slot in OBJECT_MAP_SLOTS
             if slot in self.object_maps
+        ]
+        # Position is the identity for these, so they are listed in the order
+        # they were written and never sorted.
+        adds += [
+            {
+                "section": TEXTURE_SECTION,
+                "file": "%s/%d.bin" % (TEXTURE_DIR, position),
+            }
+            for position in range(len(self.texture_payloads))
         ]
         manifest = {
             "schemaVersion": SCHEMA_VERSION,
@@ -284,6 +363,24 @@ class TrackPackage:
             ] + [
                 "- `%s` (%s slot)" % (os.path.basename(path), slot)
                 for slot, path in sorted(self.object_maps.items())
+            ] + [""]
+        if self.texture_payloads:
+            lines += [
+                "## This track's own textures",
+                "",
+                "These are artwork the ROM does not hold. DKR-R publishes a",
+                "longer `ASSET_TEXTURES_3D` table for them and the level model",
+                "is rewritten as it is served, so the ids in `model.bin` are",
+                "placeholders rather than the indices the game will use - the",
+                "real ones depend on how many textures the player's ROM has.",
+                "",
+                "**Order is identity.** Entry *n* in the manifest becomes",
+                "texture *n* of this track. Reordering or renumbering these",
+                "files repaints the track without any error.",
+                "",
+            ] + [
+                "- `%s/%d.bin`" % (TEXTURE_DIR, position)
+                for position in range(len(self.texture_payloads))
             ] + [""]
         if missing:
             lines += [

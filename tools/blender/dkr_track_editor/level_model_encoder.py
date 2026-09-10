@@ -57,6 +57,18 @@ def check_layout(model: LevelModel) -> List[str]:
     if model.blob_size <= 0:
         problems.append("the model carries no blob size, so nothing sizes the output")
 
+    # The texture table is the first array after the header, so an extra entry
+    # does not run off the end of the blob - it runs into the segment array,
+    # which every bounds check here would happily allow. Giving a track a
+    # texture it did not ship with is therefore a count change like any other,
+    # and takes the same road: rebuild the layout.
+    if len(model.textures) != model.texture_count_field:
+        problems.append(
+            "the model holds %d textures but its count field says %d; the "
+            "layout would have to be rebuilt"
+            % (len(model.textures), model.texture_count_field)
+        )
+
     for segment in model.segments:
         label = "segment %d" % segment.index
         if len(segment.vertices) != segment.vertex_count_field:
@@ -108,12 +120,81 @@ def encode(model: LevelModel) -> bytes:
     return bytes(buffer)
 
 
+#: Where the DEFLATE stream's first block's data begins, counting from the
+#: start of the payload: five bytes of container, then a stored block's own
+#: header. That header is one byte of ``BFINAL``/``BTYPE``, then - after the
+#: reader discards the five bits left in it, which is what a stored block does -
+#: ``LEN`` and ``NLEN``, two bytes each. See :func:`pack`.
+STORED_PREFIX_AT = 10
+
+#: The most a single stored block can hold. A model's header and texture table
+#: are two thousand bytes at the very most, so this is a check rather than a
+#: case to handle.
+STORED_BLOCK_MAX = 0xFFFF
+
+
+def stored_prefix_size(model: LevelModel) -> int:
+    """How much of the model :func:`pack` writes without compressing it.
+
+    Everything up to the end of the texture table: the header names the table's
+    offset at 0x00 and its length at 0x18, and the table is the first array
+    after the header, so this is a short region at the very front of the file.
+    """
+    return model.textures_ptr + len(model.textures) * TEXTURE_INFO_SIZE
+
+
 def pack(model: LevelModel, level: int = 9) -> bytes:
-    """The payload inside the five-byte container the asset table stores."""
+    """The payload inside the five-byte container the asset table stores.
+
+    **The header and the texture table are written uncompressed, and that is
+    load-bearing.** A track that ships artwork of its own cannot know the
+    texture ids it will get: the index is the ROM's retail texture count plus an
+    ordinal, and the count belongs to the player's cartridge. So the exporter
+    writes a placeholder and DKR-R rewrites it as the model is served - the same
+    thing it already does to a header's model and object-map fields.
+
+    It can only do that to bytes it can find. A DEFLATE stream is bit-packed,
+    so a four-byte field inside a compressed block has no byte offset to patch.
+    The answer is the format's own: DEFLATE block type 00 is *stored*, which is
+    byte-aligned and verbatim, and ``gzip_inflate_block`` dispatches to
+    ``gzip_inflate_stored`` for it exactly as it does to the Huffman decoders
+    for the other two. So the front of the model - through the end of the
+    texture table - goes in one stored block and the rest is compressed as
+    before. The stream stays a legal DEFLATE stream, the game inflates it with
+    the code it always used, and the texture ids sit at
+    :data:`STORED_PREFIX_AT` plus their own offsets where anything can find
+    them.
+
+    The cost is the prefix's own size, about two kilobytes on the largest
+    possible table, against models of a hundred to five hundred. It is paid by
+    every packed model rather than only by tracks with their own artwork,
+    because one format that is always patchable is worth more than two that
+    differ in a way nothing downstream can see.
+    """
     blob = encode(model)
+    prefix = stored_prefix_size(model)
+    if prefix > STORED_BLOCK_MAX or prefix > len(blob):
+        raise LevelModelEncodeError(
+            "the header and texture table come to %d bytes, which one stored "
+            "DEFLATE block cannot hold; the texture table would have to be "
+            "past %d entries for that" % (prefix, STORED_BLOCK_MAX // TEXTURE_INFO_SIZE)
+        )
+
+    head = blob[:prefix]
+    # BFINAL 0, BTYPE 00. LEN and NLEN are little endian and NLEN is LEN's
+    # complement, which is what lets a reader tell a stored block from noise.
+    stream = bytearray(b"\x00")
+    stream += struct.pack("<HH", prefix, (~prefix) & 0xFFFF)
+    stream += head
+
+    # The compressor's own output is a complete stream ending in a block with
+    # BFINAL set, which is exactly what the tail should be. It begins on a byte
+    # boundary because a stored block ends on one; DEFLATE allows a block to
+    # start anywhere, so that is a convenience rather than a requirement.
     compressor = zlib.compressobj(level, zlib.DEFLATED, -15)
-    deflated = compressor.compress(blob) + compressor.flush()
-    return struct.pack("<IB", len(blob), CONTAINER_TAG) + deflated
+    stream += compressor.compress(blob[prefix:]) + compressor.flush()
+
+    return struct.pack("<IB", len(blob), CONTAINER_TAG) + bytes(stream)
 
 
 # ---------------------------------------------------------------------------

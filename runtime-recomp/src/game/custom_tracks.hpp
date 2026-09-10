@@ -41,11 +41,40 @@ namespace dkr::runtime::custom_tracks {
 
 // Sections a custom track can contribute to. Each has a parallel `_TABLE`
 // section in DKR's asset LUT; the table is what this module rewrites.
+//
+// Textures3D is the one that is not a level aspect, and it earns its place by
+// being reached through exactly the same arithmetic. `tex_init_textures` and
+// `load_texture` in textures_sprites.c:
+//
+//   gTextureAssetTable[TEX_TABLE_3D] = asset_table_load(ASSET_TEXTURES_3D_TABLE);
+//   for (i = 0; table[i] != -1; i++) {}   // count, then i--
+//   if (assetIndex >= gTextureTableSize[..]) { /* range check from the table */ }
+//   assetOffset = table[assetIndex];
+//   assetSize   = table[assetIndex + 1] - assetOffset;   // size BY DIFFERENCE
+//   asset_load(ASSET_TEXTURES_3D, dest, assetOffset, assetSize);
+//
+// So a longer table grows the texture count and the range check together, and
+// an appended payload loads, with no new mechanism at all. What it adds is that
+// a track can ship artwork rather than only pick from the ROM's 1401 images.
+//
+// Two things are different in kind from the four above, and both are here
+// rather than in the .cpp because they constrain callers:
+//
+//   * A track contributes MANY texture entries, not one, and their order in its
+//     manifest is their identity. A level model refers to them by that order
+//     through kCustomTextureIdBase below, and build_extended_table substitutes
+//     the real indices into the model payload as it assembles it.
+//   * The texture table is loaded ONCE, at boot, from thread3_main. The level
+//     tables are rebuilt per load, so a rescan can renumber them; this one
+//     cannot be renumbered after the fact, so a track discovered later has no
+//     textures in the published table at all. Its model's ids are reset to
+//     texture 0 rather than left pointing past the end of the table.
 enum class Section {
     LevelHeaders,
     LevelObjectMaps,
     LevelNames,
     LevelModels,
+    Textures3D,
 };
 
 // A level owns two object maps, and init_track spawns from both:
@@ -182,5 +211,24 @@ void set_auto_boot(bool enabled);
 // MapSlot::None for sections that have only one.
 [[nodiscard]] std::int32_t sibling_index(Section from, std::uint32_t offset,
                                           Section to, MapSlot slot);
+
+// The id range the exporter writes into a level model's texture table for the
+// track's own artwork, standing in for indices only the runtime can assign.
+//
+// Any value works that no retail id reaches and that survives load_texture's
+// `id & 0x7FFF` after tracks.c ors in 0x8000. 0x7000 is an order of magnitude
+// above the largest retail table (1401 in US v1.0) and half the 15-bit space
+// below the mask. The count is the ceiling on a model's texture table, which is
+// indexed by a u8 with 0xFF meaning "none".
+//
+// Kept identical in tools/blender/dkr_track_editor/textures.py.
+inline constexpr std::int32_t kCustomTextureIdBase = 0x7000;
+inline constexpr std::int32_t kCustomTextureIdCount = 255;
+
+// The smallest texture payload that can be served safely. load_texture reads
+// sizeof(TempTexHeader) bytes before it knows how large the texture is, so a
+// shorter payload would have the loader fall off the end of it and read the
+// ROM's own bytes as a TextureHeader.
+inline constexpr std::size_t kMinimumTexturePayload = 40;
 
 } // namespace dkr::runtime::custom_tracks

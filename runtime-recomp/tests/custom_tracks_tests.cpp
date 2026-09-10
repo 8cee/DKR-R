@@ -30,6 +30,85 @@ void write_track(const std::filesystem::path& root, const std::string& id,
     write_file(root / "h.bin", std::string(payload_size, 'x'));
 }
 
+// A level model payload shaped the way the addon writes one: a five-byte
+// container, a stored DEFLATE block holding the header and texture table, and
+// then whatever would be the compressed remainder. Nothing here inflates it, so
+// the tail is filler - what is under test is that the ids in the stored prefix
+// are found and rewritten.
+std::string model_payload(const std::vector<std::int32_t>& texture_ids,
+                          std::uint32_t table_at = 0x4C) {
+    const std::uint32_t count =
+        static_cast<std::uint32_t>(texture_ids.size());
+    const std::uint32_t prefix = table_at + count * 8U;
+
+    std::string model(prefix, '\0');
+    // LevelModel: textures at 0x00 (big endian), numberOfTextures at 0x18.
+    model[0] = static_cast<char>((table_at >> 24) & 0xFF);
+    model[1] = static_cast<char>((table_at >> 16) & 0xFF);
+    model[2] = static_cast<char>((table_at >> 8) & 0xFF);
+    model[3] = static_cast<char>(table_at & 0xFF);
+    model[0x18] = static_cast<char>((count >> 8) & 0xFF);
+    model[0x19] = static_cast<char>(count & 0xFF);
+    for (std::uint32_t entry = 0; entry < count; ++entry) {
+        const std::uint32_t at = table_at + entry * 8U;
+        const auto id = static_cast<std::uint32_t>(texture_ids[entry]);
+        model[at + 0] = static_cast<char>((id >> 24) & 0xFF);
+        model[at + 1] = static_cast<char>((id >> 16) & 0xFF);
+        model[at + 2] = static_cast<char>((id >> 8) & 0xFF);
+        model[at + 3] = static_cast<char>(id & 0xFF);
+        model[at + 4] = 64;   // width
+        model[at + 5] = 32;   // height
+        model[at + 6] = 0x11; // OPAQUE | RGBA16
+        model[at + 7] = 0;    // surfaceType
+    }
+
+    const std::string tail(64U, 'z');
+    const std::uint32_t uncompressed =
+        static_cast<std::uint32_t>(model.size() + tail.size());
+
+    std::string payload;
+    payload += static_cast<char>(uncompressed & 0xFF);
+    payload += static_cast<char>((uncompressed >> 8) & 0xFF);
+    payload += static_cast<char>((uncompressed >> 16) & 0xFF);
+    payload += static_cast<char>((uncompressed >> 24) & 0xFF);
+    payload += static_cast<char>(0x09);            // container tag
+    payload += static_cast<char>(0x00);            // BFINAL 0, BTYPE 00
+    payload += static_cast<char>(prefix & 0xFF);   // LEN, little endian
+    payload += static_cast<char>((prefix >> 8) & 0xFF);
+    const std::uint32_t nlen = (~prefix) & 0xFFFF;
+    payload += static_cast<char>(nlen & 0xFF);     // NLEN
+    payload += static_cast<char>((nlen >> 8) & 0xFF);
+    payload += model;
+    payload += tail;
+    return payload;
+}
+
+// The texture ids a served model payload now names.
+std::vector<std::int32_t> served_texture_ids(Section section,
+                                            std::uint32_t offset,
+                                            std::int32_t size) {
+    const std::uint8_t* bytes = payload_for(section, offset, size);
+    std::vector<std::int32_t> found;
+    if (bytes == nullptr) {
+        return found;
+    }
+    const std::uint8_t* model = bytes + 10;   // STORED_PREFIX_AT
+    const std::uint32_t table = (static_cast<std::uint32_t>(model[0]) << 24) |
+                               (static_cast<std::uint32_t>(model[1]) << 16) |
+                               (static_cast<std::uint32_t>(model[2]) << 8) |
+                               model[3];
+    const std::uint32_t count =
+        (static_cast<std::uint32_t>(model[0x18]) << 8) | model[0x19];
+    for (std::uint32_t entry = 0; entry < count; ++entry) {
+        const std::uint8_t* at = model + table + entry * 8U;
+        found.push_back(static_cast<std::int32_t>(
+            (static_cast<std::uint32_t>(at[0]) << 24) |
+            (static_cast<std::uint32_t>(at[1]) << 16) |
+            (static_cast<std::uint32_t>(at[2]) << 8) | at[3]));
+    }
+    return found;
+}
+
 // Reproduces the retail counting loop from level_global_init verbatim.
 int level_count(const std::vector<std::int32_t>& table) {
     int count = 0;
@@ -239,6 +318,203 @@ int main() {
     for (const Track& track : tracks()) {
         assert(track.id != "noslot");
     }
+
+    // ------------------------------------------------------------------
+    // A track that ships artwork of its own
+    // ------------------------------------------------------------------
+    //
+    // Textures are the one section a track contributes MANY entries to, so
+    // they are told apart by position in the manifest and nothing else. Three
+    // things have to hold and none of them is visible from the level sections
+    // above: the table grows the way the *texture* loader counts it, each
+    // texture's position earns it an index, and the model that draws them is
+    // rewritten to name those indices instead of the placeholders the exporter
+    // could not know the answer to.
+    std::filesystem::remove_all(root);
+    {
+        const std::filesystem::path art = root / "art.dkrmap";
+        std::filesystem::create_directories(art / "textures");
+        write_file(art / "manifest.json",
+                   "{\"schemaVersion\":1,\"id\":\"art\",\"name\":\"Art\","
+                   "\"adds\":[{\"section\":\"LEVEL_HEADERS\","
+                   "\"file\":\"h.bin\"},"
+                   "{\"section\":\"LEVEL_MODELS\",\"file\":\"m.bin\"},"
+                   "{\"section\":\"TEXTURES_3D\",\"file\":\"textures/0.bin\"},"
+                   "{\"section\":\"TEXTURES_3D\",\"file\":\"textures/1.bin\"}]}");
+        std::string header(200U, '\0');
+        header[0x37] = 73;
+        header[0xBB] = 5;
+        write_file(art / "h.bin", header);
+        // Two of its own textures and one of the ROM's, so the substitution has
+        // to leave the retail id alone.
+        write_file(art / "m.bin",
+                   model_payload({kCustomTextureIdBase, 1234,
+                                  kCustomTextureIdBase + 1}));
+        // 64x32 RGBA16 and 32x32 RGBA16, header included, both 16-aligned.
+        write_file(art / "textures" / "0.bin", std::string(4128U, 'a'));
+        write_file(art / "textures" / "1.bin", std::string(2080U, 'b'));
+    }
+    scan(root);
+    assert(tracks().size() == 1U);
+
+    // tex_init_textures counts exactly as level_global_init does, so the same
+    // helper describes both: [o0 .. o(n-1), oEnd, -1] is n textures.
+    constexpr std::int32_t kTextures[] = {0x0, 0x800, 0x1000, 0x1800, -1};
+    const std::vector<std::int32_t> texture_table =
+        build_extended_table(Section::Textures3D, kTextures);
+    assert(level_count(texture_table) == 5);   // 3 retail + 2 shipped
+    assert(texture_table[3] == 0x1800);
+    assert(texture_table[4] - texture_table[3] == 4128);
+    assert(texture_table[5] - texture_table[4] == 2080);
+
+    // And they serve as payloads, which is what makes them loadable at all.
+    assert(payload_for(Section::Textures3D, 0x1800, 4128) != nullptr);
+    assert(payload_for(Section::Textures3D, 0x1000, 0x800) == nullptr);
+    // Past the whole blob is refused; past one entry into the next is not,
+    // because the bound is the concatenated payloads rather than each entry.
+    // That is deliberate and it is what makes the peek below work:
+    // load_texture reads sizeof(TempTexHeader) bytes before it knows how large
+    // the texture is, so the LAST texture is asked for more than it has.
+    assert(payload_for(Section::Textures3D, 0x1800, 4128 + 2080 + 1) == nullptr);
+    assert(payload_for(Section::Textures3D, 0x1800,
+                       static_cast<std::int32_t>(kMinimumTexturePayload)) !=
+           nullptr);
+    assert(payload_for(Section::Textures3D, 0x1800 + 4128,
+                       static_cast<std::int32_t>(kMinimumTexturePayload)) !=
+           nullptr);
+
+    // Now the part the level sections cannot show. The model was written with
+    // placeholders, because the index of a shipped texture is the ROM's retail
+    // count plus an ordinal and the exporter cannot know the count. Serving it
+    // has to substitute the real indices - and leave the retail id untouched.
+    const std::string art_model = model_payload(
+        {kCustomTextureIdBase, 1234, kCustomTextureIdBase + 1});
+    const std::vector<std::int32_t> art_models =
+        build_extended_table(Section::LevelModels, kRetail);
+    assert(level_count(art_models) == 4);
+    assert(art_models[3] == 0x400);
+
+    std::vector<std::int32_t> ids = served_texture_ids(
+        Section::LevelModels, 0x400,
+        static_cast<std::int32_t>(art_model.size()));
+    assert(ids.size() == 3U);
+    assert(ids[0] == 3);      // its first texture, at retail count + 0
+    assert(ids[1] == 1234);   // one of the ROM's, left exactly as authored
+    assert(ids[2] == 4);      // its second
+
+    // Rebuilding must give the same answer rather than substituting into an
+    // already-substituted copy: the source of truth is the file, not the blob.
+    build_extended_table(Section::LevelModels, kRetail);
+    ids = served_texture_ids(Section::LevelModels, 0x400,
+                             static_cast<std::int32_t>(art_model.size()));
+    assert(ids.size() == 3U && ids[0] == 3 && ids[1] == 1234 && ids[2] == 4);
+
+    // A model naming a texture its track does not ship must not be left
+    // pointing past the end of the published table: load_texture range-checks
+    // such an index and then indexes with it anyway. Texture 0 is wrong and
+    // visible, which is the better of the two.
+    {
+        const std::filesystem::path greedy = root / "greedy.dkrmap";
+        std::filesystem::create_directories(greedy / "textures");
+        write_file(greedy / "manifest.json",
+                   "{\"schemaVersion\":1,\"id\":\"greedy\",\"name\":\"Greedy\","
+                   "\"adds\":[{\"section\":\"LEVEL_MODELS\","
+                   "\"file\":\"m.bin\"},"
+                   "{\"section\":\"TEXTURES_3D\",\"file\":\"textures/0.bin\"}]}");
+        write_file(greedy / "m.bin",
+                   model_payload({kCustomTextureIdBase,
+                                  kCustomTextureIdBase + 7}));
+        write_file(greedy / "textures" / "0.bin", std::string(1056U, 'c'));
+    }
+    std::filesystem::remove_all(root / "art.dkrmap");
+    scan(root);
+    assert(tracks().size() == 1U);
+    build_extended_table(Section::Textures3D, kTextures);
+    const std::vector<std::int32_t> greedy_models =
+        build_extended_table(Section::LevelModels, kRetail);
+    const std::string greedy_model =
+        model_payload({kCustomTextureIdBase, kCustomTextureIdBase + 7});
+    ids = served_texture_ids(Section::LevelModels, 0x400,
+                            static_cast<std::int32_t>(greedy_model.size()));
+    assert(ids.size() == 2U);
+    assert(ids[0] == 3);
+    assert(ids[1] == 0);   // reset, not left as a placeholder
+    (void) greedy_models;
+
+    // Two tracks: the second one's first texture is NOT the first custom
+    // index, and each model resolves only its own. Getting this wrong is the
+    // failure that shows up as one track drawing another's pictures.
+    {
+        const std::filesystem::path more = root / "more.dkrmap";
+        std::filesystem::create_directories(more / "textures");
+        write_file(more / "manifest.json",
+                   "{\"schemaVersion\":1,\"id\":\"more\",\"name\":\"More\","
+                   "\"adds\":[{\"section\":\"LEVEL_MODELS\","
+                   "\"file\":\"m.bin\"},"
+                   "{\"section\":\"TEXTURES_3D\",\"file\":\"textures/0.bin\"}]}");
+        write_file(more / "m.bin", model_payload({kCustomTextureIdBase}));
+        write_file(more / "textures" / "0.bin", std::string(1056U, 'd'));
+    }
+    scan(root);
+    assert(tracks().size() == 2U);
+    const std::vector<std::int32_t> two_textures =
+        build_extended_table(Section::Textures3D, kTextures);
+    assert(level_count(two_textures) == 5);   // 3 retail + 1 each
+    const std::vector<std::int32_t> two_models =
+        build_extended_table(Section::LevelModels, kRetail);
+    assert(level_count(two_models) == 5);
+
+    const std::string one_texture_model = model_payload({kCustomTextureIdBase});
+    const std::vector<std::int32_t> first = served_texture_ids(
+        Section::LevelModels, static_cast<std::uint32_t>(two_models[3]),
+        static_cast<std::int32_t>(greedy_model.size()));
+    const std::vector<std::int32_t> second = served_texture_ids(
+        Section::LevelModels, static_cast<std::uint32_t>(two_models[4]),
+        static_cast<std::int32_t>(one_texture_model.size()));
+    // Scan order is directory order, so which track is served first is not
+    // fixed. What must hold either way is that the two do not share an index.
+    assert(!first.empty() && !second.empty());
+    assert(first[0] == 3 || first[0] == 4);
+    assert(second[0] == 3 || second[0] == 4);
+    assert(first[0] != second[0]);
+
+    // A texture payload shorter than load_texture's peek is refused, and so is
+    // one that is not 16-aligned: the display list the loader builds sits at
+    // align16(tex + size) inside an allocation of exactly that size plus the
+    // lists, so an unaligned payload pushes the last one out of its block.
+    std::filesystem::remove_all(root);
+    {
+        const std::filesystem::path tiny = root / "tiny.dkrmap";
+        std::filesystem::create_directories(tiny / "textures");
+        write_file(tiny / "manifest.json",
+                   "{\"schemaVersion\":1,\"id\":\"tiny\",\"name\":\"Tiny\","
+                   "\"adds\":[{\"section\":\"TEXTURES_3D\","
+                   "\"file\":\"textures/0.bin\"}]}");
+        write_file(tiny / "textures" / "0.bin", std::string(16U, 't'));
+
+        const std::filesystem::path odd = root / "odd.dkrmap";
+        std::filesystem::create_directories(odd / "textures");
+        write_file(odd / "manifest.json",
+                   "{\"schemaVersion\":1,\"id\":\"odd\",\"name\":\"Odd\","
+                   "\"adds\":[{\"section\":\"TEXTURES_3D\","
+                   "\"file\":\"textures/0.bin\"}]}");
+        write_file(odd / "textures" / "0.bin", std::string(100U, 'o'));
+
+        const std::filesystem::path good = root / "good.dkrmap";
+        std::filesystem::create_directories(good / "textures");
+        write_file(good / "manifest.json",
+                   "{\"schemaVersion\":1,\"id\":\"good\",\"name\":\"Good\","
+                   "\"adds\":[{\"section\":\"TEXTURES_3D\","
+                   "\"file\":\"textures/0.bin\"}]}");
+        write_file(good / "textures" / "0.bin", std::string(48U, 'g'));
+    }
+    scan(root);
+    for (const Track& track : tracks()) {
+        assert(track.id != "tiny");
+        assert(track.id != "odd");
+    }
+    assert(tracks().size() == 1U);
+    assert(tracks().front().id == "good");
 
     std::filesystem::remove_all(root);
     std::printf("custom_tracks_tests: ok\n");

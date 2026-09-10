@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-from .level_model import LevelModel, Segment
+from .level_model import MAX_TEXTURES, LevelModel, Segment, TextureRef
 
 #: Height given to a segment whose vertices all sit at one Y. Retail does this
 #: and only this; see the module docstring.
@@ -248,6 +248,90 @@ def set_surface_types(model: LevelModel, surfaces: Dict[int, int]) -> int:
             model.textures[index].surface_type = surface
             changed += 1
     return changed
+
+
+# ---------------------------------------------------------------------------
+# Growing the texture table
+# ---------------------------------------------------------------------------
+
+def add_texture(model: LevelModel, texture_id: int, width: int, height: int,
+                texture_format: int = 1, surface_type: int = 0) -> int:
+    """Give the model a texture it does not carry yet, and return its index.
+
+    ``texture_id`` indexes the ROM's global 3D texture list, which is what a
+    ``TextureInfo`` stores and what ``load_texture(id | 0x8000)`` resolves at
+    load. Nothing scopes such an id to the track that shipped it, so this is how
+    a custom track draws with artwork its donor never had - the ceiling a
+    ``.dkrmap`` imposes is "textures the ROM holds", not "textures this table
+    already lists".
+
+    An entry that matches in every field is reused rather than duplicated. The
+    match has to include ``surface_type``, because two entries pointing at one
+    image and behaving differently is a thing the format expresses on purpose
+    and the addon must not merge.
+
+    **The table grows, so the layout has to be rebuilt.** Every array after the
+    texture table moves. :func:`level_model_encoder.check_layout` refuses an
+    in-place write once the count field disagrees with the table, which is what
+    stops this from quietly overwriting the segment array.
+    """
+    texture_id = int(texture_id)
+    if texture_id < 0:
+        raise EditError("texture id %d is not an index into the ROM's texture "
+                        "list" % texture_id)
+    width = int(width) & 0xFF
+    height = int(height) & 0xFF
+    texture_format = int(texture_format) & 0xFF
+    surface_type = int(surface_type) & 0xFF
+
+    for index, existing in enumerate(model.textures):
+        if (existing.texture_id == texture_id
+                and existing.raw_width == width
+                and existing.raw_height == height
+                and existing.format == texture_format
+                and existing.surface_type == surface_type):
+            return index
+
+    if len(model.textures) >= MAX_TEXTURES:
+        raise EditError(
+            "this track already names %d textures and a batch selects one with "
+            "a u8 where 0xFF means none, so %d is the ceiling. Retail's largest "
+            "table is 63. Reuse a texture already in the table, or give two "
+            "entries that differ only in surface type the same one"
+            % (len(model.textures), MAX_TEXTURES)
+        )
+
+    # ``texture_count_field`` is deliberately left as the file wrote it. It is
+    # the count field disagreeing with the table that tells
+    # :func:`level_model_encoder.check_layout` an in-place write is no longer
+    # safe; syncing it here would silence exactly the check that protects the
+    # segment array. :func:`level_model_layout.rebuild` sets it, once the
+    # layout it describes actually exists.
+    model.textures.append(
+        TextureRef(texture_id, width, height, texture_format, surface_type)
+    )
+    return len(model.textures) - 1
+
+
+def set_animation_gate(model: LevelModel, animated: int) -> bool:
+    """Make sure an animated texture will actually be animated.
+
+    ``numberOfAnimatedTextures`` is **not** a count of anything the addon can
+    derive. Measured against retail it disagrees with the number of multi-frame
+    textures in the table in 35 of the 55 models, and Pirate Lagoon declares 106
+    against a table of 26. What it *is* is a gate: ``tracks.c`` tests
+    ``> 0`` and calls ``track_tex_anim``, which then walks every batch looking
+    for ``RENDER_TEX_ANIM`` and pays no further attention to the number.
+
+    So a model that has just been given an animated texture and declares zero
+    would draw it frozen on its first frame. Raising the gate is the fix;
+    lowering one a track already carries is not this function's business, since
+    the value it holds cannot be reconstructed.
+    """
+    if animated > 0 and model.animated_texture_count <= 0:
+        model.animated_texture_count = int(animated)
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------

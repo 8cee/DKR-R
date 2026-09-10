@@ -45,8 +45,24 @@ VERTEX_SIZE = 10
 RENDER_HIDDEN = 1 << 8
 RENDER_NO_COLLISION = 1 << 9
 
+#: ``textures_sprites.h``: this batch's texture is an animated one, and
+#: ``track_tex_anim`` should advance it. Unlike the other two this one is not a
+#: choice - it says something true or false about the artwork the batch draws,
+#: and retail agrees with itself perfectly: across all 10,389 batches in the 55
+#: level models, the bit is set on exactly the 619 whose texture has more than
+#: one frame and on none of the other 9,770. So the addon sets it from the
+#: texture rather than exposing it, and an author who picks the water texture
+#: gets water that moves.
+RENDER_TEX_ANIM = 1 << 16
+
 #: ``TriangleBatchInfo.textureIndex``.
 NO_TEXTURE = 0xFF
+
+#: How many entries a model's texture table can hold. The index above is a
+#: ``u8`` and 0xFF is spoken for, so 255 - which is a real ceiling only for a
+#: track that goes looking for one: retail's largest table is Spaceport Alpha's
+#: 63, and the median track has 23.
+MAX_TEXTURES = NO_TEXTURE
 
 #: ``Triangle.flags``.
 TRIANGLE_DRAW_BACKFACE = 0x40

@@ -132,6 +132,11 @@ class DKR_OT_export_dkrmap(bpy.types.Operator, ExportHelper):
                 )
                 package.notes.append("header.bin %d bytes" % len(header))
 
+            # Before the geometry, because the model's texture table names
+            # these by position and a failure to compile one has to stop the
+            # export rather than ship a model pointing at a payload that is
+            # not there.
+            _encode_textures(self, context, package)
             _encode_geometry(self, context, package)
             _warn_header_without_geometry(self, context, package)
 
@@ -190,6 +195,60 @@ class DKR_OT_export_dkrmap(bpy.types.Operator, ExportHelper):
                 % (os.path.basename(directory), len(object_map.objects)),
             )
         return {"FINISHED"}
+
+
+def _encode_textures(operator, context, package):
+    """Compile the artwork the track ships itself into the package.
+
+    Every texture the scene holds is written, not only the ones the geometry
+    draws. An unused one costs a few kilobytes and keeps the numbering the
+    author sees in the panel identical to the numbering the runtime hands out -
+    and dropping the unused ones would renumber the used ones, which is the one
+    thing that silently repaints a track.
+    """
+    from .. import textures as texture_module  # noqa: PLC0415
+    from . import custom_textures, geometry as geometry_ops  # noqa: PLC0415
+
+    own = custom_textures.entries(context)
+
+    # A table entry naming a texture the package will not carry is the one
+    # failure here that the game cannot survive: the id falls outside the
+    # extended table and load_texture reads whatever is past the end of it.
+    # It happens if the scene is opened without the images, so it is checked
+    # against what is about to be written rather than assumed away.
+    dangling = set()
+    for obj in geometry_ops.geometry_objects(context):
+        for record in geometry_ops.extra_textures(obj):
+            ordinal = texture_module.custom_ordinal(record.get("id", 0))
+            if ordinal is not None and ordinal >= len(own):
+                dangling.add(ordinal + 1)
+    if dangling:
+        raise dkrmap.DkrMapError(
+            "the geometry draws with texture %s of this track's own, but the "
+            "scene holds %d. Add the missing image, or point those faces at "
+            "something else"
+            % (", ".join(str(number) for number in sorted(dangling)), len(own))
+        )
+
+    if not own:
+        return
+
+    missing = [entry.name for entry in own
+               if not entry.png or not os.path.isfile(entry.png)]
+    if missing:
+        raise dkrmap.DkrMapError(
+            "the resampled image for %s is gone from %s. The .blend records "
+            "where it was, not the picture itself, so add it again"
+            % (", ".join(missing), custom_textures.folder(context))
+        )
+
+    payloads = package.encode_textures(own)
+    package.notes.append(
+        "%d texture(s) of this track's own, %d bytes: %s"
+        % (len(payloads), sum(len(payload) for payload in payloads),
+           ", ".join("%s %dx%d" % (entry.name, entry.width, entry.height)
+                     for entry in own))
+    )
 
 
 def _encode_geometry(operator, context, package):

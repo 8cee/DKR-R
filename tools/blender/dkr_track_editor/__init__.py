@@ -36,8 +36,8 @@ def _module_classes():
     on a plain Python.
     """
     from . import prefs, props
-    from .operators import (ai, checks, edit, geometry, header, io_objects,
-                            new_track, pack)
+    from .operators import (ai, checks, custom_textures, edit, geometry,
+                            header, io_objects, new_track, pack, textures)
     from .ui import panels
 
     classes = []
@@ -45,6 +45,8 @@ def _module_classes():
     classes += list(props.CLASSES)
     classes += list(io_objects.CLASSES)
     classes += list(geometry.CLASSES)
+    classes += list(textures.CLASSES)
+    classes += list(custom_textures.CLASSES)
     classes += list(edit.CLASSES)
     classes += list(ai.CLASSES)
     classes += list(checks.CLASSES)
@@ -93,6 +95,17 @@ def unregister():
     bpy.types.TOPBAR_MT_file_export.remove(_menu_export)
     bpy.types.TOPBAR_MT_file_import.remove(_menu_import)
     props.unregister_pointers()
+
+    # The texture browser holds a Blender preview collection, which is not a
+    # registered class and so is not undone by the loop below. Leaking one
+    # across a disable and re-enable is what produces the "_PREVIEW_ already
+    # exists" error on the second enable.
+    try:
+        from .operators import textures
+
+        textures.teardown()
+    except Exception:  # noqa: BLE001 - unregistering must not fail
+        pass
 
     while _REGISTERED:
         cls = _REGISTERED.pop()

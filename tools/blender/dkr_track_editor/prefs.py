@@ -119,9 +119,12 @@ def invalidate():
     """Forget the cached answer; the configured path changed."""
     _resolved["key"] = None
     _resolved["tree"] = None
-    from . import preview
+    from . import preview, textures
 
     preview.clear_cache()
+    # The 3D texture catalogue is keyed by tree root, and the indices in it are
+    # that extraction's, so pointing the addon at another one has to drop it.
+    textures.clear_cache()
 
 
 CLASSES = (DKR_AddonPreferences,)

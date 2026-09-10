@@ -49,6 +49,7 @@ reported.
 
 from __future__ import annotations
 
+import json
 import os
 import traceback
 
@@ -164,6 +165,25 @@ ATTR_UV = "dkr_uv"
 #: The ``baked`` colour attribute is sRGB-converted for display and cannot come
 #: back exactly; this can, and a rebuilt segment needs every colour it writes.
 ATTR_COLOUR = "dkr_colour"
+
+#: The track's name, as the materials are named after it. Recorded rather than
+#: recovered from the mesh's name, because an author is free to rename a mesh
+#: and a material that stopped matching would be silently duplicated.
+PROP_STEM = "dkr_stem"
+
+#: The base model's texture table, and the entries the author has added on top
+#: of it, both as JSON lists of ``{"id", "w", "h", "format", "surface"}``.
+#:
+#: A face names its texture by table index, so anything that hands an author a
+#: texture the base model never had has to say what the new indices mean - and
+#: has to say it on the object, because the base ``.bin`` is not reloaded until
+#: the export. The base half is recorded so that picking a texture the track
+#: already carries reuses its entry instead of appending a duplicate.
+#:
+#: An added entry also carries ``"anim"``, the frame count of the artwork, which
+#: is what decides whether the model's animation gate has to be raised for it.
+PROP_BASE_TEXTURES = "dkr_base_textures"
+PROP_EXTRA_TEXTURES = "dkr_extra_textures"
 
 #: Set on each material so a hit face, or a slot, can name its kind.
 PROP_CATEGORY = "dkr_category"
@@ -335,6 +355,16 @@ def _track_material(stem: str, category: str, png, texture_index: int,
     except Exception:  # noqa: BLE001 - appearance only
         traceback.print_exc()
     return material
+
+
+def material_for(stem: str, category: str, texture_index: int, png, surface: int):
+    """The material one (kind, texture table entry) is drawn with.
+
+    The public form of the importer's own material rule, so that a texture
+    applied by hand later lands in exactly the same slot scheme as one that came
+    off the file - same naming, same properties, same node tree.
+    """
+    return _track_material(stem, category, png, texture_index, surface)
 
 
 def _build_material_nodes(material, category, image):
@@ -594,10 +624,12 @@ def _build_geometry(stem, model, collection, tree=None, include_hidden=True):
 
     obj = bpy.data.objects.new(mesh.name, mesh)
     obj[PROP_GEOMETRY] = GEOMETRY_KIND
+    obj[PROP_STEM] = stem
     obj[PROP_FACE_COUNT] = len(mesh.polygons)
     obj[PROP_OMITTED] = stats.omitted
     obj[PROP_INCLUDE_HIDDEN] = bool(include_hidden)
     obj[PROP_DEGENERATE] = stats.degenerate
+    record_texture_table(obj, model)
     collection.objects.link(obj)
 
     vertex_batch = vertex_batch_table(model, base, owners)
@@ -785,6 +817,83 @@ def surface_types(obj) -> dict:
         index: sorted(claims)[0]
         for index, claims in _surface_slots(obj).items()
     }
+
+
+# ---------------------------------------------------------------------------
+# The texture table, as the mesh carries it
+# ---------------------------------------------------------------------------
+
+def _read_records(obj, key) -> list:
+    """A JSON list off an object property, or ``[]``.
+
+    Stored as JSON rather than as Blender's own nested collections because a
+    list of small dicts survives a save, a re-open and a library link unchanged,
+    and because it is readable in the object's Custom Properties panel when
+    something has gone wrong.
+    """
+    raw = obj.get(key)
+    if not raw:
+        return []
+    try:
+        found = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    return found if isinstance(found, list) else []
+
+
+def _write_records(obj, key, records) -> None:
+    obj[key] = json.dumps(list(records))
+
+
+def texture_record(texture, animated: int = 0) -> dict:
+    """One texture table entry, in the shape the mesh stores it."""
+    return {
+        "id": int(texture.texture_id),
+        "w": int(texture.raw_width) & 0xFF,
+        "h": int(texture.raw_height) & 0xFF,
+        "format": int(texture.format) & 0xFF,
+        "surface": int(texture.surface_type) & 0xFF,
+        "anim": int(animated),
+    }
+
+
+def record_texture_table(obj, model) -> None:
+    """Stash the base model's texture table, and drop any added entries.
+
+    Called wherever a mesh is built from a model, which is also every point at
+    which previously added entries have just become part of the base - a
+    re-segment and a track built from a mesh both write the model out and import
+    it back. Clearing the extras there is what stops them being added twice.
+    """
+    _write_records(obj, PROP_BASE_TEXTURES,
+                   [texture_record(texture) for texture in model.textures])
+    _write_records(obj, PROP_EXTRA_TEXTURES, [])
+
+
+def base_textures(obj) -> list:
+    return _read_records(obj, PROP_BASE_TEXTURES)
+
+
+def extra_textures(obj) -> list:
+    return _read_records(obj, PROP_EXTRA_TEXTURES)
+
+
+def set_extra_textures(obj, records) -> None:
+    _write_records(obj, PROP_EXTRA_TEXTURES, records)
+
+
+def texture_table(obj) -> list:
+    """The whole table a face's index addresses: the base, then the additions."""
+    return base_textures(obj) + extra_textures(obj)
+
+
+def texture_entry(obj, index: int):
+    """The table entry a face names, or ``None`` for an untextured face."""
+    if index is None or int(index) == level_model.NO_TEXTURE:
+        return None
+    table = texture_table(obj)
+    index = int(index)
+    return table[index] if 0 <= index < len(table) else None
 
 
 def surface_conflicts(obj) -> list:

@@ -241,6 +241,15 @@ class AssetTree:
         folder = meta.get("folder", "")
         return os.path.join(self.root, folder, entry["filename"])
 
+    def path_for(self, meta_name: str, asset_id: str) -> Optional[str]:
+        """The file an asset enum name refers to.
+
+        The public form of the lookup, for the modules that walk a whole
+        section rather than following a name chain - :mod:`textures`, which
+        resolves all 1401 3D textures so an author can pick any of them.
+        """
+        return self._lookup(meta_name, asset_id)
+
     def order(self, meta_name: str) -> List[str]:
         """The asset ids of a section, in index order."""
         try:

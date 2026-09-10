@@ -436,9 +436,9 @@ everything untouched stays byte-identical - checked against all 110 retail
 models - and refuses, naming what collided, rather than guessing when an
 identity is not unique.
 
-Vertex colours and textures are edit*able* in `level_model_edit.py` but not yet
-wired to the mesh: the importer converts colours sRGB to linear and UVs to
-normalised and V-flipped, and neither survives the return trip yet.
+Vertex colours are edit*able* in `level_model_edit.py` but not yet wired to the
+mesh: the importer converts them sRGB to linear and that does not survive the
+return trip yet. Textures are wired, both ways — see "Textures" below.
 
 ### Step 3 — change triangle and vertex counts (**encoder built**)
 
@@ -499,6 +499,116 @@ than refused; refusing would make the commonest modelling operation unusable.
 All three ceilings — memory, collision candidates and the 1024-texel UV span —
 are surfaced in the addon's Geometry panel, computed by calling
 `level_model_layout` rather than restating its thresholds.
+
+### Textures — any of the ROM's 1401, **and the track's own** (**built**)
+
+A track used to be able to draw only with the textures its base model shipped
+with. That was never a limit of the format, only of the addon: `TextureInfo.id`
+indexes the global `ASSET_TEXTURES_3D` list, so a level model can name any
+texture in the ROM. `textures.py` resolves the whole list — name, folder, size,
+format, frame count, PNG — and the Textures panel browses it as thumbnails and
+puts one on the selected faces.
+
+The ceiling *behind* that one — that a `.dkrmap` could not add a texture the
+ROM does not hold — has gone too. See "Artwork a track brings with it" below;
+the rest of this section is about picking from the ROM, and every word of it
+applies unchanged to a picture the author brought, because nothing between the
+browser and the exporter can tell the difference.
+
+Four things were measured before any of it was written, because writing a table
+entry means composing bytes retail composed rather than copying them. All are
+regression-checked in `tools/blender/tests/test_textures.py`:
+
+- **What the game reads.** Of `TextureInfo`'s four trailing bytes only
+  `surfaceType` has a reader anywhere in the decomp. `width`, `height` and
+  `format` are descriptive — the renderer takes all three from the texture's own
+  `TextureHeader` — so the addon writes them from the asset and cannot get them
+  wrong in a way the game notices.
+- **What retail would have written.** The PNG's size matches the table in 1358
+  of 1360 entries, and the sidecar's format name matches the byte's low nibble
+  in all 1360.
+- **`RENDER_TEX_ANIM`.** Set on a batch exactly when its texture has more than
+  one frame: 619 of 10,389 retail batches, no exceptions either way. So the
+  addon derives it and an author who picks the waterfall gets one that moves.
+- **`numberOfAnimatedTextures` is a gate, not a count** — see
+  `docs/LEVEL_MODEL_FORMAT.md`. The addon raises it off zero and never rewrites
+  a value a track already carries.
+
+**Mapping is half the job.** A raw UV is in texels of the texture the batch
+draws, so changing which texture a face draws is never only an index change; and
+a face built in Blender has UVs interpolated from its source, which are
+well-formed and geometrically meaningless — the "materials came out wrong" half
+of the failure recorded below. Two mappings answer it. *Keep* rescales the raw
+UVs by the ratio of the two sizes, leaving the picture on the same ground.
+*Project* plants the texture on the world along whichever axis a face most
+faces, at a scale defaulting to retail's own median of 268 map units per repeat
+(measured over 257,035 textured triangle edges). Projection subtracts a **whole
+number of repeats** per face, which is what keeps the values inside the s16 a UV
+is stored in without breaking the tiling across a join.
+
+The table growing forces the rebuilding export path, since the texture table is
+the first array after the header — an extra entry runs into the segment array
+rather than off the end of the blob, which no bounds check would catch.
+`level_model_encoder.check_layout` refuses an in-place write once the count
+field disagrees with the table, and that is the guard rather than a convention.
+
+### Artwork a track brings with it (**built**)
+
+The constraint recorded further down this document — *a `.dkrmap` has no texture
+section, so a custom track can only use textures already in the ROM* — was true
+of the runtime's section list and of nothing else. It has five entries now.
+
+**Why it was only ever a section list.** `textures_sprites.c` reaches the 3D
+texture list through exactly the arithmetic `level_global_init` uses for the
+level list: `asset_table_load` a `-1`-terminated table, count to the terminator,
+range-check against the count, take the offset and derive the size from the
+*next* entry. Publishing a longer table grows the count and the range check
+together, and an appended payload loads. That is the whole of DKR-R's custom
+track mechanism, pointed at section 2/3 instead of 26/27.
+
+**What the addon does.** `textures.py` writes the texture asset itself — the
+32-byte `TextureHeader` and the texels — so no C++ toolchain sits between an
+author and a track. Every field and every conversion is transcribed from
+`dkr_assets_tool`'s `BuildTexture::build` and n64graphics' `rgba2raw`, `i2raw`
+and `ia2raw`, and held to them in `tests/test_custom_textures.py`. Blender is
+used for one thing only: decoding whatever the author picked and resampling it.
+
+**The reduction is brutal and the addon says so.** The RDP has 4 KiB of texture
+memory and `material_init` loads a level texture as one block, so a colour
+texture gets 2048 texels — 64x32. A 2752x1536 photograph is 4.2 million. And
+`material_init`'s mask loop only walks the powers of two up to 64, so anything
+larger clamps instead of tiling however the flags are set. Both are refusals at
+import, with the reason, rather than a corrupt road discovered in game.
+
+**The id in the model is a placeholder, and that is the interesting part.** A
+shipped texture's index is the ROM's retail texture count plus its ordinal, and
+the count belongs to the player's cartridge. So the exporter writes
+`0x7000 + ordinal` and DKR-R substitutes the real index as the model is served —
+the same treatment a header's model and object-map fields already get.
+
+Reaching that id needed one non-obvious step. A level model arrives *compressed*,
+and a four-byte field inside a Huffman-coded DEFLATE block has no byte offset to
+patch. The answer is DEFLATE's own: block type 00 is **stored** — byte-aligned
+and verbatim — and `gzip_inflate_block` dispatches to `gzip_inflate_stored` for
+it exactly as it does to the Huffman decoders for the other two. So
+`level_model_encoder.pack` writes the model's header and texture table as one
+stored block and compresses the rest. The stream stays legal, the game inflates
+it with the code it always used, and the ids sit ten bytes into the payload
+where anything can find them. `docs/CUSTOM_TRACKS.md` has the byte layout.
+
+**Order is identity.** A track contributes many texture entries and they are
+told apart by position in the manifest and nothing else, so the exporter writes
+every texture the scene holds rather than only the ones the geometry draws:
+dropping an unused one would renumber the used ones. Removing a texture the
+geometry has taken a *table entry* for is refused, because a table index is a
+position too and no other operator in the addon removes one.
+
+**End to end, without a ROM.** `tools/blender/make_texture_demo_track.py` drives
+the same operators the sidebar does and writes a package; feeding that package
+to `runtime-recomp/src/game/custom_tracks.cpp` grows a 1401-entry texture table
+to 1402 and serves the model with its `0x7000` rewritten to `1401`. That is the
+whole chain checked against itself, and it is as far as it can be taken here —
+the picture on the road is the one thing that still needs the game running.
 
 ### What a track from scratch actually needs
 
@@ -566,13 +676,28 @@ So a track from scratch needs three pieces and not one:
    explained rather than silently skipped, but it still cannot be exported.
 3. **A header written from nothing** — the piece recorded here.
 
-There is a fourth constraint that no amount of geometry work removes: a
-`.dkrmap` has **no texture section**. `SECTIONS` carries `LEVEL_HEADERS`,
-`LEVEL_NAMES` and `LEVEL_MODELS`, plus `LEVEL_OBJECT_MAPS`. A custom track can
-therefore only use textures already in the ROM's table. Texture packs replace by
-hash and replace globally, so they change how a texture looks everywhere in the
-game rather than adding one for a single track. Bringing an outside course in
-means its geometry with DKR's textures.
+There was a fourth constraint that no amount of geometry work removes, and it
+turned out not to be one. A `.dkrmap` had **no texture section**, so a custom
+track could only use textures already in the ROM's table, and bringing an
+outside course in meant its geometry with DKR's textures. (Texture packs are not
+an answer to this: they replace by hash and replace globally, so they change how
+a texture looks everywhere in the game rather than adding one for a single
+track.)
+
+That was a property of the runtime's section list, not of the format. The list
+has five entries now and `TEXTURES_3D` is one of them — see "Artwork a track
+brings with it" below. What is left is only the hardware's: a colour texture is
+64x32, because the RDP loads one as a single block into 4 KiB of texture
+memory.
+
+**How wide that actually is, and the ceiling that was not real.** "The ROM's
+table" is **1401 textures**, and a level model can name any of them: a
+`TextureInfo` stores an index into the global `ASSET_TEXTURES_3D` list and
+`tracks.c` resolves it with `load_texture(id | 0x8000)`, exactly as an object
+model does. Nothing scopes an id to the level that shipped it. For a while the
+addon imposed a much lower ceiling on top of the real one — a track built from a
+mesh borrowed a *donor* track's table and was stuck with its two or three dozen
+images — and that has been lifted. See "Textures" below.
 
 ### Tried and failed: growing a new track out of a host track
 
@@ -609,7 +734,11 @@ raw UVs interpolated from the corners they came from, so a swept side face
 carries UV values that are well-formed and geometrically meaningless. The
 texture index itself is inherited through the batch serial and should be right,
 so "no material" most likely means "the right texture, mapped incoherently". A
-sample of the broken export was not examined, so this stays a hypothesis.
+sample of the broken export was not examined, so this stays a hypothesis — but
+it is now one an author can act on either way: select the new faces and project
+a texture onto them, which replaces the inherited UVs with a mapping that means
+something. See "Textures" above. The collision half of the failure is untouched
+by that and remains the real blocker.
 
 **A third mechanism, not in the original report, reasoned from the format rather
 than measured.** The PVS is inherited too, and it knows nothing about the new
@@ -674,8 +803,16 @@ an encoder already exists. It is a large piece of work to duplicate.
 - **How is the `LEVEL_OBJECT_MAPS` payload produced without a Linux build of
   `dkr_assets_tool`?** This is the one thing standing between the addon and an
   end-to-end Phase 1 track. See "Why the packager stops short" above.
-- How are per level textures referenced from a `.dkrmap` that adds a track?
-  Phase 1 sidesteps this by reusing the host track's texture table.
+- ~~How are per level textures referenced from a `.dkrmap` that adds a track?~~
+  **Answered.** They are not per level: `TextureInfo.id` indexes the global
+  `ASSET_TEXTURES_3D` list and `tracks.c` resolves the whole table at load with
+  `load_texture(id | 0x8000)`, so a custom track can name any of the ROM's 1401
+  textures without the package carrying anything. Reusing a host track's table
+  was a convenience the addon mistook for a constraint; see "Textures" above.
+  And the follow-on question — whether a package can carry a texture the ROM
+  does *not* hold — is answered too: it can, through a fifth asset section, and
+  the id in the model is a placeholder the runtime substitutes. See "Artwork a
+  track brings with it".
 - Minimap parameters live in the `LevelModel` header, so a Phase 1 remix cannot
   change the minimap. Confirm whether that matters to creators.
 - `elevation` on an AI node is not a height. Retail values (-1, 0, 1, 3) do not

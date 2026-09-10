@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import struct
 import sys
 import traceback
 import tempfile
@@ -60,6 +61,8 @@ def test_registration():
                  "edit_geometry", "check_geometry",
                  "header_defaults", "set_header_choice", "clear_header_choice",
                  "set_surface_type", "resegment", "track_from_mesh",
+                 "track_from_mesh_blank", "pick_texture", "apply_texture",
+                 "clear_texture", "sync_uvs", "select_by_texture",
                  "refresh_artwork", "set_slot"):
         check(hasattr(bpy.ops.dkr, name), "operator dkr.%s exists" % name)
     check(hasattr(bpy.types.Scene, "dkr"), "scene settings registered")
@@ -1966,6 +1969,854 @@ def test_drop_to_surface():
           % (zipper.location.z, centre.z))
 
 
+def _texture_catalogue(context):
+    """The ROM's 3D textures as the addon sees them, or ``[]``."""
+    from dkr_track_editor import prefs, textures as texture_catalogue
+
+    return texture_catalogue.catalogue(prefs.resolve(context))
+
+
+def _read_textures(mesh):
+    values = [0] * len(mesh.polygons)
+    mesh.attributes["dkr_texture"].data.foreach_get("value", values)
+    return values
+
+
+def _select_faces(mesh, faces):
+    wanted = set(faces)
+    for polygon in mesh.polygons:
+        polygon.select = polygon.index in wanted
+
+
+def test_apply_texture():
+    """A texture the track never shipped with reaches the file it exports.
+
+    The whole point of the feature: a level model's table names entries of the
+    ROM's 3D texture list, so a custom track is not stuck with the images its
+    base model carried. This walks the whole path - pick, apply, export - and
+    checks the far end rather than the operator's own bookkeeping.
+    """
+    print("applying a texture the track does not have")
+    from dkr_track_editor import level_model, level_model_encoder
+    from dkr_track_editor.operators import geometry as geometry_ops
+    from dkr_track_editor.operators import geometry_export
+
+    path, obj = _import_lake(include_hidden=True)
+    if path is None:
+        print("  skip: no extracted level models")
+        return
+
+    catalogue = _texture_catalogue(bpy.context)
+    if not catalogue:
+        print("  skip: no extracted textures")
+        return
+
+    mesh = obj.data
+    base = level_model.load(path)
+    used = {texture.texture_id for texture in base.textures}
+    chosen = next((e for e in catalogue if e.index not in used and not e.animated),
+                  None)
+    if chosen is None:
+        print("  skip: this track already uses every still texture in the ROM")
+        return
+
+    # Faces that are drawn, so the material and the UVs both mean something.
+    flags = _read_flags(mesh)
+    drawn = [
+        index for index, value in enumerate(flags)
+        if geometry_ops.category_of(geometry_ops.to_unsigned32(value))
+        == geometry_ops.SURFACE
+    ][:12]
+    check(len(drawn) > 1, "there are drivable faces to retexture (%d)" % len(drawn))
+    if not drawn:
+        return
+    _select_faces(mesh, drawn)
+
+    settings = bpy.context.scene.dkr
+    settings.texture_id = chosen.index
+    settings.texture_mapping = "KEEP"
+    settings.texture_surface = "1"
+
+    before = len(base.textures)
+    result = bpy.ops.dkr.apply_texture()
+    check(result == {"FINISHED"}, "apply_texture returns FINISHED (%r)" % (result,))
+
+    extras = geometry_ops.extra_textures(obj)
+    check(len(extras) == 1,
+          "one entry was added to the track's table (%d)" % len(extras))
+    if not extras:
+        return
+    check(extras[0]["id"] == chosen.index, "and it names the texture that was picked")
+    check(extras[0]["surface"] == 1,
+          "with the surface type the panel asked for (%d)" % extras[0]["surface"])
+
+    written = _read_textures(mesh)
+    check(all(written[index] == before for index in drawn),
+          "every selected face draws the new table entry %d" % before)
+    check(any(written[index] != before
+              for index in range(len(mesh.polygons)) if index not in set(drawn)),
+          "and the faces that were not selected were left alone")
+
+    slot = mesh.polygons[drawn[0]].material_index
+    material = mesh.materials[slot] if slot < len(mesh.materials) else None
+    check(material is not None
+          and material.get(geometry_ops.PROP_TEXTURE_INDEX) == before,
+          "the faces carry a material for the new entry")
+    check(material is not None and material.get(geometry_ops.PROP_SURFACE) == 1,
+          "which knows what the ground now behaves like")
+
+    # And out the other end.
+    edit = geometry_export.build_edited_model(bpy.context)
+    check(edit is not None, "the geometry still exports")
+    if edit is None:
+        return
+    check(edit.rebuilt,
+          "the layout is rebuilt rather than patched, because the table grew")
+    check(len(edit.model.textures) == before + 1,
+          "the exported model carries %d textures (%d before)"
+          % (len(edit.model.textures), before))
+    if len(edit.model.textures) != before + 1:
+        return
+
+    added = edit.model.textures[before]
+    check(added.texture_id == chosen.index,
+          "the new table entry names texture %d" % chosen.index)
+    check(added.surface_type == 1, "and behaves as the surface type chosen")
+
+    payload = level_model_encoder.pack(edit.model)
+    again = level_model.parse(level_model.decompress(payload))
+    check(len(again.textures) == before + 1,
+          "the compiled model.bin holds the new entry")
+    drawing = sum(
+        batch.face_count for segment in again.segments
+        for batch in segment.batches if batch.texture_index == before
+    )
+    check(drawing == len(drawn),
+          "and %d triangle(s) in the file draw it (%d were selected)"
+          % (drawing, len(drawn)))
+    fresh()
+
+
+def test_apply_animated_texture():
+    """An animated texture flags the batches drawing it, or it renders frozen."""
+    print("applying an animated texture")
+    from dkr_track_editor import level_model
+    from dkr_track_editor.operators import geometry as geometry_ops
+    from dkr_track_editor.operators import geometry_export
+
+    path, obj = _import_lake(include_hidden=True)
+    if path is None:
+        print("  skip: no extracted level models")
+        return
+
+    catalogue = _texture_catalogue(bpy.context)
+    animated = next((e for e in catalogue if e.animated), None)
+    if animated is None:
+        print("  skip: no animated textures in the extraction")
+        return
+
+    mesh = obj.data
+    flags = _read_flags(mesh)
+    drawn = [
+        index for index, value in enumerate(flags)
+        if geometry_ops.category_of(geometry_ops.to_unsigned32(value))
+        == geometry_ops.SURFACE
+        and not (geometry_ops.to_unsigned32(value) & level_model.RENDER_TEX_ANIM)
+    ][:4]
+    if not drawn:
+        print("  skip: no still drivable faces")
+        return
+    _select_faces(mesh, drawn)
+
+    settings = bpy.context.scene.dkr
+    settings.texture_id = animated.index
+    settings.texture_mapping = "KEEP"
+    settings.texture_surface = "0"
+    bpy.ops.dkr.apply_texture()
+
+    after = _read_flags(mesh)
+    check(all(geometry_ops.to_unsigned32(after[i]) & level_model.RENDER_TEX_ANIM
+              for i in drawn),
+          "the retextured faces are flagged for animation")
+
+    edit = geometry_export.build_edited_model(bpy.context)
+    check(edit is not None and edit.model.animated_texture_count > 0,
+          "and the model declares animation, which is the gate the renderer "
+          "tests before advancing any of them")
+
+    # Putting a still texture back has to clear the bit again: it says what the
+    # artwork is, not what the author last did.
+    still = next((e for e in catalogue if not e.animated), None)
+    if still is not None:
+        _select_faces(mesh, drawn)
+        settings.texture_id = still.index
+        bpy.ops.dkr.apply_texture()
+        cleared = _read_flags(mesh)
+        check(not any(geometry_ops.to_unsigned32(cleared[i])
+                      & level_model.RENDER_TEX_ANIM for i in drawn),
+              "and a still texture clears it again")
+    fresh()
+
+
+def test_project_texture_onto_new_geometry():
+    """New geometry inherits meaningless UVs; projecting is what fixes them."""
+    print("projecting a texture onto new geometry")
+    from dkr_track_editor import textures as texture_catalogue
+    from dkr_track_editor.operators import geometry as geometry_ops
+
+    path, obj = _import_lake(include_hidden=True)
+    if path is None:
+        print("  skip: no extracted level models")
+        return
+    catalogue = _texture_catalogue(bpy.context)
+    if not catalogue:
+        print("  skip: no extracted textures")
+        return
+
+    mesh = obj.data
+    faces = list(range(min(6, len(mesh.polygons))))
+    _select_faces(mesh, faces)
+
+    # Flatten their UVs first, which is the state a face conjured from nothing
+    # arrives in and the one an author actually needs rescuing from.
+    raw = [0] * (len(mesh.loops) * 2)
+    mesh.attributes[geometry_ops.ATTR_UV].data.foreach_get("value", raw)
+    for index in faces:
+        for corner in mesh.polygons[index].loop_indices:
+            raw[corner * 2] = 0
+            raw[corner * 2 + 1] = 0
+    mesh.attributes[geometry_ops.ATTR_UV].data.foreach_set("value", raw)
+
+    settings = bpy.context.scene.dkr
+    settings.texture_id = catalogue[0].index
+    settings.texture_mapping = "PROJECT"
+    settings.texture_scale = texture_catalogue.DEFAULT_PROJECTION_SCALE
+    result = bpy.ops.dkr.apply_texture()
+    check(result == {"FINISHED"}, "apply_texture projects (%r)" % (result,))
+
+    after = [0] * (len(mesh.loops) * 2)
+    mesh.attributes[geometry_ops.ATTR_UV].data.foreach_get("value", after)
+    spread = 0
+    for index in faces:
+        corners = list(mesh.polygons[index].loop_indices)
+        values = {(after[c * 2], after[c * 2 + 1]) for c in corners}
+        spread += 1 if len(values) > 1 else 0
+    check(spread == len(faces),
+          "every projected face got UVs that span it rather than one texel "
+          "(%d of %d)" % (spread, len(faces)))
+    check(all(-32768 <= value <= 32767 for value in after),
+          "and all of them fit the s16 the file stores a UV in")
+    fresh()
+
+
+def test_track_from_mesh_with_its_own_textures():
+    """A track built from nothing, textured from the ROM, end to end.
+
+    The path a custom track actually takes now: model a mesh, convert it with no
+    donor at all, and give it whatever textures it should have. Nothing in it
+    came from a shipped track, which is the case the old donor requirement made
+    impossible - and it is the one that has to work, because it is the only one
+    where every texture in the table was chosen rather than inherited.
+    """
+    print("a track from a mesh, textured from the ROM")
+    from dkr_track_editor import level_model, level_model_encoder
+    from dkr_track_editor import textures as texture_catalogue
+    from dkr_track_editor.operators import geometry as geometry_ops
+    from dkr_track_editor.operators import geometry_export
+    from dkr_track_editor.operators import new_track as new_track_ops
+
+    catalogue = _texture_catalogue(bpy.context)
+    if not catalogue:
+        print("  skip: no extracted textures")
+        return
+
+    fresh()
+    bpy.ops.mesh.primitive_grid_add(size=4000.0, x_subdivisions=3, y_subdivisions=3)
+    source = bpy.context.active_object
+    quads = len(source.data.polygons)
+
+    temporary = tempfile.mkdtemp(prefix="dkr-texture-")
+    try:
+        bpy.ops.wm.save_as_mainfile(filepath=os.path.join(temporary, "mine.blend"))
+        result = bpy.ops.dkr.track_from_mesh_blank()
+        check(result == {"FINISHED"},
+              "track_from_mesh_blank returns FINISHED (%r)" % (result,))
+
+        written = os.path.join(temporary, "mine-geometry.bin")
+        check(os.path.isfile(written), "a level model was written beside the .blend")
+        if not os.path.isfile(written):
+            return
+
+        blank = level_model.load(written)
+        check(not blank.textures,
+              "it starts with no texture table at all (%d entries)"
+              % len(blank.textures))
+        check(blank.triangle_count == quads * 2,
+              "and holds the mesh's %d triangles" % blank.triangle_count)
+
+        built = geometry_ops.geometry_objects(bpy.context)
+        check(len(built) == 1, "the converted track was imported back")
+        if not built:
+            return
+        obj = built[0]
+        mesh = obj.data
+        check(all(value == level_model.NO_TEXTURE for value in _read_textures(mesh)),
+              "every face is untextured until the author picks one")
+
+        # Now give it a look. Nothing here came from a shipped track.
+        picks = [entry for entry in catalogue if not entry.animated][:2]
+        if len(picks) < 2:
+            return
+        half = len(mesh.polygons) // 2
+        settings = bpy.context.scene.dkr
+        settings.texture_mapping = "PROJECT"
+        settings.texture_scale = texture_catalogue.DEFAULT_PROJECTION_SCALE
+
+        _select_faces(mesh, range(half))
+        settings.texture_id = picks[0].index
+        settings.texture_surface = "0"
+        check(bpy.ops.dkr.apply_texture() == {"FINISHED"},
+              "the first texture goes on")
+
+        _select_faces(mesh, range(half, len(mesh.polygons)))
+        settings.texture_id = picks[1].index
+        settings.texture_surface = "1"
+        check(bpy.ops.dkr.apply_texture() == {"FINISHED"},
+              "and so does a second one, with its own surface type")
+
+        edit = geometry_export.build_edited_model(bpy.context)
+        check(edit is not None, "the track exports")
+        if edit is None:
+            return
+        check(len(edit.model.textures) == 2,
+              "the table holds exactly the two textures that were chosen (%d)"
+              % len(edit.model.textures))
+
+        again = level_model.parse(
+            level_model.decompress(level_model_encoder.pack(edit.model))
+        )
+        check([t.texture_id for t in again.textures]
+              == [picks[0].index, picks[1].index],
+              "the compiled file names them in the order they were added (%r)"
+              % ([t.texture_id for t in again.textures],))
+        check([t.surface_type for t in again.textures] == [0, 1],
+              "each with the surface type it was given")
+        untextured = sum(
+            batch.face_count for segment in again.segments
+            for batch in segment.batches
+            if batch.texture_index == level_model.NO_TEXTURE
+        )
+        check(untextured == 0,
+              "and no triangle is left untextured (%d are)" % untextured)
+    finally:
+        shutil.rmtree(temporary, ignore_errors=True)
+        fresh()
+
+
+def test_texture_browser_pieces():
+    """The parts of the Textures panel that can fail without a screen.
+
+    A background Blender has no region to draw into, so the panel body cannot be
+    exercised directly. What can break in it and nowhere else is checked here
+    instead: the thumbnails, which reach for a preview collection and a PNG on
+    disk; the two enum callbacks, which Blender calls while drawing and which
+    must never raise; and the tooltip, which is a classmethod given operator
+    properties rather than a string.
+    """
+    print("the texture browser's moving parts")
+    from dkr_track_editor import props, textures as texture_catalogue
+    from dkr_track_editor.operators import textures as texture_ops
+
+    fresh()
+    catalogue = _texture_catalogue(bpy.context)
+    if not catalogue:
+        print("  skip: no extracted textures")
+        return
+
+    groups = props.texture_group_items(None, bpy.context)
+    check(len(groups) > 1,
+          "the folder filter offers the extraction's sets (%d)" % len(groups))
+    check(groups[0][0] == "ALL", "with everything first")
+    named = {item[0] for item in groups}
+    check(all(group in named for group in texture_catalogue.groups(catalogue)),
+          "and names every folder the catalogue found")
+
+    surfaces = props.texture_surface_items(None, bpy.context)
+    check(len(surfaces) > 1,
+          "the surface picker offers the SurfaceType enum (%d)" % len(surfaces))
+    check(all(item[0].lstrip("-").isdigit() for item in surfaces),
+          "identified by value, which is what the table entry stores")
+
+    # A background Blender has no icon manager, so ``icon_id`` is 0 however well
+    # the load went - the thing worth checking is that the PNG was found and
+    # read, which ``image_size`` reports and a failed load would not.
+    icon = texture_ops.icon_for(catalogue[0])
+    check(isinstance(icon, int), "asking for a thumbnail returns an icon id")
+    held = texture_ops._collection().get(texture_ops.preview_key(catalogue[0]))
+    check(held is not None, "and the preview is held for %s" % catalogue[0].name)
+    check(held is not None
+          and tuple(held.image_size) == (catalogue[0].width, catalogue[0].height),
+          "loaded from the texture's own PNG (%r)"
+          % (tuple(held.image_size) if held else None,))
+    check(texture_ops.icon_for(catalogue[0]) == icon,
+          "and asking again gives the same one rather than reloading it")
+    texture_ops.teardown()
+    check(texture_ops._previews["collection"] is None,
+          "unregistering releases the previews, or a re-enable cannot make them")
+
+    bpy.context.scene.dkr.texture_id = catalogue[0].index
+    check(texture_ops.picked(bpy.context) is not None,
+          "the scene remembers which texture is chosen")
+    bpy.context.scene.dkr.texture_id = -1
+    check(texture_ops.picked(bpy.context) is None, "and that nothing is")
+
+    # Blender calls this while building a tooltip, with whatever the button set.
+    class _Props:
+        index = catalogue[0].index
+
+    text = texture_ops.DKR_OT_pick_texture.description(bpy.context, _Props())
+    check(catalogue[0].name in text, "the tooltip names the texture (%r)"
+          % text.splitlines()[0])
+
+    class _Missing:
+        index = 999999
+
+    check(isinstance(
+        texture_ops.DKR_OT_pick_texture.description(bpy.context, _Missing()), str),
+        "and an index the extraction does not have still gives a tooltip")
+    fresh()
+
+
+def _read_raw_uvs(mesh):
+    values = [0] * (len(mesh.loops) * 2)
+    mesh.attributes["dkr_uv"].data.foreach_get("value", values)
+    return values
+
+
+def test_texture_side_operators():
+    """Select by texture, remove a texture, and push UV editing into the file.
+
+    Three small operators that all write to the mesh's record of the file rather
+    than to what the viewport shows, which is exactly where they could look
+    right and do nothing.
+    """
+    print("selecting, clearing and syncing UVs")
+    from dkr_track_editor import level_model, textures as texture_catalogue
+    from dkr_track_editor.operators import geometry as geometry_ops
+
+    path, obj = _import_lake(include_hidden=True)
+    if path is None:
+        print("  skip: no extracted level models")
+        return
+    catalogue = _texture_catalogue(bpy.context)
+    if not catalogue:
+        print("  skip: no extracted textures")
+        return
+
+    mesh = obj.data
+    flags = _read_flags(mesh)
+    drawn = [
+        index for index, value in enumerate(flags)
+        if geometry_ops.category_of(geometry_ops.to_unsigned32(value))
+        == geometry_ops.SURFACE
+    ][:5]
+    if len(drawn) < 2:
+        print("  skip: not enough drivable faces")
+        return
+
+    used = {t.texture_id for t in level_model.load(path).textures}
+    chosen = next((e for e in catalogue if e.index not in used and not e.animated),
+                  None)
+    if chosen is None:
+        return
+
+    _select_faces(mesh, drawn)
+    settings = bpy.context.scene.dkr
+    settings.texture_id = chosen.index
+    settings.texture_mapping = "PROJECT"
+    settings.texture_scale = texture_catalogue.DEFAULT_PROJECTION_SCALE
+    settings.texture_surface = "0"
+    bpy.ops.dkr.apply_texture()
+
+    # Select by texture: nothing selected, then ask for it back.
+    _select_faces(mesh, [])
+    check(bpy.ops.dkr.select_by_texture() == {"FINISHED"},
+          "select_by_texture returns FINISHED")
+    check(sorted(p.index for p in mesh.polygons if p.select) == sorted(drawn),
+          "and selects exactly the faces drawing that texture")
+
+    # Push a UV edit through. The UVMap is what an author unwraps; the file's
+    # own raw values are what ships, and they only meet here.
+    uv_layer = mesh.uv_layers.active
+    check(uv_layer is not None, "the mesh has a UV map to edit")
+    if uv_layer is None:
+        return
+    corners = list(mesh.polygons[drawn[0]].loop_indices)
+    for corner in corners:
+        uv_layer.data[corner].uv = (0.25, 0.75)
+    _select_faces(mesh, [drawn[0]])
+    check(bpy.ops.dkr.sync_uvs() == {"FINISHED"}, "sync_uvs returns FINISHED")
+
+    raw = _read_raw_uvs(mesh)
+    want_s = round(0.25 * level_model.UV_FRACTIONAL_BITS * chosen.width)
+    want_t = round((1.0 - 0.75) * level_model.UV_FRACTIONAL_BITS * chosen.height)
+    got = {(raw[c * 2], raw[c * 2 + 1]) for c in corners}
+    check(got == {(want_s, want_t)},
+          "and the file's own UVs now say what the UV editor showed "
+          "(%r, wanted %r)" % (got, (want_s, want_t)))
+
+    # Removing a texture leaves the face on its baked colours.
+    _select_faces(mesh, [drawn[1]])
+    check(bpy.ops.dkr.clear_texture() == {"FINISHED"},
+          "clear_texture returns FINISHED")
+    check(_read_textures(mesh)[drawn[1]] == level_model.NO_TEXTURE,
+          "and the face now names no texture at all")
+    check(_read_textures(mesh)[drawn[0]] != level_model.NO_TEXTURE,
+          "while the faces beside it keep theirs")
+    fresh()
+
+
+def _refused(call):
+    """The message an operator cancelled with, or ``None`` if it went through.
+
+    ``bpy.ops`` turns a CANCELLED-with-an-error into a ``RuntimeError`` when it
+    is driven from a script, so a refusal has to be caught rather than read off
+    the return value.
+    """
+    try:
+        call()
+    except RuntimeError as error:
+        return str(error)
+    return None
+
+
+def _write_probe_image(directory, name, width, height):
+    """A picture on disk to import, made without leaving Blender.
+
+    Deliberately not a power of two and deliberately not 2:1, so the import has
+    to resample it and choose a shape rather than pass it through.
+    """
+    image = bpy.data.images.new(name, width, height, alpha=True)
+    pixels = [0.0] * (width * height * 4)
+    for row in range(height):
+        for column in range(width):
+            at = (row * width + column) * 4
+            pixels[at] = column / max(1, width - 1)
+            pixels[at + 1] = row / max(1, height - 1)
+            pixels[at + 2] = 0.25
+            pixels[at + 3] = 1.0
+    image.pixels.foreach_set(pixels)
+    path = os.path.join(directory, name + ".png")
+    image.file_format = "PNG"
+    image.filepath_raw = path
+    image.save()
+    bpy.data.images.remove(image)
+    return path
+
+
+def test_custom_texture_reaches_the_package():
+    """A picture the ROM never had comes out of the export as a loadable texture.
+
+    This is the whole feature end to end, and it is checked at the far end -
+    the bytes in the package - rather than at the operator's own bookkeeping.
+    Three things have to line up and none of them is visible from any one of
+    them alone: the mesh's table entry names the sentinel id, the manifest adds
+    a ``TEXTURES_3D`` payload at that ordinal, and the payload is a
+    ``TextureHeader`` the game's ``load_texture`` would accept.
+
+    Nothing here needs an extraction. That is not incidental - a track can now
+    be textured entirely with artwork its author brought, so the path has to
+    work on a machine that has never seen a ROM.
+    """
+    print("a custom texture reaches the package")
+    from dkr_track_editor import level_model, textures as texture_module
+    from dkr_track_editor.operators import custom_textures as custom_ops
+    from dkr_track_editor.operators import geometry as geometry_ops
+
+    fresh()
+    temporary = tempfile.mkdtemp(prefix="dkr-custom-tex-")
+    try:
+        bpy.ops.wm.save_as_mainfile(
+            filepath=os.path.join(temporary, "ownart.blend")
+        )
+        source = _write_probe_image(temporary, "probe", 200, 120)
+
+        bpy.ops.mesh.primitive_grid_add(size=4000.0, x_subdivisions=3,
+                                        y_subdivisions=3)
+        result = bpy.ops.dkr.track_from_mesh_blank(keep_source=False)
+        check(result == {"FINISHED"},
+              "a track builds from a mesh with no textures (%r)" % (result,))
+
+        built = geometry_ops.geometry_objects(bpy.context)
+        check(len(built) == 1, "there is one piece of track geometry")
+        if not built:
+            return
+        obj = built[0]
+
+        # -- import ------------------------------------------------------
+        settings = bpy.context.scene.dkr
+        result = bpy.ops.dkr.add_custom_texture(
+            filepath=source,
+            texture_format=str(texture_module.FORMAT_CODES["RGBA16"]),
+            size="",
+        )
+        check(result == {"FINISHED"}, "the image imports (%r)" % (result,))
+        check(len(settings.custom_textures) == 1,
+              "the scene holds one texture of its own")
+        if not len(settings.custom_textures):
+            return
+
+        record = settings.custom_textures[0]
+        check((record.width, record.height) == (64, 32),
+              "200x120 was resampled to the largest colour texture that fits "
+              "texture memory, in the shape closest to the picture's (got "
+              "%dx%d)" % (record.width, record.height))
+        check(not os.path.isabs(record.png),
+              "the PNG is remembered relative to the .blend, so the scene and "
+              "its pictures move together (%r)" % record.png)
+        check(os.path.isfile(custom_ops.resolve(record.png)),
+              "and it resolves to a file that is there")
+        check(custom_ops.FOLDER in record.png.replace("\\", "/"),
+              "in the folder the exporter looks in")
+
+        own = custom_ops.entries(bpy.context)
+        check(len(own) == 1 and own[0].index == texture_module.CUSTOM_ID_BASE,
+              "and it is the track's texture number one, id 0x%04X"
+              % texture_module.CUSTOM_ID_BASE)
+        check(int(settings.texture_id) == texture_module.CUSTOM_ID_BASE,
+              "the browser selected it, so the next click is Apply")
+
+        # -- apply -------------------------------------------------------
+        mesh = obj.data
+        drawn = [polygon.index for polygon in mesh.polygons]
+        _select_faces(mesh, drawn)
+        settings.texture_mapping = "PROJECT"
+        settings.texture_surface = "0"
+        result = bpy.ops.dkr.apply_texture()
+        check(result == {"FINISHED"}, "it applies to faces (%r)" % (result,))
+
+        extras = geometry_ops.extra_textures(obj)
+        check(len(extras) == 1, "one table entry was added (%d)" % len(extras))
+        if not extras:
+            return
+        check(extras[0]["id"] == texture_module.CUSTOM_ID_BASE,
+              "and it names the sentinel, not a ROM index (0x%X)"
+              % extras[0]["id"])
+        check((extras[0]["w"], extras[0]["h"]) == (64, 32),
+              "with the size the texture actually is")
+
+        # -- export ------------------------------------------------------
+        settings.track_name = "Own Art"
+        settings.track_id = "own-art"
+        bpy.ops.dkr.place_object(object_id="ASSET_OBJECT_SETUPPOINT")
+        target = os.path.join(temporary, "own-art.dkrmap")
+        result = bpy.ops.dkr.export_dkrmap(filepath=target, validate_first=False)
+        check(result == {"FINISHED"}, "the package exports (%r)" % (result,))
+
+        manifest_path = os.path.join(target, "manifest.json")
+        check(os.path.isfile(manifest_path), "there is a manifest")
+        if not os.path.isfile(manifest_path):
+            return
+        with open(manifest_path, "r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+
+        textures_added = [entry for entry in manifest["adds"]
+                          if entry["section"] == "TEXTURES_3D"]
+        check(len(textures_added) == 1,
+              "the manifest adds one TEXTURES_3D payload (%d)"
+              % len(textures_added))
+        if not textures_added:
+            return
+        check(textures_added[0]["file"] == "textures/0.bin",
+              "named by its ordinal, which is what the runtime numbers by "
+              "(%r)" % textures_added[0]["file"])
+
+        payload_path = os.path.join(target, "textures", "0.bin")
+        check(os.path.isfile(payload_path), "and the payload is on disk")
+        if not os.path.isfile(payload_path):
+            return
+        with open(payload_path, "rb") as handle:
+            payload = handle.read()
+
+        # The header the game reads, checked as the game reads it.
+        check(payload[0x00] == 64 and payload[0x01] == 32,
+              "the payload declares 64x32 (%dx%d)" % (payload[0], payload[1]))
+        check(payload[0x02] & 0xF == texture_module.FORMAT_CODES["RGBA16"],
+              "in RGBA16 (format byte 0x%02X)" % payload[0x02])
+        check(payload[0x05] == 1, "numberOfInstances is 1")
+        check(struct.unpack_from(">H", payload, 0x12)[0] >> 8 == 1,
+              "load_texture would read one frame")
+        check(payload[0x1D] == 0, "and would not try to decompress it")
+        check(len(payload) == 32 + 64 * 32 * 2,
+              "the payload is header plus image (%d)" % len(payload))
+        check(len(payload) % 16 == 0,
+              "and 16-aligned, so the display list fits its allocation")
+
+        # The model has to name the same texture the package ships.
+        model_path = os.path.join(target, "model.bin")
+        check(os.path.isfile(model_path), "the geometry shipped too")
+        if not os.path.isfile(model_path):
+            return
+        model = level_model.load(model_path)
+        ids = [texture.texture_id for texture in model.textures]
+        check(texture_module.CUSTOM_ID_BASE in ids,
+              "and its texture table names the sentinel the runtime rewrites "
+              "(%r)" % ids)
+
+        # A package that claims a payload it does not have fails at load with a
+        # far worse message than this one.
+        for entry in manifest["adds"]:
+            check(os.path.isfile(os.path.join(target, entry["file"])),
+                  "the manifest claims %s and it is there" % entry["file"])
+    finally:
+        shutil.rmtree(temporary, ignore_errors=True)
+        fresh()
+
+
+def test_custom_texture_refuses_what_the_hardware_cannot_draw():
+    """The two sizes that produce a broken track are refused at import.
+
+    Both fail silently in game - a texture too large for texture memory draws
+    corrupt, and one too large to wrap stretches once across each face instead
+    of tiling - so both have to be caught here, where there is still something
+    to say about them.
+    """
+    print("a custom texture the RDP cannot load is refused")
+    from dkr_track_editor import textures as texture_module
+
+    fresh()
+    temporary = tempfile.mkdtemp(prefix="dkr-custom-tex-limits-")
+    try:
+        bpy.ops.wm.save_as_mainfile(
+            filepath=os.path.join(temporary, "limits.blend")
+        )
+        source = _write_probe_image(temporary, "probe", 64, 64)
+        colour = str(texture_module.FORMAT_CODES["RGBA16"])
+        settings = bpy.context.scene.dkr
+
+        refusal = _refused(lambda: bpy.ops.dkr.add_custom_texture(
+            filepath=source, texture_format=colour, size="64x64"
+        ))
+        check(refusal is not None and "texture memory" in refusal,
+              "64x64 in colour is 8KB into 4KB of texture memory (%r)"
+              % refusal)
+        check(len(settings.custom_textures) == 0,
+              "and nothing was added to the track")
+
+        refusal = _refused(lambda: bpy.ops.dkr.add_custom_texture(
+            filepath=source, texture_format=colour, size="48x32"
+        ))
+        check(refusal is not None and "power of two" in refusal,
+              "48 is not a power of two, so it would clamp (%r)" % refusal)
+
+        refusal = _refused(lambda: bpy.ops.dkr.add_custom_texture(
+            filepath=source, texture_format=colour, size="128x16"
+        ))
+        check(refusal is not None and "clamp" in refusal,
+              "128 is past the largest side that can wrap (%r)" % refusal)
+
+        # The same picture in an eight-bit format does fit at 64x64, which is
+        # the trade the format menu exists to offer.
+        result = bpy.ops.dkr.add_custom_texture(
+            filepath=source,
+            texture_format=str(texture_module.FORMAT_CODES["I8"]),
+            size="64x64",
+        )
+        check(result == {"FINISHED"},
+              "the same size in I8 is exactly texture memory (%r)" % (result,))
+        check(len(settings.custom_textures) == 1,
+              "and it is the only one that was added")
+
+        # Nothing that failed may leave a PNG behind: the next import would
+        # number around it and the folder would fill with dead pictures.
+        folder = os.path.join(temporary, "dkr_textures")
+        written = sorted(os.listdir(folder)) if os.path.isdir(folder) else []
+        check(len(written) == 1,
+              "a refused import leaves no file behind (%r)" % written)
+    finally:
+        shutil.rmtree(temporary, ignore_errors=True)
+        fresh()
+
+
+def test_custom_texture_removal_keeps_the_numbering_honest():
+    """Removing one moves the ids behind it, and stops if the table holds it.
+
+    Both halves matter and neither is visible in the panel. Ids are positions,
+    so a removal that did not renumber would repaint the track by one; and a
+    removal that dropped a *table* entry would move every index after it, which
+    nothing else in the addon is prepared for.
+    """
+    print("removing a custom texture")
+    from dkr_track_editor import textures as texture_module
+    from dkr_track_editor.operators import custom_textures as custom_ops
+    from dkr_track_editor.operators import geometry as geometry_ops
+
+    fresh()
+    temporary = tempfile.mkdtemp(prefix="dkr-custom-tex-remove-")
+    try:
+        bpy.ops.wm.save_as_mainfile(
+            filepath=os.path.join(temporary, "removing.blend")
+        )
+        colour = str(texture_module.FORMAT_CODES["RGBA16"])
+        first = _write_probe_image(temporary, "first", 64, 32)
+        second = _write_probe_image(temporary, "second", 64, 32)
+        third = _write_probe_image(temporary, "third", 64, 32)
+
+        bpy.ops.mesh.primitive_grid_add(size=4000.0, x_subdivisions=3,
+                                        y_subdivisions=3)
+        bpy.ops.dkr.track_from_mesh_blank(keep_source=False)
+        built = geometry_ops.geometry_objects(bpy.context)
+        check(len(built) == 1, "the track built")
+        if not built:
+            return
+        obj = built[0]
+
+        for path in (first, second, third):
+            bpy.ops.dkr.add_custom_texture(filepath=path,
+                                           texture_format=colour, size="64x32")
+        settings = bpy.context.scene.dkr
+        check(len(settings.custom_textures) == 3, "three textures were added")
+
+        # Give the third one a table entry, so the removal of the first has to
+        # move an id the mesh is already holding.
+        _select_faces(obj.data, [polygon.index for polygon in obj.data.polygons])
+        settings.texture_id = texture_module.custom_id(2)
+        settings.texture_mapping = "PROJECT"
+        bpy.ops.dkr.apply_texture()
+        extras = geometry_ops.extra_textures(obj)
+        check(len(extras) == 1 and extras[0]["id"] == texture_module.custom_id(2),
+              "the third texture has the table entry (%r)"
+              % [record.get("id") for record in extras])
+
+        # Removing the one the table holds is refused, and says which mesh.
+        settings.texture_id = texture_module.custom_id(2)
+        refusal = _refused(bpy.ops.dkr.remove_custom_texture)
+        check(refusal is not None and "place in" in refusal,
+              "a texture the geometry has a table entry for cannot be removed "
+              "(%r)" % refusal)
+        check(len(settings.custom_textures) == 3, "and nothing was removed")
+
+        # Removing the first is allowed, and the third becomes the second.
+        settings.texture_id = texture_module.custom_id(0)
+        result = bpy.ops.dkr.remove_custom_texture()
+        check(result == {"FINISHED"}, "the first one goes (%r)" % (result,))
+        check(len(settings.custom_textures) == 2, "two are left")
+
+        extras = geometry_ops.extra_textures(obj)
+        check(extras and extras[0]["id"] == texture_module.custom_id(1),
+              "and the table entry moved down with it, from 2 to 1 (%r)"
+              % [record.get("id") for record in extras])
+        own = custom_ops.entries(bpy.context)
+        check([entry.name for entry in own] == ["second", "third"],
+              "the survivors kept their order (%r)"
+              % [entry.name for entry in own])
+        check(own[1].index == texture_module.custom_id(1),
+              "and the one the mesh points at is the one it meant")
+    finally:
+        shutil.rmtree(temporary, ignore_errors=True)
+        fresh()
+
+
 def main():
     dkr_track_editor.register()
     try:
@@ -1998,6 +2849,15 @@ def main():
         test_resegment_makes_the_track_its_own_base()
         test_track_from_mesh()
         test_track_from_mesh_refuses_a_giant()
+        test_apply_texture()
+        test_apply_animated_texture()
+        test_project_texture_onto_new_geometry()
+        test_track_from_mesh_with_its_own_textures()
+        test_texture_browser_pieces()
+        test_texture_side_operators()
+        test_custom_texture_reaches_the_package()
+        test_custom_texture_refuses_what_the_hardware_cannot_draw()
+        test_custom_texture_removal_keeps_the_numbering_honest()
         test_scratch_track_ships_its_geometry()
         test_drop_to_surface()
         test_place_shows_artwork()

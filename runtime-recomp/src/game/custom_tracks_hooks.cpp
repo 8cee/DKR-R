@@ -32,7 +32,16 @@ constexpr std::uint32_t kLevelHeadersSection = 23U;
 // aspect is a (table, data) pair, and the two indices above anchor the numbering
 // because level_global_init loads them as literals.
 //
-//   20/21 object maps   22/23 headers   24/25 names   26/27 models
+//   2/3 3D textures   20/21 object maps   22/23 headers   24/25 names
+//   26/27 models
+//
+// The texture pair is the same numbering read from the other end: the decomp's
+// section list runs ASSET_AI_BEHAVIOUR, ASSET_AI_BEHAVIOUR_TABLE,
+// ASSET_TEXTURES_3D, ASSET_TEXTURES_3D_TABLE, so the data section is 2 and its
+// table is 3 - note the order is data-then-table here, the reverse of the level
+// pairs. textures_sprites.c reaches it as
+// asset_table_load(ASSET_TEXTURES_3D_TABLE) at boot and asset_load with
+// ASSET_TEXTURES_3D per texture, which is the same pair of hooks below.
 using dkr::runtime::custom_tracks::Section;
 
 struct SectionMapping {
@@ -42,6 +51,7 @@ struct SectionMapping {
 };
 
 constexpr SectionMapping kSectionMappings[] = {
+    {3U, 2U, Section::Textures3D},
     {20U, 21U, Section::LevelObjectMaps},
     {22U, 23U, Section::LevelHeaders},
     {24U, 25U, Section::LevelNames},

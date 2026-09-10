@@ -19,11 +19,19 @@ identity attributes, the material slots and the base file that every other
 operator here already understands, and there is exactly one importer to keep
 correct instead of two.
 
-**The ceiling this cannot lift.** A ``.dkrmap`` has no texture section - the
-runtime's table has four entries and none of them is textures - so a new track
-can only draw with textures the ROM already holds. That is why a donor track is
-asked for rather than inferred: its texture table is what the new track will
-use, and an author choosing it is choosing what their track can look like.
+**The ceiling this cannot lift, and the one it no longer has.** A ``.dkrmap``
+has no texture section - the runtime's table has four entries and none of them
+is textures - so a new track can only draw with textures the ROM already holds.
+That much stands.
+
+What used to sit on top of it, and does not any more, is that the new track was
+stuck with the *donor's* table: two or three dozen images picked once and
+unchangeable. A level model's table stores indices into the ROM's global 3D
+texture list, so it can name any texture the ROM holds, and :mod:`..textures`
+and the Textures panel are how an author picks them. A donor table is therefore a
+starting point and a convenience - it brings a coherent set of images and their
+surface types with it - which is why :class:`DKR_OT_track_from_mesh_blank`
+exists beside it for authors who would rather choose everything themselves.
 """
 
 from __future__ import annotations
@@ -53,11 +61,14 @@ def convertible(context) -> list:
 
 
 def _texture_for(material, slot: int, count: int) -> int:
-    """Which entry of the donor's texture table a material draws.
+    """Which entry of the starting texture table a material draws.
 
     A material that came from an imported track already names one. A material an
     author made does not, so it falls back to its slot position - which is
-    arbitrary, and is why the operator says which textures it used.
+    arbitrary, and is why the operator says which textures it used. With no
+    starting table at all every face comes out untextured, which is the honest
+    answer: the author picks the textures afterwards, in the Textures panel,
+    where the whole ROM is available rather than one track's table.
     """
     if material is not None and geometry.PROP_TEXTURE_INDEX in material:
         index = int(material[geometry.PROP_TEXTURE_INDEX])
@@ -212,21 +223,22 @@ class DKR_OT_track_from_mesh(bpy.types.Operator, ImportHelper):
 
         Without this it offers a file dialog with no explanation, and the
         obvious guess - that it wants the mesh, or the track being replaced - is
-        wrong. It wants a texture table, and which one is a real choice: it is
-        the whole set of images the new track can ever draw with.
+        wrong. It wants a texture table to start from.
         """
         layout = self.layout
         sources = convertible(context)
 
         box = layout.box()
-        box.label(text="Pick a track to borrow from", icon="TEXTURE")
+        box.label(text="Pick a track to start from", icon="TEXTURE")
         box.label(text="levels/models/<world>/*.bin")
         box.separator()
-        box.label(text="Its texture table becomes")
-        box.label(text="the only set of images your")
-        box.label(text="track can use. A .dkrmap")
-        box.label(text="cannot add textures, so this")
-        box.label(text="choice is not cosmetic.")
+        box.label(text="Its texture table is where")
+        box.label(text="your track begins - a coherent")
+        box.label(text="set of images with their")
+        box.label(text="surface types. You can add any")
+        box.label(text="of the ROM's other textures")
+        box.label(text="afterwards, in the Textures")
+        box.label(text="panel.")
 
         if sources:
             note = layout.box()
@@ -236,24 +248,8 @@ class DKR_OT_track_from_mesh(bpy.types.Operator, ImportHelper):
         layout.prop(self, "keep_source")
 
     def execute(self, context):
-        sources = convertible(context)
-        active = context.active_object
-        obj = active if active in sources else (sources[0] if sources else None)
+        obj = _source_mesh(self, context)
         if obj is None:
-            self.report(
-                {"ERROR"},
-                "no mesh of your own in the scene to convert. Model one, or "
-                "import a track's geometry and reshape that instead",
-            )
-            return {"CANCELLED"}
-
-        if not bpy.data.filepath:
-            self.report(
-                {"ERROR"},
-                "save the .blend first. A converted track is written as its own "
-                "model file beside it, because that file becomes the base every "
-                "later export is applied to",
-            )
             return {"CANCELLED"}
 
         donor = self.filepath
@@ -274,74 +270,111 @@ class DKR_OT_track_from_mesh(bpy.types.Operator, ImportHelper):
                         % (os.path.basename(donor), error))
             return {"CANCELLED"}
 
-        context.view_layer.update()
-        try:
-            faces, positions, colours = read_source_mesh(obj, textures)
-        except ValueError as error:
-            self.report({"ERROR"}, str(error))
-            return {"CANCELLED"}
+        return build_track(self, context, obj, textures, self.keep_source,
+                           donor=donor)
 
-        if not faces:
-            self.report({"ERROR"}, "%s has no faces to build a track from" % obj.name)
-            return {"CANCELLED"}
 
-        try:
-            model = level_model_layout.blank_model(textures)
-            level_model_layout.rebatch_segment(
-                model.segments[0], faces, positions, colours
-            )
-            segments = level_model_layout.resegment(model)
-            payload = level_model_encoder.pack(model)
-        except (level_model_layout.LayoutError,
-                level_model_encoder.LevelModelEncodeError) as error:
-            self.report({"ERROR"}, "could not build the track: %s" % error)
-            return {"CANCELLED"}
-
-        stem = os.path.splitext(os.path.basename(bpy.data.filepath))[0]
-        target = os.path.join(
-            os.path.dirname(bpy.data.filepath), "%s-geometry.bin" % stem
+def _source_mesh(operator, context):
+    """The mesh being converted, or ``None`` with the reason already reported."""
+    sources = convertible(context)
+    active = context.active_object
+    obj = active if active in sources else (sources[0] if sources else None)
+    if obj is None:
+        operator.report(
+            {"ERROR"},
+            "no mesh of your own in the scene to convert. Model one, or "
+            "import a track's geometry and reshape that instead",
         )
-        try:
-            with open(target, "wb") as handle:
-                handle.write(payload)
-        except OSError as error:
-            self.report({"ERROR"}, "could not write %s: %s" % (target, error))
-            return {"CANCELLED"}
+        return None
 
-        obj[PROP_CONVERTED] = target
-        if self.keep_source:
-            obj.hide_set(True)
-        else:
-            bpy.data.objects.remove(obj, do_unlink=True)
-
-        # Imported back through the ordinary path, so the author gets the same
-        # editable geometry as any other track and there is one importer to keep
-        # correct rather than two.
-        for existing in list(context.scene.objects):
-            if geometry.PROP_GEOMETRY in existing:
-                bpy.data.objects.remove(existing, do_unlink=True)
-        collection = geometry._geometry_collection(context)
-        tree = assets.AssetTree.find(donor) or prefs.resolve(context)
-        built, stats = geometry._build_geometry(
-            stem, model, collection, tree, include_hidden=True
+    if not bpy.data.filepath:
+        operator.report(
+            {"ERROR"},
+            "save the .blend first. A converted track is written as its own "
+            "model file beside it, because that file becomes the base every "
+            "later export is applied to",
         )
-        built[geometry.PROP_MODEL_PATH] = target
-        built[geometry.PROP_AUTHORED_BASE] = True
-        geometry.record_budget(built, model)
-        context.scene.dkr.geometry_path = target
+        return None
+    return obj
 
-        for warning in _budget_warnings(model, textures):
-            self.report({"WARNING"}, warning)
 
-        self.report(
-            {"INFO"},
-            "built %d triangles into %d segments from %s, using %s's %d "
-            "textures, and wrote %s"
-            % (model.triangle_count, segments, obj.name if self.keep_source
-               else "the mesh", os.path.basename(donor), len(textures),
-               os.path.basename(target)),
+def build_track(operator, context, obj, textures, keep_source, donor=None):
+    """Build a level model out of one mesh and import it back as geometry.
+
+    Shared by the two ways in, which differ only in where the starting texture
+    table comes from: a donor track's, or nothing at all. Everything after that
+    point is the same, which is the reason it is one function - the segmenting,
+    the layout and the re-import are exactly what must not drift between them.
+    """
+    context.view_layer.update()
+    try:
+        faces, positions, colours = read_source_mesh(obj, textures)
+    except ValueError as error:
+        operator.report({"ERROR"}, str(error))
+        return {"CANCELLED"}
+
+    if not faces:
+        operator.report({"ERROR"},
+                        "%s has no faces to build a track from" % obj.name)
+        return {"CANCELLED"}
+
+    try:
+        model = level_model_layout.blank_model(textures)
+        level_model_layout.rebatch_segment(
+            model.segments[0], faces, positions, colours
         )
-        return {"FINISHED"}
+        segments = level_model_layout.resegment(model)
+        payload = level_model_encoder.pack(model)
+    except (level_model_layout.LayoutError,
+            level_model_encoder.LevelModelEncodeError) as error:
+        operator.report({"ERROR"}, "could not build the track: %s" % error)
+        return {"CANCELLED"}
+
+    stem = os.path.splitext(os.path.basename(bpy.data.filepath))[0]
+    target = os.path.join(
+        os.path.dirname(bpy.data.filepath), "%s-geometry.bin" % stem
+    )
+    try:
+        with open(target, "wb") as handle:
+            handle.write(payload)
+    except OSError as error:
+        operator.report({"ERROR"}, "could not write %s: %s" % (target, error))
+        return {"CANCELLED"}
+
+    name = obj.name
+    obj[PROP_CONVERTED] = target
+    if keep_source:
+        obj.hide_set(True)
+    else:
+        bpy.data.objects.remove(obj, do_unlink=True)
+
+    # Imported back through the ordinary path, so the author gets the same
+    # editable geometry as any other track and there is one importer to keep
+    # correct rather than two.
+    for existing in list(context.scene.objects):
+        if geometry.PROP_GEOMETRY in existing:
+            bpy.data.objects.remove(existing, do_unlink=True)
+    collection = geometry._geometry_collection(context)
+    tree = (assets.AssetTree.find(donor) if donor else None) or prefs.resolve(context)
+    built, _stats = geometry._build_geometry(
+        stem, model, collection, tree, include_hidden=True
+    )
+    built[geometry.PROP_MODEL_PATH] = target
+    built[geometry.PROP_AUTHORED_BASE] = True
+    geometry.record_budget(built, model)
+    context.scene.dkr.geometry_path = target
+
+    for warning in _budget_warnings(model, textures):
+        operator.report({"WARNING"}, warning)
+
+    source = "%s's %d textures" % (os.path.basename(donor), len(textures))         if donor else "no textures yet"
+    operator.report(
+        {"INFO"},
+        "built %d triangles into %d segments from %s, with %s, and wrote %s"
+        % (model.triangle_count, segments, name if keep_source else "the mesh",
+           source, os.path.basename(target)),
+    )
+    return {"FINISHED"}
 
 
 def _budget_warnings(model, textures) -> list:
@@ -357,10 +390,64 @@ def _budget_warnings(model, textures) -> list:
     messages.extend(level_model_layout.check_collision_pressure(model))
     if not textures:
         messages.append(
-            "the donor track has no textures, so nothing in this track will be "
-            "drawn with one"
+            "this track starts with no texture table, so every face is "
+            "untextured until you give it one. Select faces and apply a texture "
+            "from the Textures panel; any of the ROM's will load"
         )
     return messages
 
 
-CLASSES = (DKR_OT_track_from_mesh,)
+class DKR_OT_track_from_mesh_blank(bpy.types.Operator):
+    """Turn the selected mesh into DKR track geometry, choosing textures later
+
+    The same conversion, without borrowing a starting texture table. Every face
+    comes out untextured and the Textures panel is where they get their look -
+    which is the honest shape of the job now that a track can name any texture
+    in the ROM rather than only the ones a donor happened to ship with.
+    """
+
+    bl_idname = "dkr.track_from_mesh_blank"
+    bl_label = "Track From Mesh, No Textures"
+    bl_options = {"REGISTER"}
+
+    keep_source: BoolProperty(
+        name="Keep The Original Mesh",
+        description=(
+            "Leave the mesh you modelled in the scene, hidden. It is your own "
+            "work and the addon does not delete it; the converted geometry is a "
+            "separate object"
+        ),
+        default=True,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return bool(convertible(context))
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self)
+
+    def draw(self, context):
+        layout = self.layout
+        sources = convertible(context)
+        if sources:
+            box = layout.box()
+            box.label(text="Converting: %s" % sources[0].name, icon="MESH_DATA")
+            box.label(text="%d faces" % len(sources[0].data.polygons))
+
+        box = layout.box()
+        box.label(text="Every face comes out", icon="INFO")
+        box.label(text="untextured. Pick textures in")
+        box.label(text="the Textures panel afterwards -")
+        box.label(text="any texture in the ROM will do.")
+
+        layout.prop(self, "keep_source")
+
+    def execute(self, context):
+        obj = _source_mesh(self, context)
+        if obj is None:
+            return {"CANCELLED"}
+        return build_track(self, context, obj, [], self.keep_source)
+
+
+CLASSES = (DKR_OT_track_from_mesh, DKR_OT_track_from_mesh_blank)

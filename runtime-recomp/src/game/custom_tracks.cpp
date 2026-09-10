@@ -18,7 +18,7 @@ using dkr::runtime::custom_tracks::MapSlot;
 using dkr::runtime::custom_tracks::Section;
 using dkr::runtime::custom_tracks::Track;
 
-constexpr std::size_t kSectionCount = 4U;
+constexpr std::size_t kSectionCount = 5U;
 
 std::size_t section_slot(Section section) {
     return static_cast<std::size_t>(section);
@@ -36,6 +36,11 @@ struct AddedEntry {
     std::uint32_t offset = 0;   // absolute section offset
     std::uint32_t size = 0;
     std::uint32_t index = 0;    // index assigned within this section
+    // Position among the entries THIS track contributed to THIS section, which
+    // is manifest order. A track adds one header and one model, so for those it
+    // is always zero; for textures it is the whole of how one is told from
+    // another. See resolve_model_textures().
+    std::uint32_t within_track = 0;
 };
 
 struct SectionState {
@@ -83,6 +88,160 @@ std::vector<const Entry*> enabled_entries(Section section) {
     return result;
 }
 
+// ---------------------------------------------------------------------------
+// A model naming its own track's textures
+// ---------------------------------------------------------------------------
+//
+// A track that ships artwork cannot know the ids it will get: a custom
+// texture's index is the ROM's retail texture count plus an ordinal, and the
+// count belongs to the player's cartridge: 1401 in US v1.0 and 1416 in Rev A,
+// both counted from the extractions themselves. So the exporter writes
+// kCustomTextureIdBase + ordinal and the real index is substituted here, the
+// same way a header's model and object-map fields are.
+//
+// **Where the ids are, and why they are reachable at all.** A level model
+// arrives compressed: track_init_level_model does asset_load and then
+// gzip_inflate, so the payload is a five-byte container followed by a raw
+// DEFLATE stream. A four-byte field inside a Huffman-coded block has no byte
+// offset to patch. The exporter's answer is DEFLATE's own - block type 00 is
+// *stored*, byte-aligned and verbatim, and gzip_inflate_block dispatches to
+// gzip_inflate_stored for it exactly as it does to the Huffman decoders for the
+// other two - so it writes the model's header and texture table as one stored
+// block and compresses the rest:
+//
+//   0..4   container: uncompressed size (LE u32), then the tag 0x09
+//   5      the stored block's BFINAL/BTYPE byte, whose remaining five bits the
+//          reader discards, which is what "stored is byte-aligned" means
+//   6..7   LEN, little endian     8..9   NLEN, LEN's complement
+//   10..   the model's own first LEN bytes, uncompressed
+//
+// Kept in step with level_model_encoder.STORED_PREFIX_AT in the addon.
+//
+// This runs while the LEVEL_MODELS blob is being assembled rather than as the
+// bytes are served, because here they are a plain byte vector: no RDRAM, no
+// endian macros, and a unit test can read the result back.
+
+//: LevelModel, from the matching decomp's include/structs.h:
+//    /* 0x00 */ TextureInfo *textures;   // a file-relative offset on disk
+//    /* 0x18 */ s16 numberOfTextures;
+//  and each TextureInfo is { be_int32 id, u8 width, u8 height, u8 format,
+//  u8 surfaceType }. tracks.c resolves the id with load_texture(id | 0x8000).
+constexpr std::size_t kLevelModelTexturesPointer = 0x00;
+constexpr std::size_t kLevelModelTextureCount = 0x18;
+constexpr std::size_t kTextureInfoSize = 8U;
+constexpr std::size_t kStoredPrefixAt = 10U;
+constexpr std::uint8_t kContainerTag = 0x09;
+
+// A model naming more textures than this is not a model: the batch that selects
+// an entry does so with a u8 where 0xFF means "none".
+constexpr std::int32_t kMaxModelTextures = 255;
+
+std::uint32_t read_be32(const std::uint8_t* bytes) {
+    return (static_cast<std::uint32_t>(bytes[0]) << 24) |
+           (static_cast<std::uint32_t>(bytes[1]) << 16) |
+           (static_cast<std::uint32_t>(bytes[2]) << 8) |
+           static_cast<std::uint32_t>(bytes[3]);
+}
+
+void write_be32(std::uint8_t* bytes, std::uint32_t value) {
+    for (std::size_t byte = 0; byte < 4U; ++byte) {
+        bytes[byte] =
+            static_cast<std::uint8_t>((value >> (24U - byte * 8U)) & 0xFFU);
+    }
+}
+
+// Declared here, defined after the section state it reads.
+std::int32_t own_texture_index(const std::string& track_id,
+                              std::uint32_t ordinal);
+
+// Substitute the real texture indices into one model payload, in place.
+//
+// An id that cannot be resolved becomes 0 rather than being left alone. Leaving
+// it would send load_texture past the end of the table it just published with an
+// index it range-checks and then uses anyway - textures_sprites.c sets `id = 0`
+// on a failed check but still indexes with the unclamped value. Texture 0 is
+// wrong and visible, which is the better of the two.
+void resolve_model_textures(std::uint8_t* bytes, std::size_t size,
+                           const std::string& track_id) {
+    if (size < kStoredPrefixAt + kLevelModelTextureCount + 2U ||
+        bytes[4] != kContainerTag) {
+        return; // Not a container this can read.
+    }
+
+    // The stored block has to be there and has to be honest, or the offsets
+    // below mean nothing. A package from an older exporter compresses from the
+    // first byte; that is a "leave it alone", because such a package predates
+    // custom textures and has none to resolve.
+    const std::uint32_t length =
+        static_cast<std::uint32_t>(bytes[6]) |
+        (static_cast<std::uint32_t>(bytes[7]) << 8);
+    const std::uint32_t complement =
+        static_cast<std::uint32_t>(bytes[8]) |
+        (static_cast<std::uint32_t>(bytes[9]) << 8);
+    if ((bytes[5] & 0x07U) != 0x00U || complement != ((~length) & 0xFFFFU)) {
+        return;
+    }
+
+    const std::uint8_t* model = bytes + kStoredPrefixAt;
+    const std::uint32_t table = read_be32(model + kLevelModelTexturesPointer);
+    const auto count = static_cast<std::int16_t>(
+        (static_cast<std::uint16_t>(model[kLevelModelTextureCount]) << 8) |
+        model[kLevelModelTextureCount + 1U]);
+    if (count <= 0 || count > kMaxModelTextures) {
+        return;
+    }
+
+    // The table has to lie inside the stored prefix. Past it the bytes are
+    // Huffman-coded, and a write there would corrupt the stream rather than
+    // change an id.
+    const std::uint64_t span = static_cast<std::uint64_t>(table) +
+                               static_cast<std::uint64_t>(count) *
+                                   kTextureInfoSize;
+    if (span > length || kStoredPrefixAt + span > size) {
+        std::fprintf(stderr,
+                     "[custom-tracks] %s puts its %d model textures at +%u, "
+                     "past the %u bytes it left uncompressed; leaving them\n",
+                     track_id.c_str(), count, table, length);
+        return;
+    }
+
+    int resolved = 0;
+    int lost = 0;
+    for (std::int16_t entry = 0; entry < count; ++entry) {
+        std::uint8_t* at = bytes + kStoredPrefixAt + table +
+                           static_cast<std::size_t>(entry) * kTextureInfoSize;
+        const auto identifier = static_cast<std::int32_t>(read_be32(at));
+        if (identifier < dkr::runtime::custom_tracks::kCustomTextureIdBase ||
+            identifier >= dkr::runtime::custom_tracks::kCustomTextureIdBase +
+                              dkr::runtime::custom_tracks::kCustomTextureIdCount) {
+            continue; // A retail texture; the author meant exactly that one.
+        }
+        const auto ordinal = static_cast<std::uint32_t>(
+            identifier - dkr::runtime::custom_tracks::kCustomTextureIdBase);
+        const std::int32_t index = own_texture_index(track_id, ordinal);
+        if (index < 0) {
+            write_be32(at, 0U);
+            ++lost;
+            continue;
+        }
+        write_be32(at, static_cast<std::uint32_t>(index));
+        ++resolved;
+    }
+
+    if (lost != 0) {
+        std::fprintf(stderr,
+                     "[custom-tracks] %s: %d of its own model textures "
+                     "resolved, and %d could not be - those are drawn with "
+                     "texture 0\n",
+                     track_id.c_str(), resolved, lost);
+    } else if (resolved != 0) {
+        std::fprintf(stderr,
+                     "[custom-tracks] %s: %d of its own textures resolved into "
+                     "its model\n",
+                     track_id.c_str(), resolved);
+    }
+}
+
 const Track* track_owning(Section section, const Entry* entry) {
     for (const Track& track : g_tracks) {
         for (const Entry& candidate : track.entries) {
@@ -92,6 +251,27 @@ const Track* track_owning(Section section, const Entry* entry) {
         }
     }
     return nullptr;
+}
+
+// The index a track's `ordinal`-th own texture received in the published
+// texture table, or -1. Assumes g_mutex is held, which it is: the only caller
+// is resolve_model_textures, from inside build_extended_table.
+std::int32_t own_texture_index(const std::string& track_id,
+                              std::uint32_t ordinal) {
+    const SectionState& textures =
+        g_sections[section_slot(Section::Textures3D)];
+    if (!textures.built || track_id.empty()) {
+        // The texture table is published once, at boot. Not built means this
+        // level load is the first thing to grow a section, so there is no
+        // custom texture to name and saying so is the only safe answer.
+        return -1;
+    }
+    for (const AddedEntry& texture : textures.added) {
+        if (texture.track_id == track_id && texture.within_track == ordinal) {
+            return static_cast<std::int32_t>(texture.index);
+        }
+    }
+    return -1; // The track ships fewer textures than the model names.
 }
 
 } // namespace
@@ -243,19 +423,34 @@ std::vector<std::int32_t> build_extended_table(
     result.assign(retail_table, retail_table + retail_count + 1U);
 
     std::uint32_t running = state.end_offset;
+    std::unordered_map<std::string, std::uint32_t> seen_per_track;
     for (std::uint32_t ordinal = 0; ordinal < entries.size(); ++ordinal) {
         const Entry* entry = entries[ordinal];
         const Track* owner = track_owning(section, entry);
         const std::uint32_t entry_size =
             static_cast<std::uint32_t>(entry->bytes.size());
+        const std::string owner_id =
+            owner == nullptr ? std::string{} : owner->id;
+        const std::uint32_t within = seen_per_track[owner_id]++;
 
         state.added.push_back(AddedEntry{
-            owner == nullptr ? std::string{} : owner->id,
+            owner_id,
             entry->slot,
-            running, entry_size, retail_count + ordinal});
+            running, entry_size, retail_count + ordinal, within});
 
         state.blob.insert(state.blob.end(), entry->bytes.begin(),
                           entry->bytes.end());
+        if (section == Section::LevelModels && entry_size != 0U) {
+            // A model names its own track's textures by ordinal, and only the
+            // published texture table knows which index each one got. The copy
+            // in the blob is what gets served, so it is the copy that is
+            // rewritten - `entry->bytes` stays as the file wrote it, which is
+            // what makes a rebuild on the next level load idempotent rather
+            // than cumulative.
+            resolve_model_textures(state.blob.data() + state.blob.size() -
+                                       entry_size,
+                                   entry_size, owner_id);
+        }
         running += entry_size;
         result.push_back(static_cast<std::int32_t>(running));
 
@@ -325,6 +520,7 @@ const std::unordered_map<std::string, Section>& section_names() {
         {"LEVEL_OBJECT_MAPS", Section::LevelObjectMaps},
         {"LEVEL_NAMES", Section::LevelNames},
         {"LEVEL_MODELS", Section::LevelModels},
+        {"TEXTURES_3D", Section::Textures3D},
     };
     return names;
 }
@@ -422,6 +618,38 @@ bool parse_track(const std::filesystem::path& root, Track& track,
         if (!read_file(root / file, entry.bytes)) {
             error = "could not read " + file;
             return false;
+        }
+
+        // A texture payload is the one kind the loader reads before it knows
+        // how big it is: load_texture pulls sizeof(TempTexHeader) bytes to
+        // find the frame count, then allocates from what it read. A payload
+        // shorter than that peek is served as far as it goes and the rest
+        // comes from wherever the ROM's own bytes sit past the section, which
+        // is a TextureHeader made of nothing and an allocation sized by it.
+        // Cheaper to refuse the package.
+        if (entry.section == Section::Textures3D) {
+            if (entry.bytes.size() <
+                dkr::runtime::custom_tracks::kMinimumTexturePayload) {
+                error = file + " is " + std::to_string(entry.bytes.size()) +
+                        " bytes; a texture is at least " +
+                        std::to_string(
+                            dkr::runtime::custom_tracks::
+                                kMinimumTexturePayload) +
+                        ", which is what load_texture reads before it knows "
+                        "the size";
+                return false;
+            }
+            // load_texture puts the display lists it builds at
+            // align16(tex + assetSize) inside an allocation of exactly
+            // assetSize plus those lists, so an unaligned payload pushes the
+            // last one past the end of its own block.
+            if ((entry.bytes.size() % 16U) != 0U) {
+                error = file + " is " + std::to_string(entry.bytes.size()) +
+                        " bytes and a texture payload has to be a multiple of "
+                        "16, or load_texture's display list overruns its "
+                        "allocation";
+                return false;
+            }
         }
         track.entries.push_back(std::move(entry));
     }

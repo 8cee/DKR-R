@@ -62,10 +62,11 @@ class RebuildSummary:
     """What a layout-rebuilding export changed, in the shape EditSummary has."""
 
     __slots__ = ("moved", "flags", "vertices_added", "vertices_removed",
-                 "faces_added", "faces_removed", "bounds", "surfaces")
+                 "faces_added", "faces_removed", "bounds", "surfaces",
+                 "textures")
 
     def __init__(self, vertices_added=0, vertices_removed=0, faces_added=0,
-                 faces_removed=0, moved=0, flags=0):
+                 faces_removed=0, moved=0, flags=0, textures=0):
         self.moved = moved
         self.flags = flags
         self.vertices_added = vertices_added
@@ -74,6 +75,8 @@ class RebuildSummary:
         self.faces_removed = faces_removed
         self.bounds = 0
         self.surfaces = 0
+        #: Entries the author added to the track's texture table.
+        self.textures = textures
 
     def describe(self) -> str:
         parts = []
@@ -85,6 +88,7 @@ class RebuildSummary:
             (self.moved, "vertex", "vertices", "moved"),
             (self.flags, "batch", "batches", "reflagged"),
             (self.surfaces, "surface type", "surface types", "changed"),
+            (self.textures, "texture", "textures", "added"),
         ):
             if count:
                 parts.append("%d %s %s" % (count, one if count == 1 else many, verb))
@@ -626,11 +630,76 @@ def build_edited_model(context) -> Optional[GeometryEdit]:
     read = read_mesh(obj, model)
     notes: List[str] = list(read.notes)
 
+    added = _add_textures(obj, model, notes)
+
     include_hidden = bool(obj.get(geometry.PROP_INCLUDE_HIDDEN, True))
     flags = _flag_edits(read, model)
-    if not _topology_changed(read, model, include_hidden) and flags is not None:
+    # A texture table that grew cannot be written at the offsets the file was
+    # read from: it is the first array after the header, so an extra entry does
+    # not run off the end - it runs into the segment array. Nothing else about
+    # the mesh has to have changed for that to be true, so the path is forced
+    # here rather than left to the topology comparison to notice.
+    if (not added and flags is not None
+            and not _topology_changed(read, model, include_hidden)):
         return _patch_in_place(model, read, flags, path, obj, notes)
-    return _rebuild(model, read, path, obj, notes)
+    return _rebuild(model, read, path, obj, notes, added)
+
+
+def _add_textures(obj, model, notes) -> int:
+    """Give the model the textures the author picked, and return how many.
+
+    A face names its texture by table index, so the mesh's indices and the
+    model's table have to agree exactly. Two things make that checkable rather
+    than hoped for: the base table is recorded on the object at import, so a
+    mesh built against a different model is caught before anything is written;
+    and each addition has to land at the index the mesh already assumed, which
+    is what would break first if the two ever drifted apart.
+    """
+    base = geometry.base_textures(obj)
+    extras = geometry.extra_textures(obj)
+    recorded = geometry.PROP_BASE_TEXTURES in obj
+    if recorded and len(base) != len(model.textures):
+        raise GeometryExportError(
+            "%s was imported from a model with %d textures and the base file "
+            "now has %d, so the texture a face names may not be the one it "
+            "meant. Import the track geometry again"
+            % (obj.data.name, len(base), len(model.textures))
+        )
+    if not extras:
+        return 0
+
+    animated = 0
+    for position, record in enumerate(extras):
+        try:
+            index = level_model_edit.add_texture(
+                model,
+                record.get("id", 0), record.get("w", 0), record.get("h", 0),
+                record.get("format", 1), record.get("surface", 0),
+            )
+        except level_model_edit.EditError as error:
+            raise GeometryExportError(str(error))
+        if index != len(base) + position:
+            raise GeometryExportError(
+                "texture %d landed at table index %d instead of %d, so the "
+                "faces drawing it would draw something else. Import the track "
+                "geometry again" % (record.get("id", -1), index,
+                                    len(base) + position)
+            )
+        if int(record.get("anim", 1) or 1) > 1:
+            animated += 1
+
+    if level_model_edit.set_animation_gate(model, animated):
+        notes.append(
+            "%d of the textures you added are animated, and this track declared "
+            "no animated textures at all - which is a gate the renderer tests "
+            "before it advances any of them, so they would have been drawn "
+            "frozen. It is now open" % animated
+        )
+
+    # No note for the addition itself: the summary already says how many
+    # textures were added, and notes are reported as warnings. Something that
+    # worked is not a warning.
+    return len(extras)
 
 
 def _patch_in_place(model, read, flags, path, obj, notes):
@@ -652,7 +721,7 @@ def _patch_in_place(model, read, flags, path, obj, notes):
     return GeometryEdit(model, summary, path, obj, notes, rebuilt=False)
 
 
-def _rebuild(model, read, path, obj, notes):
+def _rebuild(model, read, path, obj, notes, textures_added=0):
     """Counts changed, so every offset moves and the blob is laid out afresh."""
     omitted = int(obj.get(geometry.PROP_OMITTED, 0) or 0)
     if omitted:
@@ -702,6 +771,7 @@ def _rebuild(model, read, path, obj, notes):
         vertices_removed=max(0, before_vertices - model.vertex_count),
         faces_added=max(0, model.triangle_count - before_faces),
         faces_removed=max(0, before_faces - model.triangle_count),
+        textures=textures_added,
     )
     summary.bounds = bounds
     summary.surfaces = surfaces

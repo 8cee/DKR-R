@@ -77,10 +77,13 @@ class DKR_PT_geometry(DkrPanel, bpy.types.Panel):
             box = layout.box()
             box.label(text="A mesh of your own is in", icon="INFO")
             box.label(text="the scene. Track From Mesh")
-            box.label(text="turns it into geometry, using")
-            box.label(text="a donor track's textures -")
-            box.label(text="a .dkrmap cannot add any.")
-            box.operator("dkr.track_from_mesh", icon="MESH_MONKEY")
+            box.label(text="turns it into geometry. Start")
+            box.label(text="from a track's textures, or")
+            box.label(text="from none and pick your own -")
+            box.label(text="any of the ROM's will load.")
+            column = box.column(align=True)
+            column.operator("dkr.track_from_mesh", icon="MESH_MONKEY")
+            column.operator("dkr.track_from_mesh_blank", icon="MESH_MONKEY")
 
         if not settings.geometry_path:
             box = layout.box()
@@ -151,6 +154,163 @@ class DKR_PT_geometry(DkrPanel, bpy.types.Panel):
         box.label(text="deleting vertices is a later")
         box.label(text="step, and an export says so")
         box.label(text="rather than dropping it.")
+
+
+class DKR_PT_textures(DkrPanel, bpy.types.Panel):
+    """Browse the ROM's 3D textures and put one on the selected faces.
+
+    A separate panel rather than a corner of the geometry one, because it is a
+    gallery: fourteen hundred textures is not something that fits beside a
+    paragraph, and picking one is the step an author spends time on. Everything
+    it needs is in the scene, so it keeps its state across a mode switch into
+    Edit Mode - which is where the faces get selected.
+    """
+
+    bl_label = "Textures"
+    bl_idname = "DKR_PT_textures"
+    bl_parent_id = "DKR_PT_track"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(geometry_ops.geometry_objects(context))
+
+    def draw(self, context):
+        from .. import textures as texture_catalogue
+        from ..operators import textures as texture_ops
+
+        layout = self.layout
+        settings = context.scene.dkr
+
+        _draw_own_textures(layout, context, settings, texture_ops)
+
+        tree = prefs.resolve(context)
+        entries = texture_catalogue.catalogue(tree)
+        if not entries:
+            box = layout.box()
+            box.label(text="No extracted textures found", icon="INFO")
+            box.label(text="A track can also draw with any")
+            box.label(text="of the ROM's 1401 textures, but")
+            box.label(text="the addon has to be able to see")
+            box.label(text="them. Set the path in")
+            box.label(text="Preferences > Add-ons.")
+            _draw_chosen_texture(layout, context, settings, texture_ops)
+            return
+
+        layout.separator()
+        layout.label(text="The ROM's textures", icon="ASSET_MANAGER")
+        row = layout.row(align=True)
+        row.prop(settings, "texture_group", text="")
+        row.prop(settings, "texture_query", text="", icon="VIEWZOOM")
+
+        matches = texture_catalogue.search(
+            entries, settings.texture_query, settings.texture_group
+        )
+        layout.label(text="%d of %d textures" % (len(matches), len(entries)))
+
+        grid = layout.grid_flow(row_major=True, columns=6, align=True)
+        for entry in matches[:texture_ops.PAGE]:
+            grid.operator(
+                "dkr.pick_texture", text="", icon_value=texture_ops.icon_for(entry)
+            ).index = entry.index
+        if len(matches) > texture_ops.PAGE:
+            layout.label(
+                text="...and %d more; search to narrow"
+                % (len(matches) - texture_ops.PAGE),
+                icon="INFO",
+            )
+
+        _draw_chosen_texture(layout, context, settings, texture_ops)
+
+
+def _draw_own_textures(layout, context, settings, texture_ops):
+    """The pictures the track ships itself, above the ones the ROM shipped.
+
+    Above rather than below because they are the ones the author put there, and
+    because a track can be textured entirely with them - on a machine with no
+    extraction at all, where everything under this is an explanation of why the
+    gallery is empty.
+    """
+    from ..operators import custom_textures
+
+    own = custom_textures.entries(context)
+
+    header = layout.row(align=True)
+    header.label(text="This track's own artwork", icon="IMAGE_DATA")
+    header.operator("dkr.add_custom_texture", text="", icon="ADD")
+    if own:
+        header.operator("dkr.remove_custom_texture", text="", icon="REMOVE")
+
+    if not own:
+        box = layout.box()
+        box.label(text="Add an image and the track", icon="INFO")
+        box.label(text="ships it: the package carries")
+        box.label(text="the texture and the runtime")
+        box.label(text="adds it to the ROM's table.")
+        box.label(text="Colour tops out at 64x32, so")
+        box.label(text="expect a heavy reduction.")
+        return
+
+    grid = layout.grid_flow(row_major=True, columns=6, align=True)
+    for entry in own:
+        grid.operator(
+            "dkr.pick_texture", text="", icon_value=texture_ops.icon_for(entry)
+        ).index = entry.index
+
+    # The list is the only place the order is visible, and the order is the
+    # texture's identity: the runtime hands out ids by position and the level
+    # model names them by the same position. Numbered for that reason, and
+    # clicking a row picks it, so Remove has something unambiguous to act on.
+    column = layout.column(align=True)
+    for position, entry in enumerate(own):
+        chosen = int(settings.texture_id) == entry.index
+        column.operator(
+            "dkr.pick_texture",
+            text="%d. %s  %dx%d" % (position + 1, entry.name,
+                                    entry.width, entry.height),
+            icon="RADIOBUT_ON" if chosen else "RADIOBUT_OFF",
+            emboss=chosen,
+        ).index = entry.index
+
+
+def _draw_chosen_texture(layout, context, settings, texture_ops):
+    """The picked texture, what it will behave like, and how it gets mapped."""
+    chosen = texture_ops.picked(context)
+    if chosen is None:
+        box = layout.box()
+        box.label(text="Pick a texture above, then", icon="INFO")
+        box.label(text="select faces in Edit Mode and")
+        box.label(text="apply it. A custom track is not")
+        box.label(text="limited to the textures it was")
+        box.label(text="built from - any of the ROM's")
+        box.label(text="will load.")
+        return
+
+    box = layout.box()
+    box.template_icon(icon_value=texture_ops.icon_for(chosen), scale=5.0)
+    box.label(text=chosen.name, icon="TEXTURE")
+    box.label(text="%dx%d, %s%s" % (chosen.width, chosen.height, chosen.group,
+                                    ", animated" if chosen.animated else ""))
+
+    box.prop(settings, "texture_surface")
+    box.prop(settings, "texture_mapping", text="")
+    if settings.texture_mapping == "PROJECT":
+        box.prop(settings, "texture_scale")
+
+    column = box.column(align=True)
+    column.operator("dkr.apply_texture", icon="TEXTURE")
+    row = column.row(align=True)
+    row.operator("dkr.select_by_texture", text="Select", icon="RESTRICT_SELECT_OFF")
+    row.operator("dkr.clear_texture", text="Remove", icon="X")
+    column.operator("dkr.sync_uvs", icon="UV")
+
+    obj = texture_ops.target(context)
+    if obj is not None:
+        added = len(geometry_ops.extra_textures(obj))
+        if added:
+            layout.label(
+                text="%d texture(s) added to this track" % added, icon="PLUS"
+            )
 
 
 def _draw_surface(layout, context, objects):
@@ -579,6 +739,7 @@ class DKR_PT_export(DkrPanel, bpy.types.Panel):
 CLASSES = (
     DKR_PT_track,
     DKR_PT_geometry,
+    DKR_PT_textures,
     DKR_PT_place,
     DKR_PT_object,
     DKR_PT_ai,

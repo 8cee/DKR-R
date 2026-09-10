@@ -117,10 +117,89 @@ Two ceilings are worth knowing about, both shown in the Geometry panel:
   running. The symptom is falling through the floor somewhere else entirely,
   with no diagnostic at all. One giant polygon is enough to do it.
 
-Two things do not come back yet. Vertex colours and the `UVMap` an author edits
-are read for display only - the export uses the raw values the file stores - so
-repainting or unwrapping in Blender does not reach the track. New faces inherit
-their source's UVs, which means a much larger face stretches rather than tiles.
+**Or build the track from your own mesh.** Model one in Blender and the Geometry
+panel offers to convert it: *Track From Mesh* starts from a shipped track's
+texture table, which brings a coherent set of images and their surface types
+with it, and *Track From Mesh, No Textures* starts from nothing. Neither decides
+what the track can look like - that is the Textures panel below. The mesh is
+partitioned into segments with the bounding boxes, BSP and PVS to match, written
+out as its own `.bin`, and imported back as ordinary editable geometry.
+
+**Texture the track with anything in the ROM.** The Textures panel browses every
+one of DKR's 3D textures - **1401** of them in the US v1.0 extraction - as
+thumbnails, filtered by folder (`dino`, `winter`, `water`, `space` and the rest)
+and by a search over their names. Select faces in Edit Mode, pick a texture,
+press *Apply To Selected Faces*.
+
+A track is not limited to the textures it was built from. A level model's
+texture table stores indices into the ROM's global texture list, so it can name
+any of them; the addon appends an entry to the table and points the faces at it.
+
+Three things come with the texture rather than being asked about:
+
+- **Surface type.** Chosen in the panel, because it lives on the table entry
+  rather than on the face. The same picture applied twice with different surface
+  types is two entries, which is how one image is road in one place and grass in
+  another.
+- **Animation.** A texture with more than one frame flags the batches drawing it
+  for animation, and a still one clears the flag. That is what retail does for
+  every animated texture and only for those, so a picked waterfall moves.
+- **Mapping.** *Keep The Mapping* leaves the picture covering the same ground as
+  the one it replaced, rescaled for the new texture's size. *Project Flat*
+  plants the texture on the world along whichever axis each face most faces, at
+  a scale in map units per repeat - which is what a face you built or extruded
+  needs, since it inherits UVs that are well-formed and mean nothing. The
+  default, 256 units, is retail's own median. Projection tiles continuously
+  across a join rather than restarting the texture at every triangle.
+
+*Select* picks out every face already drawn with the chosen texture, *Remove*
+puts faces back on their baked colours alone, and *Apply UV Editing* writes the
+mapping you made in Blender's UV editor into the track.
+
+**Or with a picture of your own.** The top of the Textures panel is *This
+track's own artwork*: press **+**, pick any image Blender can read, and the
+track ships it. The package carries the texture, DKR-R publishes a longer
+`ASSET_TEXTURES_3D` table for it, and from that point it behaves like any other
+texture in the panel - browse it, apply it, project it, select by it.
+
+Two limits are the console's and the addon refuses rather than warns:
+
+- A level texture is loaded into the RDP's **4 KiB of texture memory as one
+  block**, so a colour image gets 2048 texels - **64x32**. The eight-bit
+  greyscale formats reach 64x64. Pick the format in the file dialog; it decides
+  the largest size, and the import says what it took the picture down from.
+- A side larger than **64** cannot tile. `material_init` only recognises powers
+  of two up to that, and gives anything else a clamp - the texture stretches
+  once across each face instead of repeating.
+
+The reduction is severe and there is no way around it, so look at the thumbnail
+before building a track on it. Everything else is arranged so you do not have
+to think about it: the image is resampled to the largest size that fits, in the
+shape closest to the original's, and written as a PNG in `dkr_textures/` beside
+the `.blend` so the package can be rebuilt from the scene alone.
+
+The **order** of the list is the texture's identity - the runtime hands out ids
+by position - so removing one moves the rest, and removing one the geometry has
+already given a table entry is refused with the mesh named. Point those faces at
+something else first.
+
+For a one-command example, `tools/blender/make_texture_demo_track.py` builds a
+flat track surfaced with an image you pass it, through the same operators:
+
+```sh
+blender --background --factory-startup \
+    --python tools/blender/make_texture_demo_track.py -- \
+    --image path/to/picture.jpg --out build/my-track.dkrmap
+```
+
+Adding a texture makes the export rebuild the layout rather than patch the file,
+since everything after the texture table moves. A track's table tops out at 255
+entries, which no retail track comes near - the largest is Spaceport Alpha at 63.
+
+One thing does not come back yet: vertex colours are read for display only, so
+repainting the baked lighting in Blender does not reach the track. UVs do come
+back, but only through *Apply UV Editing* - editing the `UVMap` alone leaves the
+file's own values in place.
 
 Once geometry is loaded, Blender's own face snapping works, and *Drop To
 Surface* casts the selected objects straight down onto the road - carrying the
@@ -181,7 +260,8 @@ section covers what lands in the package and the one rule about sharing it.
 ## What the packager produces
 
 `Export .dkrmap` writes a directory holding the manifest, a compiled
-`header.bin`, both compiled object maps, and the glTF sources beside them.
+`header.bin`, both compiled object maps, any textures the track ships in
+`textures/`, and the glTF sources beside them.
 
 **Everything is compiled here**, without the decomp's `dkr_assets_tool` - that
 tool builds a whole `assets.bin` and ships as a Linux binary, so depending on it
@@ -242,11 +322,14 @@ tools/blender/
     ai_graph.py             sampling, adjacency and the format's limits
     validate.py             pre-export checks
     dkrmap.py               the .dkrmap container
+    textures.py             the ROM's 3D textures, and encoding your own
     scene.py                object map <-> Blender scene
     props.py                scene settings
     prefs.py                where to find the decomp assets
     operators/              import, export, place, AI, validate, package
-    operators/geometry_export.py  the mesh's edits -> a level model
+    operators/geometry_export.py   the mesh's edits -> a level model
+    operators/textures.py          pick, apply and map a texture
+    operators/custom_textures.py   an image -> a texture the track ships
     ui/panels.py            the sidebar
     data/catalog.json       generated; do not edit by hand
   tests/
@@ -257,6 +340,8 @@ tools/blender/
     test_binary_format.py       the object-map binary format, vs assets.bin
     test_encoder.py             all 136 retail object maps re-encode exactly
     test_header.py              all 65 retail headers rebuild exactly
+    test_textures.py            the ROM's table, vs what retail wrote
+    test_custom_textures.py     an image -> the bytes the asset tool would write
     test_blender_roundtrip.py   byte-exact through a real Blender scene
     test_blender_operators.py   the operators actually work
 ```

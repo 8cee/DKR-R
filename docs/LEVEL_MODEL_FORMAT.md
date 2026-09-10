@@ -127,6 +127,68 @@ table, an array of 8-byte `DkrTextureInfo` whose `id` indexes the global
 Decoding all of that is what lets the Blender addon show a track as it looks
 rather than as a grey shell; see `tools/blender/dkr_track_editor/level_model.py`.
 
+## The texture table
+
+```text
+TextureInfo  8 bytes   id (s32), width, height, format, surfaceType (u8)
+```
+
+**A track is not scoped to the textures it shipped with.** `id` indexes the
+global `ASSET_TEXTURES_3D` list, and `tracks.c` resolves the whole table at load
+with `load_texture(id | 0x8000)` — the same call and the same list every object
+model uses. Nothing anywhere ties an id to the level that references it, so a
+custom track can name any of the ROM's textures.
+
+**And it can add one.** A `.dkrmap` carries a `TEXTURES_3D` section, so a track
+can ship artwork the ROM does not hold. Such an id is written as a *placeholder*
+- `0x7000` plus the texture's ordinal in the package - because the real index is
+the ROM's retail texture count plus that ordinal and the count belongs to the
+player's cartridge. DKR-R substitutes it as the model is served, which is why
+`level_model_encoder.pack` writes the header and this table as a **stored**
+DEFLATE block: a field inside a compressed block has no byte offset to patch.
+See `docs/CUSTOM_TRACKS.md`.
+
+**Only two of the four trailing bytes are ever read, and they are the same
+one.** Grepping the decomp for reads of `gCurrentLevelModel->textures[...]`
+finds `surfaceType` in `tracks.c` and in `collision.c`, and nothing else.
+`width`, `height` and `format` have **no reader**: the renderer takes all three
+from the `TextureHeader` the texture asset carries (`texHeader->width` in
+`tracks.c`), so the copies here are descriptive. They should still be written
+correctly, and both follow from the asset:
+
+- **Size** is the PNG's own, matching the table in 1358 of 1360 retail entries.
+  The two that differ — a wall in Darkmoon Caverns, a fog texture in Wizpig 2 —
+  declare a size larger than the image.
+- **Format**'s low nibble is `TextureHeader.format`: 0 RGBA32, 1 RGBA16, 2 I8,
+  3 I4, 4 IA16, 5 IA8, 6 IA4, 7 CI4, 8 CI8. It agrees with the extracted
+  sidecar's `format` in all 1360. The high nibble takes 0x00, 0x10, 0x20 or
+  0x30 and correlates with nothing in the asset — not the wrap flags, not the
+  render mode, not the frame count — and has no reader either. (In the texture
+  *asset*'s own header the same nibble is the render mode, `TEXTURE_RENDER_MODES`
+  in the asset tool, and `material_init` does read it there. It is only this
+  copy that means nothing.)
+
+The largest retail table is Spaceport Alpha's 63 entries; the median track has
+23. The ceiling is 255, since `textureIndex` is a `u8` and `0xFF` means none.
+
+### `RENDER_TEX_ANIM` is a fact about the artwork
+
+`RENDER_TEX_ANIM` (`1 << 16`) on a batch is set **exactly** when the texture it
+draws has more than one frame. Across all 10,389 batches of the 55 level models
+it is set on the 619 whose texture is animated and on none of the 9,770 whose
+texture is not — no exceptions in either direction. `track_tex_anim` walks the
+batches looking for the bit, so a batch given an animated texture without it
+renders frozen on one frame. An encoder should derive it rather than carry it.
+
+### `numberOfAnimatedTextures` is a gate, not a count
+
+It is tested once, in `tracks.c`: `> 0` decides whether `track_tex_anim` is
+called at all, and nothing indexes by it. It is **not** the number of animated
+textures in the table — that reading fails on 35 of the 55 models, and Pirate
+Lagoon declares 106 against a table of 26. So the value a track carries cannot
+be reconstructed and should be left alone; a track being *given* its first
+animated texture only needs the gate raised above zero.
+
 ## Segment visibility: `segmentsBitfields` is a PVS
 
 `segmentsBitfields` holds one bitmask per segment saying which segments are

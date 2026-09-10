@@ -60,6 +60,9 @@ ancient-lake-remix.dkrmap/
   objects.bin
   name.bin
   model.bin
+  textures/
+    0.bin
+    1.bin
 ```
 
 ```json
@@ -72,10 +75,15 @@ ancient-lake-remix.dkrmap/
     { "section": "LEVEL_HEADERS",     "file": "header.bin" },
     { "section": "LEVEL_OBJECT_MAPS", "file": "objects.bin" },
     { "section": "LEVEL_NAMES",       "file": "name.bin" },
-    { "section": "LEVEL_MODELS",      "file": "model.bin" }
+    { "section": "LEVEL_MODELS",      "file": "model.bin" },
+    { "section": "TEXTURES_3D",       "file": "textures/0.bin" },
+    { "section": "TEXTURES_3D",       "file": "textures/1.bin" }
   ]
 }
 ```
+
+`TEXTURES_3D` is the one section a track adds **many** entries to, and their
+order in `adds` is their identity - see "A track's own artwork" below.
 
 Payload paths are confined to the track directory: absolute paths and `..`
 are rejected, so a manifest can never name an arbitrary file on the machine.
@@ -182,10 +190,128 @@ aspects work through one mechanism (`AssetSectionsEnum` in the decomp's
 
 | Table / data | Section | Manifest name |
 |---|---|---|
+| 3 / 2 | 3D textures | `TEXTURES_3D` |
 | 20 / 21 | object maps | `LEVEL_OBJECT_MAPS` |
 | 22 / 23 | headers | `LEVEL_HEADERS` |
 | 24 / 25 | names | `LEVEL_NAMES` |
 | 26 / 27 | models | `LEVEL_MODELS` |
+
+The texture pair is the same numbering read from the other end of the enum, and
+note its order is data-then-table, the reverse of the four level pairs.
+
+## A track's own artwork
+
+A `.dkrmap` can add textures the ROM does not hold, and the mechanism is the
+one above rather than a new one. `textures_sprites.c` reaches the 3D texture
+list exactly the way `level_global_init` reaches the level list:
+
+```c
+gTextureAssetTable[TEX_TABLE_3D] = asset_table_load(ASSET_TEXTURES_3D_TABLE);
+for (i = 0; table[i] != -1; i++) {}          // count, then i--
+if (assetIndex >= gTextureTableSize[..]) { } // range check, from the table
+assetOffset = table[assetIndex];
+assetSize   = table[assetIndex + 1] - assetOffset;   // size BY DIFFERENCE
+asset_load(ASSET_TEXTURES_3D, dest, assetOffset, assetSize);
+```
+
+So publishing a longer table grows the texture count and the range check
+together, and an appended payload loads. Nothing else changes.
+
+### What a texture payload is
+
+The bytes `dkr_assets_tool`'s `BuildTexture::build` writes for an uncompressed
+texture: a 32-byte `TextureHeader` and then the image, row-major and
+unswizzled. The Blender addon writes them itself, so no C++ toolchain stands
+between an author and a track; `tools/blender/tests/test_custom_textures.py`
+holds every field and every texel conversion to the decomp's own.
+
+Two limits are the hardware's, not the format's, and both are refused at import
+rather than discovered as a corrupt road in game:
+
+- The RDP has **4 KiB of texture memory** and `material_init` loads a level
+  texture as one block, so a 16-bit format stops at 2048 texels - **64x32**,
+  not 64x64. The eight-bit formats reach 64x64 and the four-bit ones are capped
+  by the wrap limit instead.
+- `material_init`'s mask loop only walks the powers of two **up to 64**, so a
+  side larger than that gets `G_TX_CLAMP` and `G_TX_NOMASK` however the flags
+  are set: the texture stretches once across each face instead of tiling.
+
+Colour-indexed formats are excluded. Their palettes are loaded from
+`ASSET_EMPTY_14` by a byte offset into that section, and a track cannot add
+one.
+
+A payload is also refused if it is shorter than 40 bytes or not a multiple of
+16. `load_texture` reads `sizeof(TempTexHeader)` - 40 bytes - before it knows
+how large the texture is, and it puts the display list it builds at
+`align16(tex + assetSize)` inside an allocation of exactly that size plus the
+lists.
+
+### The id a level model stores, and why it is a placeholder
+
+A `TextureInfo` in a level model stores an index into the global list, and
+`tracks.c` resolves it with `load_texture(id | 0x8000)`. A shipped texture's
+index is **the ROM's retail texture count plus its ordinal**, and that count is a
+property of the cartridge: 1401 in the US v1.0 extraction and 1416 in Rev A,
+both counted from the asset tables. So the exporter cannot know it. It writes
+`0x7000 + ordinal` instead, and DKR-R substitutes the real index as the model
+is served, exactly as it already patches a header's model and object-map
+fields.
+
+**Order in the manifest is the ordinal, and therefore the identity.**
+Reordering the `TEXTURES_3D` entries repaints the track with no error anywhere.
+
+An id that cannot be resolved - a track added by a rescan after boot, or a
+model naming more textures than its package ships - is rewritten to texture 0
+rather than left alone. Leaving it would send `load_texture` past the end of the
+table: it range-checks such an index, sets `id = 0`, and then indexes with the
+unclamped value anyway.
+
+### How the id is reachable inside a compressed model
+
+A level model arrives compressed - `track_init_level_model` does `asset_load`
+and then `gzip_inflate` - and a four-byte field inside a Huffman-coded DEFLATE
+block has no byte offset to patch.
+
+The answer is DEFLATE's own. Block type `00` is *stored*: byte-aligned and
+verbatim, and `gzip_inflate_block` dispatches to `gzip_inflate_stored` for it
+exactly as it does to the Huffman decoders for the other two. So the exporter
+writes the model's header and texture table as one stored block and compresses
+the rest. The stream stays a legal DEFLATE stream, the game inflates it with the
+code it always used, and the ids sit at a fixed offset:
+
+```text
+0..4    container: uncompressed size (LE u32), then the tag 0x09
+5       the stored block's BFINAL/BTYPE byte, whose remaining five bits the
+        reader discards - which is what "stored is byte-aligned" means
+6..7    LEN, little endian        8..9  NLEN, LEN's complement
+10..    the model's own first LEN bytes, uncompressed
+```
+
+The prefix is about two kilobytes at the largest possible texture table,
+against models of a hundred to five hundred. Every packed model pays it,
+including remixes with no artwork of their own, because one format that is
+always patchable is worth more than two that differ in a way nothing downstream
+can see.
+
+### The texture table is published once
+
+`tex_init_textures` runs once at boot, from `thread3_main`. The level tables are
+rebuilt at every level load, so a rescan renumbers them; this one cannot be
+renumbered afterwards. A track installed mid-session therefore has no textures
+in the published table at all, and its model's ids are reset to texture 0.
+Restart DKR-R after installing a track that ships artwork.
+
+### Making one
+
+```sh
+blender --background --factory-startup \
+    --python tools/blender/make_texture_demo_track.py -- \
+    --image path/to/picture.jpg --out build/my-track.dkrmap
+```
+
+That script drives the same operators the sidebar does, in the same order, and
+prints the package back from its own bytes. In Blender, the Textures panel's
+"This track's own artwork" section is the same four steps by hand.
 
 ## A level has two object maps, and they must stay separate
 
