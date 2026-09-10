@@ -4,10 +4,12 @@
 
 Três pedidos, nesta ordem de importância:
 
-1. **Um interruptor mestre.** A primeira coisa do painel do addon é um dropdown
-   *Level Type* — Standard Race, Boss Race, Battle / Challenge, Hub. Quando for
-   Boss Race, aparece logo abaixo um seletor de chefe. Tudo o resto do addon
-   passa a obedecer a essa escolha.
+1. **Um interruptor mestre, e o primeiro contato.** Escolher o modo da track é
+   a primeira coisa que o autor faz no addon — antes de importar, colocar
+   objetos ou exportar. *Level Type*: Race, Boss Race, Challenge, Hub, e um
+   grupo *Special* avançado para o que não é jogo normal. Quando for Boss Race,
+   aparece logo abaixo um seletor de chefe. Tudo o resto do addon passa a
+   obedecer a essa escolha.
 2. **Um catálogo que obedece ao interruptor.** A lista de objetos esconde o que
    não serve para o tipo de nível escolhido (ex.: o Egg Creator só aparece num
    Challenge de ovos), as abas Structure / Collectables separam de fato a lista,
@@ -18,10 +20,11 @@ Três pedidos, nesta ordem de importância:
    filhos de um objeto raiz para mover a grelha inteira de uma vez, com os
    índices já preenchidos.
 
-Estado: **proposta**. Nada abaixo foi implementado. Os números vêm de um
-levantamento feito sobre os 65 headers e os 136 object maps retail extraídos em
-`extern/dkr-decomp/assets/.vanilla/us.v77` e do código do decomp; cada fato cita
-a sua fonte.
+Estado: **proposta**, revisão 2 (o modo virou o primeiro contato; Horseshoe
+Gulch e as cenas foram para um grupo *Special*). Nada abaixo foi implementado.
+Os números vêm de um levantamento feito sobre os 65 headers e os 136 object maps
+retail extraídos em `extern/dkr-decomp/assets/.vanilla/us.v77` e do código do
+decomp; cada fato cita a sua fonte.
 
 ---
 
@@ -37,20 +40,43 @@ o modo. Os 65 headers retail se distribuem assim:
 
 | Família (o dropdown) | `race_type` | Valor | Níveis retail |
 |---|---|---|---|
-| Standard Race | `RACETYPE_DEFAULT` | 0 | 20 corridas |
-| — | `RACETYPE_HORSESHOE_GULCH` | 3 | Horseshoe Gulch |
+| Race | `RACETYPE_DEFAULT` | 0 | 20 corridas |
 | Boss Race | `RACETYPE_BOSS` | 8 | 10 (Tricky, Bluey, Bubbler, Smokey, Wizpig; 1 e 2) |
-| Battle / Challenge | `RACETYPE_CHALLENGE_BATTLE` | 64 | Darkwater Beach, Icicle Pyramid |
+| Challenge | `RACETYPE_CHALLENGE_BATTLE` | 64 | Darkwater Beach, Icicle Pyramid |
 | | `RACETYPE_CHALLENGE_BANANAS` | 65 | Smokey Castle |
 | | `RACETYPE_CHALLENGE_EGGS` | 66 | Fire Mountain |
 | Hub | `RACETYPE_HUBWORLD` | 5 | 6 hubs + 10 sequências |
-| — (cutscene) | `RACETYPE_CUTSCENE_1/2` | 6, 7 | 14 |
+| Special (avançado) | `RACETYPE_CUTSCENE_1` | 6 | 10 cenas (seleção de personagem, tela título, troféus) |
+| | `RACETYPE_CUTSCENE_2` | 7 | 4 fundos de menu (FrontEnd, opções, amuletos) |
+| | `RACETYPE_HORSESHOE_GULCH` | 3 | Horseshoe Gulch, a corrida de teste |
+| fora de todo menu | `RACETYPE_UNK1` | 1 | nenhum |
+| fora de todo menu | `RACETYPE_CHALLENGE` | 64 | é a máscara `0x40`, não um tipo |
 
-**Consequência de desenho:** "Battle / Challenge" não é um valor, são três. O
-jogo trata 64, 65 e 66 de formas diferentes, e a regra pedida ("Egg Creator só
-num Challenge / Eggs") só é expressável se o addon souber qual dos três. Por
-isso o plano acrescenta um segundo seletor condicional, **Challenge Type**
-(Battle / Bananas / Eggs), com o mesmo comportamento do seletor de chefe.
+O que os tipos fora do jogo normal fazem, pelo decomp:
+
+- **Cutscene (6)** não spawna corredores — a montagem da largada retorna logo
+  no começo (`objects.c:1096`) — e desenha a pista com antialiasing
+  (`tracks.c:325`).
+- **Menu Backdrop (7)** também não spawna corredores e **não desenha a
+  geometria da pista**, só os objetos (`tracks.c:321-323`).
+- **Test Race (3)**, o tipo da Horseshoe Gulch: corre como uma corrida (HUD,
+  fanfarra, largada travada — `game_ui.c:720-754`, `racer.c:4353`), mas não
+  tem time trial (`objects.c:1104`), não conta como corrida (`game.c:482`) e
+  não salva recordes nem progresso (`save_data.c:381`, `save_data.c:434`). Era
+  uma pista de teste; o addon não a recomenda para nada.
+- **`RACETYPE_UNK1` (1):** o único efeito achado é o HUD aparecer sem animação
+  (`game_ui.c:403`); nenhum nível usa.
+- **`RACETYPE_CHALLENGE`** é a máscara que o código usa para perguntar "é
+  challenge?" (`enums.h:90`), com o mesmo valor de `CHALLENGE_BATTLE`. Hoje ela
+  aparece como opção no picker de *Race type* do painel de header, que ainda
+  ordena por nome em vez de valor (`operators/header.py:84-90`).
+
+**Consequência de desenho:** "Challenge" não é um valor, são três. O jogo trata
+64, 65 e 66 de formas diferentes, e a regra pedida ("Egg Creator só num
+Challenge / Eggs") só é expressável se o addon souber qual dos três. Por isso
+Challenge ganha um segundo seletor condicional (Battle / Bananas / Eggs), com o
+mesmo comportamento do seletor de chefe — e Special também (Cutscene / Menu
+Backdrop / Test Race).
 
 O chefe é o byte `0xB8`, `/boss-race-id` (`level_header.py:217`, enum
 `BossSetupTypes`, 10 membros). Hoje ele nem aparece no painel de header: está na
@@ -219,59 +245,110 @@ A posição já está certa para filhos: a exportação usa
 
 ## 1. O interruptor mestre
 
+### O primeiro contato
+
+Uma cena nova **não tem modo**. Enquanto não tiver:
+
+- o addon mostra um único painel, *Level Type*, no topo da sidebar
+  (`bl_order = 0`, registrado antes de `DKR_PT_track`), com a pergunta e um
+  botão grande por família;
+- os outros painéis (*Track* e os seus filhos, *DKR Object*, *AI Node Graph*,
+  *Validate*, *Package*) ficam ocultos pelo `poll` — não há o que colocar,
+  validar ou exportar antes de saber o que a track é;
+- a única outra ação oferecida é *Import Retail Track*, porque um nível retail
+  já traz o seu modo e o import o preenche.
+
+```
+ DKR ─────────────────────────────────
+ ┌ Level Type ───────────────────────┐
+ │ What kind of level is this?       │
+ │ ┌───────────────┐┌──────────────┐ │
+ │ │     Race      ││  Boss Race   │ │
+ │ └───────────────┘└──────────────┘ │
+ │ ┌───────────────┐┌──────────────┐ │
+ │ │   Challenge   ││     Hub      │ │
+ │ └───────────────┘└──────────────┘ │
+ │  ▸ Special (advanced)             │
+ │ ───────────────────────────────── │
+ │  or  [ Import Retail Track ]      │
+ └───────────────────────────────────┘
+```
+
+Cada botão tem tooltip dizendo o que o modo é e o que muda no addon ("8 start
+positions, checkpoints required, weapons and coins available"). *Special* fica
+recolhido por padrão, e dentro dele Test Race vem por último, com aviso.
+
+Depois da escolha o cartão encolhe para uma linha, e os painéis aparecem:
+
+```
+ ┌ Level Type ───────────────────────┐
+ │ [ Boss Race                    ▼ ]│
+ │   Boss [ Bluey (first race)    ▼ ]│   ← só em Boss Race
+ │   Hovercraft, as in the retail    │
+ └───────────────────────────────────┘
+ ▸ Track
+ ▸ Place
+ ...
+```
+
+O segundo seletor depende da família: *Boss* em Boss Race, *Challenge* (Battle /
+Bananas / Eggs) em Challenge, *Kind* (Cutscene / Menu Backdrop / Test Race) em
+Special. Race e Hub não têm.
+
+**Trocar de modo depois** passa por um operador, não por uma propriedade
+solta: o dropdown é `layout.operator_menu_enum("dkr.set_level_type", "mode")`,
+e o operador, se já há objetos na cena, abre uma confirmação com as
+consequências antes de aplicar — "8 objects are not used in a Hub
+(Checkpoint ×8). They stay in the scene; validation will warn. The start grid
+has 8 positions; a Hub uses 1." — com *Regenerate Start Grid* ali mesmo. Com
+undo, como todo operador do addon.
+
+**Cenas criadas antes deste recurso** abrem sem modo, com objetos. O cartão não
+adivinha em silêncio (um painel não pode escrever dados no `draw`, e não
+deveria): se a cena veio de um nível retail (`source_path` →
+`AssetTree.level_using`) ou já tem uma resposta de *Race type* no header, o
+cartão mostra um botão de sugestão — "This scene was imported from Bluey 1.
+[Use Boss Race]".
+
 ### Dados
 
 Um módulo novo, **sem `bpy`**, `dkr_track_editor/level_types.py`, dono de tudo o
 que depende do modo — no mesmo espírito de `level_header_template.py`:
 
 ```python
-RACE, BOSS, CHALLENGE, HUB = "RACE", "BOSS", "CHALLENGE", "HUB"
+NONE, RACE, BOSS, CHALLENGE, HUB, SPECIAL = ...
 CHALLENGES = ("BATTLE", "BANANAS", "EGGS")
+SPECIALS = ("CUTSCENE", "BACKDROP", "TEST_RACE")
 
-def race_type(mode, challenge=None) -> str          # "RACETYPE_CHALLENGE_EGGS"
-def family(race_type: str) -> Optional[str]         # "RACETYPE_HORSESHOE_GULCH" -> RACE; cutscene -> None
-def spawn_count(mode) -> int                        # 8 / 2 / 4 / 1
-def needs_checkpoints(mode) -> bool                 # RACE, BOSS
-def header_overrides(mode, challenge, boss) -> dict # {"/race-type": ..., "/boss-race-id": ...}
+def race_type(mode, sub=None) -> str                     # ("CHALLENGE", "EGGS") -> "RACETYPE_CHALLENGE_EGGS"
+def mode_of(race_type) -> Tuple[str, Optional[str]]      # "RACETYPE_HORSESHOE_GULCH" -> ("SPECIAL", "TEST_RACE")
+def spawn_count(mode, sub=None) -> int                   # 8 / 2 / 4 / 1; Special: 0, 0, 8
+def needs_checkpoints(mode, sub=None) -> bool            # Race, Boss Race, Test Race
+def header_overrides(mode, sub, boss) -> dict            # {"/race-type": ..., "/boss-race-id": ...}
 BOSSES = [("BOSS_RACE_TRICKY1", "Tricky (first race)", "VEHICLE_CAR"), ...]  # 10, com o veículo retail
 ```
+
+Todo `race_type` que um nível retail usa vira **exatamente um** par (família,
+sub-tipo), então `race_type(*mode_of(x)) == x` para os 65 headers. É isso que
+deixa o import preservar o valor exato sem estado escondido.
 
 A tabela de chefes carrega o veículo que o retail usa (Tricky e Wizpig 1: carro;
 Bluey e Bubbler: hovercraft; Smokey e Wizpig 2: avião), medido nos headers.
 
 ### Propriedades (`props.py`)
 
-- `level_type: EnumProperty` — `RACE` (default), `BOSS`, `CHALLENGE`, `HUB`,
-  cada item com descrição (vira tooltip do dropdown).
-- `challenge_type: EnumProperty` — `BATTLE`, `BANANAS`, `EGGS`.
-- `boss: EnumProperty` — os 10 de `BOSSES`, rótulo amigável, descrição com o
-  veículo.
-- `imported_race_type: StringProperty` (oculta) — o valor exato de um nível
-  importado, ver abaixo.
-- `update=` nos três: zera o filtro de categoria (o índice do enum dinâmico
-  mudaria de significado), marca redraw.
+- `level_type: EnumProperty` — `NONE` (default), `RACE`, `BOSS`, `CHALLENGE`,
+  `HUB`, `SPECIAL`, cada item com descrição. Só `dkr.set_level_type` e o import
+  escrevem nela.
+- `challenge_type`, `special_type`, `boss: EnumProperty` — enums **estáticos**,
+  um por família, com default por nome. Um único enum "variante" dinâmico
+  mudaria de significado a cada troca de família, porque o Blender guarda o
+  índice, não o nome.
+- `show_incompatible: BoolProperty`.
+- Ao mudar qualquer um deles: zera o filtro de categoria e marca redraw.
 - `is_racing_track` sai da UI e do código; tudo que o lia passa a perguntar a
   `level_types`. Um `.blend` antigo simplesmente ignora a propriedade ao
   carregar.
-
-### UI (`ui/panels.py`)
-
-No topo de `DKR_PT_track`, **antes** do retorno antecipado de "catálogo não
-carregado" (`panels.py:35-40`), porque o modo não depende do catálogo:
-
-```
-DKR ─────────────────────────────────
- Track
- ┌ Level Type ─────────────────────┐
- │ [ Boss Race                  ▼ ]│
- │   Boss [ Bluey (first race)  ▼ ]│   ← só em Boss Race
- │   Hovercraft, as in the retail  │
- └─────────────────────────────────┘
- [ Import Track ]
- ...
-```
-
-Em Challenge o segundo seletor é *Challenge Type*. Em Hub, nenhum.
 
 ### Header
 
@@ -281,27 +358,32 @@ Em Challenge o segundo seletor é *Challenge Type*. Em Hub, nenhum.
   (`level_header_template.py:248-250`), então `/boss-race-id` não precisa virar
   um `Choice`.
 - No painel *Level Header*, a linha *Race type* vira só um rótulo "set by Level
-  Type" — duas fontes de verdade para o mesmo byte é o que não pode existir.
+  Type" — duas fontes de verdade para o mesmo byte é o que não pode existir. O
+  picker dos outros campos enum passa a ordenar por valor e a esconder aliases
+  de máscara como `RACETYPE_CHALLENGE`.
 - Ao escolher um chefe num header autoral, se o autor ainda não respondeu
   `/default-vehicle` e `/avaliable-vehicles`, preenche com o veículo do chefe.
   Nunca sobrescreve uma resposta.
-- **Remix (header herdado, `pack.py:125`).** *Import Track*
-  (`io_objects.py:381-383`) grava `imported_race_type` e ajusta `level_type` /
-  `boss` a partir do header retail. Na exportação, o override só é aplicado se a
-  família mudou — assim Horseshoe Gulch (3) continua 3 e uma cutscene continua
-  cutscene, em vez de virarem 0 por arredondamento para a família.
-
-**Mudança de comportamento, deliberada:** hoje um cenário novo tem
-`/race-type` "unanswered" (`test_blender_operators.py:1476`). Com o
-interruptor, Standard Race é uma resposta explícita, visível no topo do painel.
-O template recusava defaultar o modo porque 0 aparecia "calado"; aqui ele
-aparece escrito.
+- **Import e remix.** *Import Track* (`io_objects.py:381-383`) chama
+  `mode_of(level.race_type)` e grava família, sub-tipo e chefe. Como o par
+  volta ao mesmo valor, o header herdado (`pack.py:125`) recebe o override sem
+  mudar nada — Horseshoe Gulch continua 3, uma cutscene continua 6 — e um remix
+  que troca de modo (uma corrida virando arena) muda o byte certo.
+- **Sem modo, sem header.** `/race-type` continua "unanswered" enquanto o modo
+  for `NONE`, que é o que o template já defende
+  (`level_header_template.py:271-278`: zero é um modo de verdade, não uma
+  ausência). O export recusa com "choose the level type first".
 
 ### Validação
 
-- `validate.validate()` troca `require_racing_track` por `mode`.
-- Checkpoints: aviso "sem checkpoints" só em RACE e BOSS (o retail não tem
-  nenhum nos challenges).
+- `validate.validate()` troca `require_racing_track` por `mode` e `sub`.
+- Modo `NONE`: um único erro, "choose the level type first".
+- Checkpoints: aviso "sem checkpoints" só em Race, Boss Race e Test Race (o
+  retail não tem nenhum nos challenges).
+- Special / Cutscene e Menu Backdrop: nenhuma exigência de largada — o jogo nem
+  spawna corredores. Menu Backdrop avisa que a geometria não será desenhada.
+- Test Race: aviso permanente de que o tipo não salva recordes nem tem time
+  trial.
 - Grelha: ver a seção 3.
 - Tipo incompatível presente (ex.: `EGGCREATOR` numa corrida): **aviso**, com o
   motivo — é o que pega um objeto colocado com "Show incompatible" ligado.
@@ -327,7 +409,7 @@ Dois ingredientes:
    ```
 
    Chaves opcionais, lidas com `.get` — o `SUPPORTED_SCHEMA` não muda.
-2. **Uma regra curta em `level_types.visible(object_type, mode, challenge)`:**
+2. **Uma regra curta em `level_types.visible(object_type, mode, sub)`:**
    - Tipos das categorias `racing`, `pickups`, `hub`, mais uma lista curta de
      atores/efeitos presos a um modo (`TREASURESUCKER`, `CHARACTERFLAG`,
      `FIREBALLATTRACT`, `PARKWARDEN`, `PIGHEADCOLOURS`, `RANGETRIGGER`), são
@@ -338,6 +420,8 @@ Dois ingredientes:
    - Todo o resto (cenário, áudio, efeitos, câmera) é sempre visível.
    - Uma tabela `OVERRIDES` escrita à mão para os casos que o dado não prova,
      começando vazia.
+   - Em **Special** o filtro não se aplica: é o modo avançado, e as cenas
+     retail usam de tudo.
 
    O resultado é a tabela da seção "Onde cada tipo aparece". Em particular:
    `EGGCREATOR` só em Challenge / Eggs, as portas e placas de hub só em Hub,
@@ -365,7 +449,7 @@ de nunca bloquear um valor que o jogo aceita (`catalog.py:208-213`,
 - O corte em 60 fica; com o filtro, nenhuma combinação real passa disso.
 
 A lista é montada por uma função pura, `level_types.visible_types(catalog,
-mode, challenge, tab, category, show_all)`, que o painel chama e o teste
+mode, sub, tab, category, show_all)`, que o painel chama e o teste
 exercita sem UI.
 
 ### Balões que faltam: presets
@@ -427,10 +511,12 @@ Um preset é `(id, rótulo, object_id, campos)`. Os cinco balões:
 
 | Modo | N | Template local | Yaw local |
 |---|---|---|---|
-| Standard Race | 8 | a mediana retail acima, × *Spacing* | 0 |
+| Race | 8 | a mediana retail acima, × *Spacing* | 0 |
 | Boss Race | 2 | (−70, 0), (+70, 0) | 0 |
-| Battle / Challenge | 4 | (0, −R), (+R, 0), (0, +R), (−R, 0); R = 1200 | 0°, 90°, 180°, 270° — olhando o centro (+ *Facing Offset*, 45° imita Smokey Castle) |
+| Challenge (os três) | 4 | (0, −R), (+R, 0), (0, +R), (−R, 0); R = 1200 | 0°, 90°, 180°, 270° — olhando o centro (+ *Facing Offset*, 45° imita Smokey Castle) |
 | Hub | 1 | (0, 0) na próxima `entranceID` livre | 0 |
+| Special / Test Race | 8 | como Race | 0 |
+| Special / Cutscene, Menu Backdrop | — | botão desabilitado, com o motivo: "no racers are spawned in a cutscene" (`objects.c:1096`) | — |
 
 - `racerIndex` = 0…N−1 na ordem do template, `entranceID` do operador (0 por
   padrão), `vehicle = VEHICLE_NO_OVERRIDE` (no Hub, opcionalmente o veículo do
@@ -492,14 +578,15 @@ Sem isto a raiz é decorativa e o export fica errado:
 |---|---|
 | `dkr_track_editor/level_types.py` | **novo**, sem `bpy`: modos, header, visibilidade, presets, templates |
 | `dkr_track_editor/operators/start_grid.py` | **novo**: gerar, regenerar, selecionar grelha |
+| `dkr_track_editor/operators/level_type.py` | **novo**: `dkr.set_level_type` (com a confirmação) e a sugestão para cenas antigas |
 | `dkr_track_editor/data/object_help.json` | **novo**: tooltips à mão |
-| `dkr_track_editor/props.py` | `level_type`, `challenge_type`, `boss`, `imported_race_type`, `show_incompatible`; `_keep`; sai `is_racing_track` |
-| `dkr_track_editor/ui/panels.py` | interruptor no topo, abas, filtro, presets, subpainel *Start Grid*, header "set by Level Type" |
+| `dkr_track_editor/props.py` | `level_type` (com `NONE`), `challenge_type`, `special_type`, `boss`, `show_incompatible`; `_keep`; sai `is_racing_track` |
+| `dkr_track_editor/ui/panels.py` | painel *Level Type* (cartão de primeiro contato, `bl_order = 0`), `poll` dos outros painéis, abas, filtro, presets, subpainel *Start Grid*, header "set by Level Type" |
 | `dkr_track_editor/operators/edit.py` | `preset`, `description()`, `UNIQUE_FIELDS`, `refresh_artwork` |
 | `dkr_track_editor/scene.py` | ângulo pela cadeia de pais |
-| `dkr_track_editor/operators/header.py` | mescla os overrides do modo |
+| `dkr_track_editor/operators/header.py` | mescla os overrides do modo; picker ordenado por valor, sem aliases de máscara |
 | `dkr_track_editor/operators/pack.py`, `checks.py` | validação por modo; override em header herdado |
-| `dkr_track_editor/operators/io_objects.py` | import grava modo/chefe; limpa raízes |
+| `dkr_track_editor/operators/io_objects.py` | import grava família, sub-tipo e chefe via `mode_of`; limpa raízes |
 | `dkr_track_editor/operators/geometry.py` | `drop_to_surface` em coordenada de mundo |
 | `dkr_track_editor/validate.py` | checkpoints e largada por modo; tipos incompatíveis |
 | `dkr_track_editor/catalog.py` | `ObjectType.modes`, `.slots` |
@@ -512,8 +599,9 @@ Sem isto a raiz é decorativa e o export fica errado:
 
 **Sem Blender — `tests/test_level_types.py` (novo):**
 
-- `race_type`/`family` ida e volta para todo membro de `RaceType`; os 65
-  headers retail caem na família certa (cutscenes em `None`).
+- `race_type(*mode_of(x)) == x` para os 65 headers retail; Horseshoe Gulch
+  cai em Special / Test Race; `RACETYPE_UNK1` e a máscara `RACETYPE_CHALLENGE`
+  nunca aparecem entre as opções.
 - **Nada que o retail usa fica oculto:** todo objeto de todo mapa retail é
   visível no modo do seu nível. É o teste que impede a tabela de exagerar.
 - `EGGCREATOR` visível só em Challenge / Eggs; portas de hub só em Hub.
@@ -521,16 +609,21 @@ Sem isto a raiz é decorativa e o export fica errado:
   mapa com um yaw qualquer e medido do jeito que o levantamento mediu, bate com
   a mediana retail — pega erro de eixo ou de sinal; no challenge, cada spawner
   olha para o centro.
-- `header_overrides` + `level_header.encode`: byte `0x4C` = 8/64/65/66/5,
-  byte `0xB8` = o chefe escolhido.
+- `header_overrides` + `level_header.encode`: byte `0x4C` = 0/8/64/65/66/5/6/7/3
+  conforme o par escolhido, byte `0xB8` = o chefe escolhido.
 - Validação: mapas sintéticos por modo, e os 65 retail no próprio modo sem
   erro novo.
 
 **No Blender — `tests/test_blender_operators.py`:**
 
 - Registro dos operadores novos.
-- Trocar o modo muda o header; *Race type* não é mais "unanswered" (atualizar
-  as linhas 1476 e 1483).
+- Cena nova: só o painel *Level Type* passa no `poll`; depois de
+  `dkr.set_level_type`, os outros aparecem.
+- `/race-type` continua "unanswered" até o autor escolher (as linhas 1476 e
+  1483 seguem valendo) e deixa de ser depois; trocar o modo muda o header.
+- `set_level_type` com objetos na cena lista os incompatíveis; *Import Track*
+  de Bluey 1 deixa Boss Race / Bluey 1; de Horseshoe Gulch, Special / Test
+  Race.
 - Preset verde → `balloonType == BALLOON_TYPE_TRAP`; colorido → `MAGNET`.
 - `description()` devolve texto específico do tipo.
 - Grelha: 8 / 2 / 4 / 1; todos com pai = raiz; índices 0…N−1; girar a raiz 90°
@@ -539,7 +632,9 @@ Sem isto a raiz é decorativa e o export fica errado:
   e pais (regressão do achado 5); *Drop To Surface* num filho cai no lugar
   certo; *Import Track* não deixa raiz órfã; apagar o spawner 3 dá o erro de
   origem.
-- `test_validation` (linhas 189-210) troca `is_racing_track` por `level_type`.
+- `test_validation` (linhas 189-210) troca `is_racing_track` por `level_type`,
+  e `test_dkrmap_export` escolhe um modo antes de exportar — sem modo, o export
+  recusa.
 - As suítes de round trip não mudam e têm de continuar passando — é a prova de
   que o caminho sem pai ficou intacto.
 
@@ -551,8 +646,10 @@ Cada passo deixa o addon funcionando e com testes verdes:
    Artwork*, *Drop To Surface* em coordenada de mundo, `_clear_existing`.
 2. **`level_types.py` + levantamento no `generate_catalog.py`** e
    `catalog.json` regenerado, com `test_level_types.py`.
-3. **Interruptor mestre:** propriedades, painel, header, import, validação por
-   modo; sai `is_racing_track`.
+3. **Interruptor mestre:** o cartão de primeiro contato e o `poll` dos outros
+   painéis, `dkr.set_level_type` com a confirmação, propriedades, header
+   (incluindo o picker sem a máscara), import, validação por modo; sai
+   `is_racing_track`.
 4. **Catálogo:** abas, filtro por modo, *Show incompatible*, presets de balão,
    tooltips.
 5. **Grelha:** ângulo pela cadeia de pais, templates, operador, subpainel,
@@ -570,8 +667,15 @@ passo 3.
    jeito.
 3. **Hub = 1 spawner por entrada.** Não estava no pedido.
 4. **Esconder com escape**, não desabilitar: *Show incompatible types*.
-5. **Standard Race conta como resposta** para o `/race-type` do header.
-6. **Import preserva o `race_type` exato** enquanto a família não mudar.
+5. **Sem modo até o autor escolher.** Nenhuma família é default; enquanto for
+   `NONE`, os outros painéis ficam ocultos, o header não tem `/race-type` e o
+   export recusa. (Substitui a primeira versão deste plano, em que Standard
+   Race era o default.)
+6. **Horseshoe Gulch é Special / Test Race**, ao lado das cenas: era uma
+   corrida de teste, e o tooltip diz para não usar. Fica disponível para
+   importar e remixar o que já existe, não como caminho recomendado.
+7. **`RACETYPE_UNK1` e a máscara `RACETYPE_CHALLENGE` ficam fora de todo
+   menu.**
 
 ## Riscos
 
@@ -586,3 +690,6 @@ passo 3.
 - **Parentesco feito pelo autor.** Alguém pode parentar spawners a outra coisa,
   girada em X ou Y; a validação avisa em vez de exportar um ângulo errado em
   silêncio.
+- **Painéis ocultos confundem quem abre um `.blend` antigo.** O cartão explica
+  por que o resto sumiu e, quando dá, oferece o botão de sugestão com o modo do
+  nível importado.
