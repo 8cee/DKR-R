@@ -8,7 +8,6 @@ disabled, which a missing one cannot. Each ``poll`` is false and says so.
 from __future__ import annotations
 
 import bpy
-from bpy.props import IntProperty
 
 
 class _Unavailable:
@@ -32,17 +31,6 @@ class DKR_OT_play_music(_Unavailable, bpy.types.Operator):
     reason = "Listening is not available yet: the music is not loaded from the assets"
 
 
-class DKR_OT_pick_skybox(_Unavailable, bpy.types.Operator):
-    """Preview a skybox and use it for this track"""
-
-    bl_idname = "dkr.pick_skybox"
-    bl_label = "Skybox"
-    reason = ("Skybox previews are not loaded from the assets yet; pick one by "
-              "name in the Skybox field above")
-
-    index: IntProperty(options={"HIDDEN"})
-
-
 class DKR_OT_minimap_fit(_Unavailable, bpy.types.Operator):
     """Frame the minimap around the track geometry"""
 
@@ -53,6 +41,5 @@ class DKR_OT_minimap_fit(_Unavailable, bpy.types.Operator):
 
 CLASSES = (
     DKR_OT_play_music,
-    DKR_OT_pick_skybox,
     DKR_OT_minimap_fit,
 )

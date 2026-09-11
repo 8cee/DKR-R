@@ -23,8 +23,9 @@ Três pedidos, nesta ordem de importância:
 Estado: **implementado** (revisão 2: o modo virou o primeiro contato; Horseshoe
 Gulch e as cenas foram para um grupo *Special*), com o layout de
 `tools/blender/ui_mockup.html`. Fora do escopo por ora: o Minimap e o AI Node
-Graph ficam na sidebar marcados *in development*, e o player de música e a
-galeria de skybox mostram a estrutura sem tocar áudio nem ler as imagens.
+Graph ficam na sidebar marcados *in development*, e o player de música troca a
+faixa pelo nome mas ainda não toca áudio. A galeria de skybox é real
+(`skyboxes.py`): panorâmicas dos 18 domos e o domo escolhido no viewport.
 Os números vêm de um levantamento feito sobre os 65 headers e os 136 object maps
 retail extraídos em `extern/dkr-decomp/assets/.vanilla/us.v77` e do código do
 decomp; cada fato cita a sua fonte.

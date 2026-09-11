@@ -132,9 +132,11 @@ class DKR_OT_export_dkrmap(bpy.types.Operator, ExportHelper):
             # Level Type owns, which the import filled from this same header,
             # so an untouched remix writes it back unchanged.
             from .. import level_header_template as template  # noqa: PLC0415
+            from . import header as header_ops  # noqa: PLC0415
             base = _base_header(context, tree)
             if base is not None:
                 template.apply_overrides(base, level_types.settings_overrides(settings))
+                template.apply_overrides(base, header_ops.inherited_overrides(context))
             else:
                 base = _authored_header(context)
             if base is not None:

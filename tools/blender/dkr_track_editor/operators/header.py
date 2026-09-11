@@ -43,6 +43,11 @@ LEVEL_OWNED = ("/race-type", "/lap-count", "/avaliable-vehicles",
 MUSIC = "/music"
 SKYBOX = "/background/skybox/id"
 
+#: Answers a remix keeps from the header it inherits, and can change. The
+#: import fills them from that header and the export lays them back over it, so
+#: an untouched remix writes what it came with and a new sky actually ships.
+INHERITED = (MUSIC, SKYBOX)
+
 
 def key_for(pointer: str) -> str:
     """The scene property holding the answer to ``pointer``."""
@@ -94,6 +99,36 @@ def effective_overrides(context) -> dict:
 def unanswered(context) -> list:
     """Pointers that have no answer and no default, so the header cannot say."""
     return template.missing(effective_overrides(context))
+
+
+def _lookup(document, pointer):
+    node = document
+    for step in pointer.strip("/").split("/"):
+        if not isinstance(node, dict) or step not in node:
+            return None
+        node = node[step]
+    return node
+
+
+def adopt_answers(context, header) -> None:
+    """Answer :data:`INHERITED` from a level header, as an import does."""
+    for pointer in INHERITED:
+        key = key_for(pointer)
+        value = _lookup(header, pointer)
+        if value is None:
+            if key in context.scene:
+                del context.scene[key]
+            continue
+        context.scene[key] = value
+        choice = choice_for(pointer)
+        if choice is not None:
+            _apply_ui(context.scene, choice)
+
+
+def inherited_overrides(context) -> dict:
+    """The :data:`INHERITED` answers, for laying over an inherited header."""
+    found = overrides(context)
+    return {pointer: found[pointer] for pointer in INHERITED if pointer in found}
 
 
 def music_index(context) -> int:

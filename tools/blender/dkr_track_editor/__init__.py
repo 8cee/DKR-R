@@ -38,7 +38,7 @@ def _module_classes():
     from . import prefs, props
     from .operators import (ai, checks, custom_textures, edit, geometry,
                             header, io_objects, level_type, new_track, pack,
-                            placeholders, start_grid, textures)
+                            placeholders, skybox, start_grid, textures)
     from .ui import panels
 
     classes = []
@@ -47,6 +47,7 @@ def _module_classes():
     classes += list(level_type.CLASSES)
     classes += list(start_grid.CLASSES)
     classes += list(placeholders.CLASSES)
+    classes += list(skybox.CLASSES)
     classes += list(io_objects.CLASSES)
     classes += list(geometry.CLASSES)
     classes += list(textures.CLASSES)
@@ -105,9 +106,10 @@ def unregister():
     # across a disable and re-enable is what produces the "_PREVIEW_ already
     # exists" error on the second enable.
     try:
-        from .operators import textures
+        from .operators import skybox, textures
 
         textures.teardown()
+        skybox.teardown()
     except Exception:  # noqa: BLE001 - unregistering must not fail
         pass
 

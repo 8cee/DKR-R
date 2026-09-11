@@ -142,6 +142,7 @@ class AssetTree:
         self._header_cache: Dict[str, Optional[ObjectHeader]] = {}
         self._texture_cache: Dict[str, Optional[str]] = {}
         self._texture3d_cache: Dict[int, Optional[str]] = {}
+        self._flip3d_cache: Dict[int, bool] = {}
         self._levels: Optional[List["Level"]] = None
 
     # -- discovery -------------------------------------------------------
@@ -456,6 +457,30 @@ class AssetTree:
             png = _texture_image(self._lookup(META_TEXTURES_3D, order[texture_id]))
         self._texture3d_cache[texture_id] = png
         return png
+
+    def texture_3d_flipped(self, texture_id: int) -> bool:
+        """Whether a 3D texture's PNG holds its rows opposite to the ROM.
+
+        Every retail 3D texture does - all 1416 sidecars say so. The extraction
+        turns each picture right way up for a person to look at and records it
+        as ``flipped-image``, and the asset tool turns it back when it builds
+        (``buildTexture.cpp:112``). A texel's ``t`` counts from the ROM's first
+        row, which is therefore the PNG's last: anything that draws a model's
+        UVs over the extracted picture as it stands draws it upside down.
+        """
+        if texture_id in self._flip3d_cache:
+            return self._flip3d_cache[texture_id]
+        flipped = False
+        order = self.order(META_TEXTURES_3D)
+        if 0 <= texture_id < len(order):
+            sidecar = self._lookup(META_TEXTURES_3D, order[texture_id])
+            try:
+                with open(sidecar, "r", encoding="utf-8") as handle:
+                    flipped = bool(json.load(handle).get("flipped-image"))
+            except (TypeError, OSError, ValueError):
+                flipped = False
+        self._flip3d_cache[texture_id] = flipped
+        return flipped
 
     # -- the whole answer -------------------------------------------------
 

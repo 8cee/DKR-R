@@ -293,10 +293,11 @@ class LevelModel:
         #: ``numberOfSegments * ceil(numberOfSegments / 8)`` bytes of one
         #: visibility bitmask per segment - is real authored data that nothing
         #: short of a new segmentation needs to rewrite. The **collision facet
-        #: arrays** are the opposite: ``numberOfTriangles * 8`` bytes per
-        #: segment of uninitialised space that ``track_init_collision`` fills at
-        #: load time from the triangles. Neither is worth modelling until
-        #: segmentation itself changes, and both have to come out byte for byte.
+        #: arrays**, ``numberOfTriangles * 8`` bytes per segment, are authored
+        #: too: each triangle's plane index and the neighbour across each edge,
+        #: which ``track_init_collision`` reads to bound the triangle. A rebuilt
+        #: layout regenerates both (:func:`level_model_layout.collision_facets`);
+        #: otherwise both have to come out byte for byte.
         self.opaque: List[Tuple[int, bytes]] = []
         #: Bytes no structure claimed and that sit before the PVS, as
         #: ``[(offset, bytes), ...]``. In retail these are alignment padding

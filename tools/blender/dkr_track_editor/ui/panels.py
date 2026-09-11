@@ -17,11 +17,12 @@ import textwrap
 
 import bpy
 
-from .. import catalog as catalog_module, level_types, prefs, scene
+from .. import catalog as catalog_module, level_types, prefs, scene, skyboxes
 from ..operators import geometry as geometry_ops
 from ..operators import header as header_ops
 from ..operators import level_type as level_type_ops
 from ..operators import new_track as new_track_ops
+from ..operators import skybox as skybox_ops
 from ..operators import start_grid
 from ..operators.edit import object_type_items  # noqa: F401 - kept for callers
 
@@ -1072,7 +1073,8 @@ class DKR_PT_header(DkrPanel, bpy.types.Panel):
             info_box(layout, context,
                      "This track inherits its header from %s, so the fields "
                      "below are unused - except the ones set by Level Type, "
-                     "which always follow it." % level.label)
+                     "the music and the skybox, which the export lays over "
+                     "it." % level.label)
 
         layout.operator("dkr.header_defaults", icon="LOOP_BACK")
 
@@ -1146,17 +1148,62 @@ def _draw_music(layout, context, catalog):
 
 
 def _draw_skybox(layout, context):
+    """The chosen sky large, then every dome to pick from, as the game shows it.
+
+    The thumbnails are panoramas of each dome seen from its centre, made a few
+    at a time after the panel first opens; a tile shows an icon until its
+    picture is ready.
+    """
+    tree = prefs.resolve(context)
+    domes = skyboxes.catalogue(tree)
+    current = skybox_ops.chosen(context)
+    chosen = next((s for s in domes if s.asset_id == current), None)
+
     box = layout.box()
-    box.label(text="Skybox", icon="WORLD")
-    choice = header_ops.choice_for(header_ops.SKYBOX)
-    if choice is not None:
-        _draw_header_choice(box.column(align=True), context, choice, header_ops)
-    grid = box.grid_flow(row_major=True, columns=3, even_columns=True, align=True)
-    for index in range(level_types.SKYBOX_PLACEHOLDERS):
-        grid.operator("dkr.pick_skybox", text="Skybox %d" % (index + 1),
-                      icon="WORLD").index = index
-    lines(box, context, "Placeholders: skybox previews are not loaded from the "
-          "assets yet.", dim=True, tight=True)
+    row = box.row()
+    row.label(text="Skybox", icon="WORLD")
+    _dim_label(row, chosen.label if chosen else (current or "none"))
+
+    if not domes:
+        lines(box, context, "The skyboxes are read from the decomp assets. Set "
+              "the path in Preferences > Add-ons to see and pick them here.",
+              icon="INFO", dim=True, tight=True)
+        choice = header_ops.choice_for(header_ops.SKYBOX)
+        if choice is not None:
+            _draw_header_choice(box.column(align=True), context, choice, header_ops)
+        return
+
+    if chosen is not None:
+        icon = skybox_ops.icon_for(tree, chosen)
+        if icon:
+            box.template_icon(icon_value=icon, scale=6.0)
+        if chosen.used_by:
+            shown = ", ".join(chosen.used_by[:3])
+            if len(chosen.used_by) > 3:
+                shown += " and %d more" % (len(chosen.used_by) - 3)
+            lines(box, context, "Used by %s" % shown, dim=True, tight=True)
+        else:
+            _dim_label(box, "No retail track uses it")
+    else:
+        lines(box, context, "No skybox: the game draws a plain background. "
+              "Pick one below.", dim=True, tight=True)
+
+    grid = box.grid_flow(row_major=True, columns=3, even_columns=True, align=False)
+    for sky in domes:
+        cell = grid.column(align=True)
+        icon = skybox_ops.icon_for(tree, sky)
+        if icon:
+            cell.template_icon(icon_value=icon, scale=2.5)
+        else:
+            cell.label(text="", icon="WORLD")
+        op = cell.operator("dkr.pick_skybox", text=sky.label,
+                           depress=sky.asset_id == current)
+        op.asset_id = sky.asset_id
+
+    shown = skybox_ops.preview_object(context) is not None
+    box.operator("dkr.show_skybox",
+                 text="Hide From Viewport" if shown else "Show In Viewport",
+                 icon="HIDE_ON" if shown else "HIDE_OFF")
 
 
 def _draw_header_choice(layout, context, choice, header_ops):

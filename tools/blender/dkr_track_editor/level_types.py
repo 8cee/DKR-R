@@ -692,7 +692,7 @@ def grid_blurb(key: Optional[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Music and skyboxes
+# Music
 # ---------------------------------------------------------------------------
 
 def music_tracks(catalog) -> List[str]:
@@ -704,7 +704,3 @@ def music_tracks(catalog) -> List[str]:
 def music_label(name: str) -> str:
     """``SEQUENCE_ANCIENT_LAKE`` -> ``Ancient Lake``."""
     return name.replace("SEQUENCE_", "").replace("_", " ").title()
-
-
-#: Tiles the skybox gallery shows until it reads the real ones from the assets.
-SKYBOX_PLACEHOLDERS = 12

@@ -76,7 +76,8 @@ def test_registration():
                  "set_level_type", "use_imported_level_type", "toggle_vehicle",
                  "set_default_vehicle", "generate_start_grid",
                  "select_grid_children", "step_music", "play_music",
-                 "pick_skybox", "minimap_fit", "make_convertible"):
+                 "pick_skybox", "show_skybox", "minimap_fit",
+                 "make_convertible"):
         check(hasattr(bpy.ops.dkr, name), "operator dkr.%s exists" % name)
     check(hasattr(bpy.types.Scene, "dkr"), "scene settings registered")
 
@@ -426,9 +427,77 @@ def test_import_sets_level_type():
     check(level_types.current_key(settings) == "BOSS"
           and settings.boss == "BOSS_RACE_BLUEY1",
           "Bluey 1 comes in as a boss race against Bluey")
+    from dkr_track_editor.operators import header as header_ops
+    check(bpy.context.scene.get(header_ops.key_for(header_ops.SKYBOX)) == "ASSET_OBJECT_DOME1"
+          and bpy.context.scene.get(header_ops.key_for(header_ops.MUSIC)) == 57,
+          "and brings its sky and music, which a remix can change")
     bpy.ops.dkr.import_level(level=names["Horseshoe Gulch"], with_geometry=False)
     check(level_types.current_key(settings) == "TEST_RACE",
           "Horseshoe Gulch comes in as Special > Test Race")
+
+
+def test_skybox():
+    print("skybox")
+    from dkr_track_editor import prefs, skyboxes
+    from dkr_track_editor.operators import geometry as geometry_ops
+    from dkr_track_editor.operators import header as header_ops
+    from dkr_track_editor.operators import skybox as skybox_ops
+
+    fresh()
+    tree = prefs.resolve(bpy.context)
+    if tree is None:
+        print("  skip: no decomp assets")
+        return
+    domes = skyboxes.catalogue(tree)
+    check(len(domes) == 18, "the gallery offers the 18 domes (%d)" % len(domes))
+
+    key = header_ops.key_for(header_ops.SKYBOX)
+    check(not bpy.ops.dkr.show_skybox.poll(), "nothing to show before a sky is picked")
+    bpy.ops.dkr.pick_skybox(asset_id="ASSET_OBJECT_DOME13")
+    check(bpy.context.scene.get(key) == "ASSET_OBJECT_DOME13",
+          "picking a dome answers the header's skybox")
+
+    bpy.ops.dkr.generate_start_grid()
+    bpy.ops.dkr.show_skybox()
+    sky = skybox_ops.preview_object(bpy.context)
+    check(sky is not None and sky.type == "MESH" and len(sky.data.polygons) > 0,
+          "the chosen dome is shown in the viewport")
+    if sky is None:
+        return
+    check(sky not in geometry_ops.unusable_meshes(bpy.context)
+          and not scene.is_dkr_object(sky),
+          "and is never taken for track geometry or exported")
+
+    # Every retail 3D texture's PNG was turned right way up on extraction, and
+    # a model's UVs count from the ROM's first row, so the preview draws a copy
+    # turned back: its bottom row is the PNG's top row.
+    from dkr_track_editor import preview
+    rom = [node.image for material in sky.data.materials
+           if material is not None and material.node_tree
+           for node in material.node_tree.nodes
+           if node.type == "TEX_IMAGE" and node.image is not None
+           and node.image.name.endswith(preview.ROM_ROWS_SUFFIX)]
+    check(bool(rom), "the dome is drawn with its pictures in the ROM's row order")
+    if rom:
+        copy = rom[0]
+        source = bpy.data.images.get(copy.name[:-len(preview.ROM_ROWS_SUFFIX)])
+        width, height = copy.size
+        top = list(source.pixels[(height - 1) * width * 4:(height - 1) * width * 4 + 4])
+        bottom = list(copy.pixels[0:4])
+        check(max(abs(a - b) for a, b in zip(top, bottom)) < 1.5 / 255.0,
+              "the copy's bottom row is the picture's top row")
+
+    bpy.ops.dkr.pick_skybox(asset_id="ASSET_OBJECT_DOME8")
+    sky = skybox_ops.preview_object(bpy.context)
+    check(sky is not None and sky.get(skybox_ops.PROP_SKY) == "ASSET_OBJECT_DOME8",
+          "picking another dome swaps the preview")
+
+    bpy.ops.dkr.pick_skybox(asset_id="ASSET_OBJECT_DOME8")
+    check(key not in bpy.context.scene and skybox_ops.preview_object(bpy.context) is None,
+          "picking it again means no skybox, and the preview goes with it")
+
+    icon = skybox_ops.build_icon(tree, domes[0])
+    check(isinstance(icon, int), "a thumbnail is made from the dome")
 
 
 def test_dkrmap_export():
@@ -3340,6 +3409,7 @@ def main():
         test_presets_and_tooltips()
         test_refresh_keeps_grids()
         test_import_sets_level_type()
+        test_skybox()
         test_dkrmap_export()
         test_import_export_operators()
         test_geometry_import()

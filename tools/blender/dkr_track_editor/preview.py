@@ -80,16 +80,51 @@ def _alive(datablock) -> bool:
         return False
 
 
-def _image(path: str) -> Optional[bpy.types.Image]:
-    cached = _image_cache.get(path)
+def _image(path: str, rom_rows: bool = False) -> Optional[bpy.types.Image]:
+    key = path + ("#rom" if rom_rows else "")
+    cached = _image_cache.get(key)
     if _alive(cached):
         return cached
     try:
         image = bpy.data.images.load(path, check_existing=True)
     except RuntimeError:
         image = None
-    _image_cache[path] = image
+    if image is not None and rom_rows:
+        image = _in_rom_rows(image)
+    _image_cache[key] = image
     return image
+
+
+ROM_ROWS_SUFFIX = " (rom rows)"
+
+
+def _in_rom_rows(image) -> bpy.types.Image:
+    """A copy of ``image`` with its rows in the order the ROM holds them.
+
+    A retail 3D texture was turned right way up when it was extracted
+    (:meth:`assets.AssetTree.texture_3d_flipped`), but a model's UVs count
+    rows from the ROM's first. Drawn as extracted, every picture on a model
+    stands on its head - a sky's mountains hang from it. Turning the picture
+    back, rather than the UVs, leaves every coordinate a model holds exactly as
+    decoded. Packed, so the ``.blend`` keeps it without the extraction.
+    """
+    name = image.name + ROM_ROWS_SUFFIX
+    existing = bpy.data.images.get(name)
+    if existing is not None:
+        return existing
+    width, height = image.size
+    if not width or not height:
+        return image
+    pixels = list(image.pixels)
+    stride = width * 4
+    copy = bpy.data.images.new(name, width, height, alpha=True)
+    copy.pixels = [value for row in range(height - 1, -1, -1)
+                   for value in pixels[row * stride:(row + 1) * stride]]
+    try:
+        copy.pack()
+    except RuntimeError:
+        pass  # kept for this session; the .blend reloads it from the extraction
+    return copy
 
 
 def sprite_mesh(path: str, scale: float) -> Optional[bpy.types.Mesh]:
@@ -240,11 +275,12 @@ def _mesh(path: str, scale: float, tree=None) -> Optional[bpy.types.Mesh]:
     for batch in model.batches:
         texture = model.texture_for(batch)
         png = tree.texture_3d_png(texture.texture_id) if (tree and texture) else None
-        slot_key = png or "<vertex colours>"
+        rom_rows = bool(png) and tree.texture_3d_flipped(texture.texture_id)
+        slot_key = (png + ("#rom" if rom_rows else "")) if png else "<vertex colours>"
         if slot_key not in slots:
             slots[slot_key] = len(materials)
             materials.append(
-                _textured_material(png) if png else _vertex_colour_material()
+                _textured_material(png, rom_rows) if png else _vertex_colour_material()
             )
         slot = slots[slot_key]
 
@@ -297,9 +333,9 @@ def _mesh(path: str, scale: float, tree=None) -> Optional[bpy.types.Mesh]:
     return mesh
 
 
-def _textured_material(png: str) -> bpy.types.Material:
+def _textured_material(png: str, rom_rows: bool = False) -> bpy.types.Material:
     """An unlit material showing one of a model's textures."""
-    image = _image(png)
+    image = _image(png, rom_rows)
     if image is None:
         return _vertex_colour_material()
     name = "dkr texture %s" % image.name

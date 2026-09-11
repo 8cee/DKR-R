@@ -327,9 +327,14 @@ type.
 **Package.** Fill in the track name and author, then *Export .dkrmap*. The
 export refuses a track with no level type, since the header's race type comes
 from it. The *Level Header* subpanel shows what Level Type sets as locked rows,
-steps through the game's music list by name, and holds the skybox; listening to
-the music and previewing skyboxes are not there yet, and the *Minimap* panel is
-marked *in development*. The next section covers what lands in the package and
+steps through the game's music list by name, and picks the skybox from a
+gallery of all 18 domes. Each thumbnail is a panorama of the dome as seen from
+its centre - the game moves the dome onto the camera every frame, so that is the
+only way a racer ever sees it - and *Show In Viewport* puts the chosen dome
+around the track, as a preview that is never exported. An imported track brings
+its music and sky, and a remix that changes either ships the change over the
+header it inherits. Listening to the music is not there yet, and the *Minimap*
+panel is marked *in development*. The next section covers what lands in the package and
 the one rule about sharing it.
 
 ## What the packager produces

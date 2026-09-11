@@ -424,6 +424,11 @@ class DKR_OT_import_level(bpy.types.Operator):
         header = level_type_ops._read_header(level.header_path) \
             if level.header_path else None
         key = level_type_ops.adopt_header(context.scene.dkr, header) if header else ""
+        if header:
+            # And its music and sky, which a remix can change.
+            from . import header as header_ops, skybox as skybox_ops  # noqa: PLC0415
+            header_ops.adopt_answers(context, header)
+            skybox_ops.update_preview(context)
         described = ""
         if key:
             described = "; Level Type set to %s" % level_types.label(key)
