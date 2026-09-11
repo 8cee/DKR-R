@@ -109,6 +109,50 @@ def test_degenerate_row_hashes_only_the_height():
 
 
 # ---------------------------------------------------------------------------
+# The view riceCRC32 actually reads: RDRAM, not the payload's own bytes
+# ---------------------------------------------------------------------------
+#
+# A live run of a track shipping two 64x32 RGBA16 textures found the game
+# computing identities the addon's export never named - every HD pack was
+# therefore invisible, in every export, silently: DKR-R accepted the pack
+# and drew the 64x32 with no error anywhere. Root cause: riceCRC32 reads
+# state->RDRAM, and N64Recomp stores RDRAM word-byte-swapped on a
+# little-endian host (recomp.h's MEM_B: logical byte A lands at raw A ^ 3).
+# rice_identity() was hashing the payload's own (unswapped) bytes.
+
+def test_rice_word_order_matches_mem_b():
+    """Byte j of a 32-bit word lands at raw position j ^ 3 - by hand, not by
+    calling rice_word_order, so a sign error in it cannot hide."""
+    logical = bytes(range(16))  # four words: 00 01 02 03 | 04 05 06 07 | ...
+    expected = bytearray(len(logical))
+    for offset, value in enumerate(logical):
+        expected[(offset & ~3) + ((offset & 3) ^ 3)] = value
+    equal(rice_identity.rice_word_order(logical), bytes(expected),
+          "each 32-bit word is stored MEM_B-reversed (byte j at raw j ^ 3)")
+    equal(rice_identity.rice_word_order(bytes(expected)), logical,
+          "the swap is its own inverse")
+
+
+def test_rice_identity_reads_the_rdram_view():
+    """riceCRC32's answer for the RDRAM view differs from - and is what
+    matters, not - its answer for the payload's own byte order.
+
+    The unswapped CRC is KNOWN's existing 64x32 RGBA16 entry; the swapped one
+    is the known answer rice_identity() must produce, since that is the
+    bytes the game actually hashes. A regression that stops swapping, or
+    swaps some other way, silently reproduces the bug this test file exists
+    to catch.
+    """
+    data = known_buffer((32 - 1) * 128 + 128, 1)
+    equal(rice_identity.rice_crc32(data, 64, 32, 2, 128), 0xefd0e2c8,
+          "sanity: this is KNOWN's own 64x32 RGBA16 fixture")
+    swapped_crc = rice_identity.rice_crc32(
+        rice_identity.rice_word_order(data), 64, 32, 2, 128)
+    equal(swapped_crc, 0x9ceb16c0,
+          "the RDRAM-view CRC riceCRC32 actually produces for these texels")
+
+
+# ---------------------------------------------------------------------------
 # The rectangle, as the renderer derives it
 # ---------------------------------------------------------------------------
 
@@ -480,6 +524,8 @@ def main(argv):
     with tempfile.TemporaryDirectory() as tmp:
         test_known_answers()
         test_degenerate_row_hashes_only_the_height()
+        test_rice_word_order_matches_mem_b()
+        test_rice_identity_reads_the_rdram_view()
         test_rectangle_is_the_image()
         test_named_cases()
         test_nudge()

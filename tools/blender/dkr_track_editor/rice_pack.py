@@ -90,9 +90,12 @@ def image_problem(path: str) -> Optional[str]:
 def texture_digest(payloads: Iterable[bytes]) -> str:
     """One short digest over a track's texture payloads, in ordinal order.
 
-    A replacement identity is a pure function of the texels, so two exports
-    with the same digest have the same identities - which makes this the thing
-    to compare, not a date.
+    It says which export a pack belongs to; it does not say two packs are the
+    same. Identities are a function of the texels *and* of how they are
+    hashed, and the hashing once changed (see rice_identity.rice_word_order)
+    without a single payload changing. DKR-R therefore tells packs apart by
+    the archive's own entries and uses this only to pair a pack with its
+    package.
     """
     digest = hashlib.sha256()
     for payload in payloads:

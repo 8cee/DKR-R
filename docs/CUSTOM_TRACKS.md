@@ -306,7 +306,16 @@ can see.
 rebuilt at every level load, so a rescan renumbers them; this one cannot be
 renumbered afterwards. A track installed mid-session therefore has no textures
 in the published table at all, and its model's ids are reset to texture 0.
-Restart DKR-R after installing a track that ships artwork.
+DKR-R has to be relaunched after installing a track that ships artwork - HD
+pack or the 64x32 in the `.dkrmap`, it makes no difference.
+
+This is the one step no amount of UI removes. Track Lab makes it *one* click,
+not zero: when a track ships an HD pack that the current session cannot load
+yet, its row shows **HD textures: restart to load** and a single **Restart &
+play in HD** button arms the track, switches to Modern, turns on auto-boot, and
+relaunches straight into it. `custom_tracks::track_textures_published()` is what
+tells the UI which state the track is in. Every launch after that is zero
+clicks: the armed track and auto-boot persist in `custom-tracks-state.txt`.
 
 ### Making one
 
@@ -380,10 +389,25 @@ filled with a guess.
 
 ## Installing
 
-The Track Lab panel's **IMPORT TRACK** button takes the `.dkrmap` folder
-directly through the system folder picker, validates its manifest before
-copying, and rescans - no restart. Copying the folder into `custom-tracks/` by
-hand works too.
+Track Lab's **IMPORT A COPY** button takes a folder through the system picker.
+Point it at the `.dkrmap`, at the track's own folder, or at the folder that
+holds both the `.dkrmap` and its `<track>-hd.zip`; a `.zip` of the `.dkrmap`
+(optionally wrapping the pack too) also works. The manifest is validated before
+anything is copied.
+
+If the track declares an `hdTexturePack` and the matching `<track>-hd.zip` is
+found beside it, DKR-R imports that pack in the same gesture -
+`texture_packs::import_archive` with a `TrackPackOwner`, so the pack is born
+enabled, filed against the track (`Origin::TrackPack`), and kept out of the
+texture-pack browser's default list. A pack whose stamped `textureDigest` does
+not match the manifest's is left out with a note; the track still plays, in
+64x32.
+
+Track Lab draws in the Accurate profile as well now. The list, the import and
+arming all work there; what stays impossible in Accurate is a custom track
+actually *loading*, because importing, arming or playing one switches the
+profile to Modern first (with a note saying so). Copying a folder into
+`custom-tracks/` by hand still works.
 
 ## Two traps worth knowing
 
@@ -407,9 +431,14 @@ regenerating, or Rev A silently loses its uncontended DMA fast path.
 
 ## Remaining work
 
-1. **Zip import and UI**, mirroring the texture-pack flow in
-   `docs/TEXTURE_PACKS.md`, including a way to reach an added track.
-2. **Hot reload** for authoring, driven from the retail restart path.
+1. **Removing an installed track.** Track Lab can enable/disable but not delete.
+   When it can, it has to call `texture_packs::forget_track_pack(track_id)`
+   alongside, or a track's HD pack is left enabled and ownerless. The runtime
+   side of that call already exists.
+2. **Detection also at arm time.** The HD pack sibling is resolved when a track
+   is installed or rescanned, not when it is armed, so a track and its pack
+   arriving separately (track first, pack later) is not picked up until the
+   next rescan. Cheap to add.
 3. **Online and Accurate policy.** Map identity is already part of the online
    contract (`dkr_netplay_gameplay_level_begin` seeds from the selected map),
    so a custom track must either enter the session handshake or be refused

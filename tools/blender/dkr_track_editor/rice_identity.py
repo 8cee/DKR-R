@@ -26,13 +26,22 @@ Two parts, both transcriptions, both held to their sources by
   easy to get wrong, and each gives a CRC that is plausible and wrong:
 
   1. It reads each four bytes with ``memcpy`` into a ``uint32_t`` - a
-     **little-endian** word on every machine RT64 runs on, although the texels
-     are big-endian N64 data. Hence ``int.from_bytes(..., "little")``.
+     **little-endian** word on every machine RT64 runs on. Hence
+     ``int.from_bytes(..., "little")``.
   2. The arithmetic is ``uint32_t`` and wraps; every sum is masked.
   3. Rows are read **in memory order** - ``source`` only ever advances - and
      each row right to left in steps of four. What counts *down* is only the
      row number XORed in at the end of each row, so the image's first row is
      combined with ``y == height - 1``.
+
+  And one thing about its *input*, which is not the payload's texels as
+  written: the patch reads ``state->RDRAM``, and N64Recomp stores RDRAM with
+  every 32-bit word byte-swapped on a little-endian host (the ``^ 3`` in
+  ``MEM_B``). The game's texture load and DKR-R's asset-load hook both write
+  through that, so the bytes ``riceCRC32`` walks are the texels with each four
+  reversed. :func:`rice_identity` feeds :func:`rice_crc32` that swapped view
+  via :func:`rice_word_order`; every HD-eligible texture has a 4-aligned row,
+  so a whole-buffer word swap is exact.
 
 * :func:`live_rectangle` is the patch's derivation of the ``width``,
   ``height`` and ``bytesPerRow`` the CRC runs over, for the ``Block`` load that
@@ -112,6 +121,21 @@ def tile_format(texture_format) -> Tuple[int, int]:
 # ---------------------------------------------------------------------------
 # The CRC
 # ---------------------------------------------------------------------------
+
+def rice_word_order(texels: bytes) -> bytes:
+    """The texels as ``riceCRC32`` sees them in RDRAM: each 32-bit word reversed.
+
+    N64Recomp stores RDRAM word-byte-swapped on a little-endian host, and the
+    patch's ``riceCRC32`` reads RDRAM directly. A trailing 1-3 bytes (never
+    reached for an HD-eligible texture, whose rows are 4-aligned) are left as
+    they are.
+    """
+    whole = (len(texels) // 4) * 4
+    swapped = bytearray(texels)
+    for offset in range(0, whole, 4):
+        swapped[offset:offset + 4] = swapped[offset:offset + 4][::-1]
+    return bytes(swapped)
+
 
 def rice_crc32(source, width, height, size, row_stride) -> int:
     """``riceCRC32`` from patch 0011, line for line. See the module docstring."""
@@ -369,7 +393,8 @@ def rice_identity(texels, width, height, texture_format, clamp_s=False,
             % (len(texels), width, height,
                texel_bytes(width, height, texture_format))
         )
-    crc = rice_crc32(texels, live_width, live_height, siz, stride)
+    crc = rice_crc32(rice_word_order(texels), live_width, live_height, siz,
+                     stride)
     return "%08x#%d#%d" % (crc, fmt, siz)
 
 

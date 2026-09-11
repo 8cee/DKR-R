@@ -199,12 +199,15 @@ alone. The original is kept beside it too, at full size, in
 
 **The export gives the resolution back.** Beside `my-track.dkrmap` it writes
 `my-track-hd.zip`: a texture pack holding each picture at the size it was made,
-named so that DKR-R's renderer draws it in place of the 64x32. Import it in
-DKR-R under **Graphics > Custom Texture Packs** and enable it - the export's
-report and the package's `HOW-TO-BUILD.md` both say so. The track does not need
-the pack: without it the game draws the 64x32, which is what the Accurate preset
-always does. And the pack replaces only textures the addon wrote, which exist in
-no other track. See `docs/TEXTURE_PACKS.md` in DKR-R.
+named so that DKR-R's renderer draws it in place of the 64x32. You do not import
+it yourself. Keep it next to the `.dkrmap` and hand DKR-R's Track Lab either -
+**Import a copy**, pick the folder that holds both - and DKR-R installs the pack
+with the track: enabled, tied to the track, and out of the texture-pack
+browser. The track's row then reads *HD textures: restart to load*, and one
+**Restart & play in HD** relaunches straight into it in HD. The track does not
+need the pack: without it the game draws the 64x32, which is what the Accurate
+preset always does. And the pack replaces only textures the addon wrote, which
+exist in no other track. See `docs/TEXTURE_PACKS.md` in DKR-R.
 
 The **order** of the list is the texture's identity - the runtime hands out ids
 by position - so removing one moves the rest, and removing one the geometry has
@@ -290,8 +293,10 @@ section covers what lands in the package and the one rule about sharing it.
 `Export .dkrmap` writes a directory holding the manifest, a compiled
 `header.bin`, both compiled object maps, any textures the track ships in
 `textures/`, and the glTF sources beside them. A track with pictures of its own
-also gets `<track>-hd.zip` next to the directory - the high-resolution pack,
-installed separately from the track.
+also gets `<track>-hd.zip` next to the directory - the high-resolution pack. It
+stays a separate file (a track can be shared without it), but DKR-R's installer
+treats the two as one gesture: point Track Lab at the folder that holds both and
+the pack goes in with the track.
 
 **Everything is compiled here**, without the decomp's `dkr_assets_tool` - that
 tool builds a whole `assets.bin` and ships as a Linux binary, so depending on it
@@ -328,9 +333,12 @@ extensions, ROM magic and size, and cannot see map data inside a 1.3 KB `.bin`.
 `custom-tracks/` is in `.gitignore` for this reason. Share the `.blend` instead -
 anyone with the decomp can rebuild the package from it.
 
-Install a package by copying it into DKR-R's `custom-tracks/` directory, or with
-the Track Lab's Import Track button. Not `mods/`: librecomp owns that for its
-`.nrm` format and rejects anything else it finds there.
+Install a package with Track Lab's **Import a copy** button - point it at the
+`.dkrmap`, at the folder around it, or at a `.zip` of either - or by copying the
+folder into DKR-R's `custom-tracks/` directory. Not `mods/`: librecomp owns that
+for its `.nrm` format and rejects anything else it finds there. Track Lab works
+in the Accurate profile too; importing, arming or playing a track switches to
+Modern, which custom tracks need, and tells you it did.
 
 ## Layout
 

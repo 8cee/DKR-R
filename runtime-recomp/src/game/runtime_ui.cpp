@@ -68,6 +68,7 @@
 #include <iterator>
 #include <map>
 #include <mutex>
+#include <functional>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -300,6 +301,13 @@ int g_texture_pack_visibility_filter = 0;
 std::string g_texture_pack_manage_id;
 std::string g_texture_pack_remove_id;
 std::string g_texture_pack_remove_name;
+// Set when an action in Track Lab (import, arm, play) switched the presentation
+// profile to Modern on the player's behalf. Shown in Track Lab and Graphics,
+// cleared when the player changes the profile there by hand.
+std::string g_track_lab_modern_notice;
+// A Track Lab "Manage" button asks the shared single-pack modal to open.
+bool g_texture_pack_manage_request = false;
+std::string g_track_import_status;
 int g_online_offline_section = 0;
 int g_online_active_section = 0;
 char g_online_player_name[25] = "Racer";
@@ -1432,6 +1440,32 @@ void SaveSettings() {
     }
 }
 
+// Custom tracks and their HD textures are Modern-only by policy. An action that
+// needs Modern - importing a track, arming one, playing one - switches to it
+// live rather than sending the player to the Graphics page, and leaves a note
+// saying what changed and how to undo it. Opening Track Lab changes nothing;
+// only these actions do. Returns true when it actually switched.
+bool EnsureModernForTracks() {
+    using dkr::runtime::enhancements::PresentationProfile;
+    if (dkr::runtime::enhancements::presentation_profile() ==
+        PresentationProfile::Modern) {
+        return false;
+    }
+    GraphicsConfig config = ultramodern::renderer::get_graphics_config();
+    dkr::runtime::enhancements::set_presentation_profile(
+        PresentationProfile::Modern);
+    ApplyProfileGraphics(config, PresentationProfile::Modern);
+    ultramodern::renderer::set_graphics_config(config);
+    SaveSettings();
+    g_track_lab_modern_notice =
+        "Switched to Modern - custom tracks and their HD textures need it. "
+        "Change back in Graphics.";
+    std::fprintf(stderr,
+                 "[track-lab] presentation switched to Modern for custom "
+                 "tracks\n");
+    return true;
+}
+
 bool LoadPlayerBindingSetting(const std::string& key, int number) {
     if (key.rfind("player", 0) != 0) {
         return false;
@@ -2425,11 +2459,19 @@ bool TexturePackImportRunning() {
     return g_texture_import_state.running;
 }
 
-void StartTexturePackImport(const std::filesystem::path& source) {
+bool StartTexturePackImport(
+    const std::filesystem::path& source,
+    const dkr::runtime::texture_packs::TrackPackOwner* owner = nullptr,
+    const std::filesystem::path& import_temp = {}) {
     {
         std::scoped_lock lock(g_texture_import_mutex);
-        if (g_texture_import_state.running) return;
+        if (g_texture_import_state.running) return false;
     }
+    std::optional<dkr::runtime::texture_packs::TrackPackOwner> owner_copy;
+    if (owner != nullptr) {
+        owner_copy = *owner;
+    }
+    const std::filesystem::path import_temp_copy = import_temp;
 
     // A completed jthread remains joinable until joined. Retire it before
     // assigning the next worker, outside the state mutex so its final update
@@ -2449,7 +2491,7 @@ void StartTexturePackImport(const std::filesystem::path& source) {
     }
 
     g_texture_import_worker = std::jthread(
-        [source](std::stop_token stop_token) {
+        [source, owner_copy, import_temp_copy](std::stop_token stop_token) {
             std::string status;
             const auto progress = [stop_token](
                                       const dkr::runtime::texture_packs::ImportProgress& update) {
@@ -2467,13 +2509,18 @@ void StartTexturePackImport(const std::filesystem::path& source) {
             bool imported = false;
             try {
                 imported = dkr::runtime::texture_packs::import_archive(
-                    source, status, progress);
+                    source, status, progress,
+                    owner_copy ? &*owner_copy : nullptr);
             } catch (const std::exception& exception) {
                 status = "Texture-pack import stopped safely: ";
                 status += exception.what();
             } catch (...) {
                 status = "Texture-pack import stopped safely because archive "
                          "processing raised an unknown error.";
+            }
+            if (!import_temp_copy.empty()) {
+                dkr::runtime::custom_tracks::discard_install_temp(
+                    import_temp_copy);
             }
             std::scoped_lock lock(g_texture_import_mutex);
             g_texture_import_state.running = false;
@@ -2487,29 +2534,120 @@ void StartTexturePackImport(const std::filesystem::path& source) {
                 g_texture_import_state.stage = "Texture-pack import stopped";
             }
         });
+    return true;
+}
+
+// A native file or folder picker is modal: it pumps its own message loop for as
+// long as the player browses. The in-game overlay is drawn on the graphics
+// thread, inside update_screen, so a picker opened there stalls every graphics
+// task in flight - the game's scheduler then drops the late completion and
+// main_game_loop waits on it forever. Pickers, and the file work that follows
+// them, therefore run on their own thread; the job hands back a completion
+// that PumpDialogJob runs on the UI thread on a later frame.
+std::mutex g_dialog_job_mutex;
+bool g_dialog_job_running = false;
+std::function<void()> g_dialog_job_finish;
+// Keep the worker last so it is joined before the state above is destroyed.
+std::jthread g_dialog_job_worker;
+
+bool DialogJobRunning() {
+    std::scoped_lock lock(g_dialog_job_mutex);
+    return g_dialog_job_running;
+}
+
+bool StartDialogJob(std::function<std::function<void()>()> job) {
+    {
+        std::scoped_lock lock(g_dialog_job_mutex);
+        if (g_dialog_job_running) return false;
+        g_dialog_job_running = true;
+    }
+    // A finished worker stays joinable until joined; retire it first.
+    if (g_dialog_job_worker.joinable()) g_dialog_job_worker.join();
+    g_dialog_job_worker = std::jthread([job = std::move(job)](std::stop_token) {
+        std::function<void()> finish;
+        try {
+            finish = job();
+        } catch (const std::exception& exception) {
+            const std::string message =
+                std::string("The picker stopped safely: ") + exception.what();
+            finish = [message] {
+                g_track_import_status = message;
+                g_texture_pack_status = message;
+            };
+        } catch (...) {
+            finish = [] {
+                g_track_import_status = "The picker stopped safely.";
+                g_texture_pack_status = "The picker stopped safely.";
+            };
+        }
+        std::scoped_lock lock(g_dialog_job_mutex);
+        g_dialog_job_finish = std::move(finish);
+        g_dialog_job_running = false;
+    });
+    return true;
+}
+
+// Runs a finished job's completion. Called once per frame on the UI thread.
+void PumpDialogJob() {
+    std::function<void()> finish;
+    {
+        std::scoped_lock lock(g_dialog_job_mutex);
+        finish = std::move(g_dialog_job_finish);
+        g_dialog_job_finish = nullptr;
+    }
+    if (finish) finish();
+}
+
+// A folder picker, for the dialog-job thread (which owns its own COM
+// initialization). False with an empty error means the player cancelled.
+bool PickFolder(std::filesystem::path& chosen, std::string& error) {
+    if (NFD_Init() != NFD_OKAY) {
+        error = "The system folder picker could not be initialized.";
+        return false;
+    }
+    nfdu8char_t* result = nullptr;
+    const nfdresult_t dialog = NFD_PickFolderU8(&result, nullptr);
+    if (dialog == NFD_OKAY) {
+        chosen = std::filesystem::u8path(result);
+        NFD_FreePathU8(result);
+    } else if (dialog == NFD_ERROR) {
+        error = NFD_GetError();
+    }
+    NFD_Quit();
+    return dialog == NFD_OKAY;
 }
 
 bool ImportTexturePackWithDialog() {
     if (TexturePackImportRunning()) return false;
-    if (NFD_Init() != NFD_OKAY) {
-        g_texture_pack_status = "The system file picker could not be initialized.";
-        return false;
-    }
-    nfdu8char_t* result = nullptr;
-    const nfdfilteritem_t filters[] = {
-        {"Texture-pack archive", "zip,rtz"},
-    };
-    const nfdresult_t dialog = NFD_OpenDialogU8(&result, filters, 1, nullptr);
-    if (dialog != NFD_OKAY) {
-        if (dialog == NFD_ERROR) g_texture_pack_status = NFD_GetError();
+    return StartDialogJob([]() -> std::function<void()> {
+        if (NFD_Init() != NFD_OKAY) {
+            return [] {
+                g_texture_pack_status =
+                    "The system file picker could not be initialized.";
+            };
+        }
+        nfdu8char_t* result = nullptr;
+        const nfdfilteritem_t filters[] = {
+            {"Texture-pack archive", "zip,rtz"},
+        };
+        const nfdresult_t dialog =
+            NFD_OpenDialogU8(&result, filters, 1, nullptr);
+        std::filesystem::path source;
+        std::string error;
+        if (dialog == NFD_OKAY) {
+            source = std::filesystem::u8path(result);
+            NFD_FreePathU8(result);
+        } else if (dialog == NFD_ERROR) {
+            error = NFD_GetError();
+        }
         NFD_Quit();
-        return false;
-    }
-    const std::filesystem::path source = std::filesystem::u8path(result);
-    NFD_FreePathU8(result);
-    NFD_Quit();
-    StartTexturePackImport(source);
-    return true;
+        if (source.empty()) {
+            return [error] {
+                if (!error.empty()) g_texture_pack_status = error;
+            };
+        }
+        return [source] { StartTexturePackImport(source); };
+    });
 }
 
 bool ImportAdventureWithDialog() {
@@ -6278,6 +6416,9 @@ bool DrawGraphicsSettings(bool live) {
     profile_changed = ControlCombo("##presentation-profile", &profile,
                                    "Accurate\0Modern\0");
     if (profile_changed) {
+        // The player is choosing the profile by hand now; retire any note that
+        // Track Lab switched it for them.
+        g_track_lab_modern_notice.clear();
         const auto old_profile = dkr::runtime::enhancements::presentation_profile();
         if (old_profile == dkr::runtime::enhancements::PresentationProfile::Modern) {
             RememberModernGraphics(config);
@@ -6292,6 +6433,11 @@ bool DrawGraphicsSettings(bool live) {
         hpfb = static_cast<int>(config.hpfb_option);
         downsample = std::clamp(config.ds_option, 1, 4);
         changed = true;
+    }
+    if (!g_track_lab_modern_notice.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, kWarm);
+        ImGui::TextWrapped("%s", g_track_lab_modern_notice.c_str());
+        ImGui::PopStyleColor();
     }
     ImGui::Spacing();
     ImGui::TextUnformatted("Window mode");
@@ -7955,7 +8101,8 @@ void DrawTexturePackControls(float width) {
         "All\0Compatible\0Incompatible\0";
     constexpr const char* kTypeItems =
         "All\0Native RT64\0Rice / RT64 Bridge\0Legacy Rice\0Legacy Jabo\0";
-    constexpr const char* kVisibilityItems = "Visible\0All\0Hidden\0";
+    constexpr const char* kVisibilityItems =
+        "Visible\0All\0Hidden\0Track packs\0";
 
     struct FilterControl {
         const char* title;
@@ -8032,7 +8179,7 @@ void DrawTexturePackControls(float width) {
     filters.compatibility = static_cast<CompatibilityFilter>(
         std::clamp(g_texture_pack_compatibility_filter, 0, 2));
     filters.visibility = static_cast<VisibilityFilter>(
-        std::clamp(g_texture_pack_visibility_filter, 0, 2));
+        std::clamp(g_texture_pack_visibility_filter, 0, 3));
     switch (std::clamp(g_texture_pack_type_filter, 0, 4)) {
     case 1: filters.format = texture_packs::Format::NativeRt64; break;
     case 2: filters.format = texture_packs::Format::RiceRt64; break;
@@ -8059,7 +8206,7 @@ void DrawTexturePackControls(float width) {
         std::clamp(g_texture_pack_compatibility_filter, 0, 2);
     const int type_filter = std::clamp(g_texture_pack_type_filter, 0, 4);
     const int visibility_filter =
-        std::clamp(g_texture_pack_visibility_filter, 0, 2);
+        std::clamp(g_texture_pack_visibility_filter, 0, 3);
     const std::string query = g_texture_pack_search;
     if (browser_cache.library_generation != library_generation) {
         browser_cache.all = texture_packs::snapshot(true);
@@ -8092,7 +8239,7 @@ void DrawTexturePackControls(float width) {
     const bool stacked_actions = available_width < 430.0F;
     const float action_width = stacked_actions ? available_width :
         std::max((available_width - action_gap) * 0.5F, 1.0F);
-    ImGui::BeginDisabled(texture_import_running);
+    ImGui::BeginDisabled(texture_import_running || DialogJobRunning());
     if (ImGui::Button("IMPORT TEXTURE PACK", {action_width, 42.0F})) {
         ImportTexturePackWithDialog();
     }
@@ -8102,7 +8249,6 @@ void DrawTexturePackControls(float width) {
     }
     ImGui::EndDisabled();
 
-    bool request_manage_modal = false;
     if (shown_packs.empty()) {
         ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
         ImGui::TextWrapped(all_packs.empty()
@@ -8193,7 +8339,7 @@ void DrawTexturePackControls(float width) {
                                       {ImGui::GetContentRegionAvail().x,
                                        kManageHeight})) {
                         g_texture_pack_manage_id = pack.id;
-                        request_manage_modal = true;
+                        g_texture_pack_manage_request = true;
                     }
                 }
                 ImGui::EndChild();
@@ -8202,11 +8348,8 @@ void DrawTexturePackControls(float width) {
             ImGui::EndTable();
         }
     }
-    if (request_manage_modal) ImGui::OpenPopup("Manage texture pack");
-    const bool request_remove_modal =
-        DrawTexturePackManagementModal(all_packs);
-    if (request_remove_modal) ImGui::OpenPopup("Remove texture pack?");
-    DrawTexturePackRemovalModal();
+    // The single-pack modal is rendered once, in DrawModsHacks, so it works
+    // whether this section or Track Lab opened it.
 
     if (!g_texture_pack_status.empty()) {
         ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
@@ -8304,58 +8447,136 @@ void DrawMagicCodes(float width) {
     }
 }
 
-std::string g_track_import_status;
-
-// A track is a folder, not a file, so this is a folder picker rather than the
-// file picker the ROM and texture-pack flows use.
-void ImportTrackWithDialog() {
-    if (NFD_Init() != NFD_OKAY) {
-        g_track_import_status =
-            "The system folder picker could not be initialized.";
-        return;
+// The player points the folder picker at the track's .dkrmap, at its own
+// folder, or at the folder that holds both it and its <track>-hd.zip. This
+// turns any of those into the thing install() takes: a .dkrmap directory or a
+// .zip. Empty return means nothing usable was there.
+std::filesystem::path ResolveTrackSource(const std::filesystem::path& chosen) {
+    namespace fs = std::filesystem;
+    std::error_code code;
+    const std::string extension =
+        dkr::runtime::texture_browser::lower_ascii(chosen.extension().string());
+    if (extension == ".dkrmap" || extension == ".zip") {
+        return chosen;
     }
-    nfdu8char_t* result = nullptr;
-    const nfdresult_t dialog = NFD_PickFolderU8(&result, nullptr);
-    if (dialog == NFD_OKAY) {
-        const std::filesystem::path source = std::filesystem::u8path(result);
-        NFD_FreePathU8(result);
-        std::string error;
-        if (dkr::runtime::custom_tracks::install(source, error)) {
-            g_track_import_status =
-                "Installed " + source.filename().string() + ".";
-        } else {
-            g_track_import_status = error;
+    if (fs::is_regular_file(chosen / "manifest.json", code)) {
+        return chosen;   // a .dkrmap folder that is not named one
+    }
+    // A parent folder: take the single .dkrmap inside, else a lone track .zip.
+    fs::path dkrmap;
+    fs::path zip;
+    int dkrmap_count = 0;
+    for (const auto& item : fs::directory_iterator(chosen, code)) {
+        if (item.is_directory(code) &&
+            dkr::runtime::texture_browser::lower_ascii(
+                item.path().extension().string()) == ".dkrmap") {
+            dkrmap = item.path();
+            ++dkrmap_count;
+        } else if (zip.empty() && item.is_regular_file(code) &&
+                   dkr::runtime::texture_browser::lower_ascii(
+                       item.path().extension().string()) == ".zip") {
+            zip = item.path();
         }
-    } else if (dialog == NFD_ERROR) {
-        g_track_import_status = NFD_GetError();
     }
-    NFD_Quit();
+    if (dkrmap_count == 1) {
+        return dkrmap;
+    }
+    if (dkrmap_count == 0 && !zip.empty()) {
+        return zip;
+    }
+    return {};
+}
+
+// The second half of a track import, back on the UI thread: hand any HD pack to
+// the texture-pack worker, report, and switch to Modern when it has to.
+void FinishTrackImport(
+    const dkr::runtime::custom_tracks::InstallOutcome& outcome) {
+    namespace tracks_ns = dkr::runtime::custom_tracks;
+    if (!outcome.hd_pack_archive.empty()) {
+        const dkr::runtime::texture_packs::TrackPackOwner owner{
+            outcome.track_id, outcome.hd_pack_digest};
+        // The worker imports the pack (born enabled) and clears the temp.
+        // Importing inline instead would convert the pack on the graphics
+        // thread and stall it exactly as a picker does, so when a texture-pack
+        // import is already running, skip; the player can import the folder
+        // again once it is free.
+        if (StartTexturePackImport(outcome.hd_pack_archive, &owner,
+                                   outcome.temp_root)) {
+            g_track_import_status =
+                "Installed " + outcome.track_id +
+                " and its HD textures. Use Restart & play in HD to load them.";
+        } else {
+            tracks_ns::discard_install_temp(outcome.temp_root);
+            g_track_import_status =
+                "Installed " + outcome.track_id + ". Another texture-pack "
+                "import is already running - import this folder again in a "
+                "moment to pick up its HD textures.";
+        }
+    } else {
+        tracks_ns::discard_install_temp(outcome.temp_root);
+        g_track_import_status = outcome.hd_pack_mismatch
+            ? "Installed " + outcome.track_id +
+                  ". Its -hd.zip is from a different export and was left out - "
+                  "re-export the pair together."
+            : "Installed " + outcome.track_id + ".";
+    }
+
+    EnsureModernForTracks();
+}
+
+// A track is a folder or a zip, so this is a folder picker rather than a file
+// picker. The picker and the copy run on the dialog-job thread - see
+// StartDialogJob for why they must never run on the graphics thread - and
+// FinishTrackImport completes the import back on the UI thread.
+void ImportTrackWithDialog() {
+    const bool started = StartDialogJob([]() -> std::function<void()> {
+        namespace tracks_ns = dkr::runtime::custom_tracks;
+        std::filesystem::path chosen;
+        std::string error;
+        if (!PickFolder(chosen, error)) {
+            return [error] { g_track_import_status = error; };
+        }
+        const std::filesystem::path source = ResolveTrackSource(chosen);
+        if (source.empty()) {
+            return [] {
+                g_track_import_status =
+                    "Pick the track's .dkrmap, its folder, or the folder that "
+                    "holds both it and its -hd.zip.";
+            };
+        }
+        tracks_ns::InstallOutcome outcome;
+        if (!tracks_ns::install(source, error, &outcome)) {
+            return [error] { g_track_import_status = error; };
+        }
+        return [outcome] { FinishTrackImport(outcome); };
+    });
+    g_track_import_status = started
+        ? "Choose the track in the folder picker..."
+        : "A picker is already open.";
 }
 
 void ChooseWorkingFolderWithDialog() {
-    if (NFD_Init() != NFD_OKAY) {
-        g_track_import_status =
-            "The system folder picker could not be initialized.";
-        return;
-    }
-    nfdu8char_t* result = nullptr;
-    const nfdresult_t dialog = NFD_PickFolderU8(&result, nullptr);
-    if (dialog == NFD_OKAY) {
-        const std::filesystem::path chosen = std::filesystem::u8path(result);
-        NFD_FreePathU8(result);
+    const bool started = StartDialogJob([]() -> std::function<void()> {
+        std::filesystem::path chosen;
+        std::string error;
+        if (!PickFolder(chosen, error)) {
+            return [error] { g_track_import_status = error; };
+        }
         // The folder holds .dkrmap directories; it is not one itself. Accept
         // either, so picking the track folder by mistake still works.
         dkr::runtime::custom_tracks::set_working_directory(
             chosen.extension() == ".dkrmap" ? chosen.parent_path() : chosen);
         const std::size_t found =
             dkr::runtime::custom_tracks::tracks().size();
-        g_track_import_status =
-            found == 0 ? "No .dkrmap folders found there yet."
-                       : std::to_string(found) + " track(s) loaded.";
-    } else if (dialog == NFD_ERROR) {
-        g_track_import_status = NFD_GetError();
-    }
-    NFD_Quit();
+        return [found] {
+            g_track_import_status =
+                found == 0 ? "No .dkrmap folders found there yet."
+                           : std::to_string(found) + " track(s) loaded.";
+        };
+    });
+    g_track_import_status = started
+        ? "Choose the folder in the folder picker..."
+        : "A picker is already open.";
 }
 
 // Track Lab. Arming a track makes get_track_id_to_load resolve to it, so any
@@ -8363,8 +8584,19 @@ void ChooseWorkingFolderWithDialog() {
 // L+Z restart gives an authoring loop that never returns to a menu.
 void DrawTrackLabControls(float width) {
     namespace tracks_ns = dkr::runtime::custom_tracks;
+    namespace packs_ns = dkr::runtime::texture_packs;
     const std::vector<tracks_ns::Track> installed = tracks_ns::tracks();
     const std::string armed = tracks_ns::armed_track_id();
+    // The in-game overlay is the only place a full relaunch is meaningful; the
+    // launcher just starts the game, which publishes the texture table anyway.
+    const bool in_game = g_overlay_visible.load(std::memory_order_acquire);
+
+    if (!g_track_lab_modern_notice.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, kWarm);
+        ImGui::TextWrapped("%s", g_track_lab_modern_notice.c_str());
+        ImGui::PopStyleColor();
+        ImGui::Dummy({0.0F, 6.0F});
+    }
 
     // Two ways in, because they answer different questions. Importing takes a
     // snapshot, which is what you want for a track you intend to keep. While
@@ -8373,9 +8605,13 @@ void DrawTrackLabControls(float width) {
     const std::filesystem::path working = tracks_ns::working_directory();
     const float half = (width - 8.0F) * 0.5F;
 
+    // Only one picker at a time, and nothing that rescans while one is open.
+    const bool dialog_open = DialogJobRunning();
+    ImGui::BeginDisabled(dialog_open);
     if (ImGui::Button("SET WORKING FOLDER", {half, 34.0F})) {
         ChooseWorkingFolderWithDialog();
     }
+    ImGui::EndDisabled();
     ImGui::SameLine(0.0F, 8.0F);
     ImGui::BeginDisabled(working.empty());
     if (ImGui::Button("STOP WATCHING", {half, 34.0F})) {
@@ -8398,6 +8634,7 @@ void DrawTrackLabControls(float width) {
     // The authoring loop: export from the editor, rescan here, restart in
     // place with L+Z. Without this the only way to pick up a re-export is a
     // relaunch, which throws away the armed track and the auto boot state.
+    ImGui::BeginDisabled(dialog_open);
     if (ImGui::Button("RESCAN", {width, 28.0F})) {
         tracks_ns::reload();
         const std::size_t found = tracks_ns::tracks().size();
@@ -8409,6 +8646,7 @@ void DrawTrackLabControls(float width) {
     if (ImGui::Button("IMPORT A COPY", {width, 28.0F})) {
         ImportTrackWithDialog();
     }
+    ImGui::EndDisabled();
     ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
     ImGui::TextWrapped(
         "Copies a .dkrmap in to keep. A later re-export will not reach the "
@@ -8422,6 +8660,30 @@ void DrawTrackLabControls(float width) {
     }
     ImGui::Dummy({0.0F, 10.0F});
 
+    // The auto-boot control comes first, and outside the "no tracks" guard, so
+    // a setting left over from a since-removed track can always be turned off.
+    if (bool auto_boot = tracks_ns::auto_boot_enabled();
+        !installed.empty() || auto_boot || !armed.empty()) {
+        if (ImGui::Checkbox("Skip the menus on every launch", &auto_boot)) {
+            tracks_ns::set_auto_boot(auto_boot);
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
+        ImGui::TextWrapped(
+            "Boots past the logos, title, file select and character select "
+            "straight into the armed track, as Diddy, single player. Stays on "
+            "until you turn it off; quit a race to reach the menus, restart in "
+            "place with L+Z to reload it.");
+        ImGui::PopStyleColor();
+        if (!armed.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, kWarm);
+            ImGui::TextWrapped(
+                "Track Lab is active. Start any race and it loads the armed "
+                "track instead.");
+            ImGui::PopStyleColor();
+        }
+        ImGui::Dummy({0.0F, 10.0F});
+    }
+
     if (installed.empty()) {
         ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
         ImGui::TextWrapped("No custom tracks installed yet.");
@@ -8431,15 +8693,26 @@ void DrawTrackLabControls(float width) {
 
     ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
     ImGui::TextWrapped(
-        "Arming a track sends every race you start to it. Restart in place "
-        "with L+Z to reload after editing.");
+        "Arming a track sends every race you start to it. A track with HD "
+        "textures needs the Modern profile - arming or playing one switches "
+        "to it for you.");
     ImGui::PopStyleColor();
     ImGui::Dummy({0.0F, 8.0F});
 
     const float button_width = 132.0F;
+    const float manage_width = 84.0F;
     for (const tracks_ns::Track& track : installed) {
         const bool is_armed = !armed.empty() && armed == track.id;
         const std::int32_t level = tracks_ns::resolved_level_id(track.id);
+
+        const tracks_ns::HdPack hd = tracks_ns::hd_pack(track.id);
+        const bool declares_pack = !hd.file.empty();
+        const packs_ns::TrackPackState pack_state = declares_pack
+            ? packs_ns::track_pack_state(track.id, hd.digest)
+            : packs_ns::TrackPackState{};
+        const bool pack_ready = pack_state.installed && pack_state.enabled;
+        const bool published = tracks_ns::track_textures_published(track.id);
+        const bool needs_relaunch = pack_ready && !published;
 
         ImGui::PushID(track.id.c_str());
         ImGui::BeginGroup();
@@ -8462,6 +8735,7 @@ void DrawTrackLabControls(float width) {
         ImGui::EndGroup();
 
         ImGui::SameLine(width - button_width);
+        const bool play_in_hd = declares_pack && pack_ready;
         if (is_armed) {
             ImGui::PushStyleColor(ImGuiCol_Button,
                                   ImVec4{0.92F, 0.43F, 0.06F, 1.0F});
@@ -8469,35 +8743,71 @@ void DrawTrackLabControls(float width) {
                 tracks_ns::arm_track_override(std::string{});
             }
             ImGui::PopStyleColor();
-        } else if (ImGui::Button("RACE THIS", {button_width, 30.0F})) {
+        } else if (ImGui::Button(play_in_hd ? "PLAY IN HD" : "RACE THIS",
+                                 {button_width, 30.0F})) {
             tracks_ns::arm_track_override(track.id);
+            EnsureModernForTracks();
+            // From the launcher there is no process to relaunch, so skipping
+            // the menus on the coming boot is how the track's textures load.
+            if (needs_relaunch && !in_game) {
+                tracks_ns::set_auto_boot(true);
+            }
         }
+
+        // One status line per track, never a second panel.
+        if (declares_pack) {
+            const char* hd_line = nullptr;
+            ImVec4 hd_colour = kMuted;
+            if (pack_ready && published) {
+                hd_line = "HD textures: ready";
+                hd_colour = kAccent;
+            } else if (pack_ready) {
+                hd_line = "HD textures: restart to load";
+                hd_colour = kWarm;
+            } else if (hd.sibling_mismatch ||
+                       (pack_state.installed && !pack_state.digest_matches)) {
+                hd_line = "HD textures: pack does not match this export";
+                hd_colour = kWarm;
+            } else if (pack_state.installed) {
+                hd_line = "HD textures: pack disabled";
+            } else {
+                hd_line = "HD textures: pack not installed";
+            }
+            ImGui::PushStyleColor(ImGuiCol_Text, hd_colour);
+            ImGui::TextUnformatted(hd_line);
+            ImGui::PopStyleColor();
+            if (pack_state.installed) {
+                ImGui::SameLine(width - manage_width);
+                if (ImGui::Button("Manage", {manage_width, 22.0F})) {
+                    g_texture_pack_manage_id = pack_state.pack_id;
+                    g_texture_pack_manage_request = true;
+                }
+            }
+        }
+
+        // The one step no layout removes: the 3D texture table is published
+        // once at boot, so a track added since needs a relaunch. Make it one
+        // click that does the whole chain.
+        if (needs_relaunch && in_game) {
+            ImGui::Dummy({0.0F, 3.0F});
+            ImGui::PushStyleColor(ImGuiCol_Button, kAccent);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kWarm);
+            if (ImGui::Button("RESTART & PLAY IN HD", {width, 30.0F})) {
+                tracks_ns::arm_track_override(track.id);
+                EnsureModernForTracks();
+                tracks_ns::set_auto_boot(true);
+                SaveSettings();
+                g_lifecycle_request.store(
+                    dkr::runtime::ui::LifecycleRequest::Restart,
+                    std::memory_order_release);
+                g_overlay_visible.store(false, std::memory_order_release);
+            }
+            ImGui::PopStyleColor(2);
+        }
+
         ImGui::PopID();
-        ImGui::Dummy({0.0F, 6.0F});
+        ImGui::Dummy({0.0F, 8.0F});
     }
-
-    if (armed.empty()) {
-        return;
-    }
-
-    ImGui::PushStyleColor(ImGuiCol_Text, kWarm);
-    ImGui::TextWrapped(
-        "Track Lab is active. Start any race and it will load the armed "
-        "track instead.");
-    ImGui::PopStyleColor();
-    ImGui::Dummy({0.0F, 8.0F});
-
-    bool auto_boot = tracks_ns::auto_boot_enabled();
-    if (ImGui::Checkbox("Skip the menus on the next launch", &auto_boot)) {
-        tracks_ns::set_auto_boot(auto_boot);
-    }
-    ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
-    ImGui::TextWrapped(
-        "Boots past the logos, title, file select and character select "
-        "straight into the armed track, as Diddy, single player. Fires once "
-        "per launch; restart in place with L+Z to keep reloading, or quit to "
-        "return to the menus.");
-    ImGui::PopStyleColor();
 }
 
 void DrawModsHacks(float width) {
@@ -8544,34 +8854,36 @@ void DrawModsHacks(float width) {
     if (DrawDisclosureButton("TRACK LAB", "track-lab", track_lab_expanded,
                              width)) {
         ImGui::Dummy({0.0F, 6.0F});
-        if (dkr::runtime::enhancements::modern_presentation_enabled()) {
-            DrawTrackLabControls(width);
-        } else {
-            // Deliberately loud. This section is empty in Accurate, and a
-            // muted line here reads as "the feature is broken" rather than
-            // "the feature is elsewhere".
-            ImGui::PushStyleColor(ImGuiCol_Text, kWarm);
-            ImGui::TextWrapped("Track Lab needs the Modern profile.");
-            ImGui::PopStyleColor();
-            ImGui::Dummy({0.0F, 4.0F});
-            ImGui::TextWrapped(
-                "Open the GRAPHICS page and set Presentation to Modern, then "
-                "come back here. Custom tracks stay out of Accurate so it "
-                "remains the untouched regression baseline.");
-            const std::size_t installed =
-                dkr::runtime::custom_tracks::tracks().size();
-            ImGui::Dummy({0.0F, 4.0F});
+        // Track Lab draws in Accurate too - the list, import and arming. What
+        // stays impossible in Accurate is a custom track actually loading, and
+        // it still is: every arm/play path here goes through Modern first, so
+        // the "untouched regression baseline" is never a custom track.
+        if (!dkr::runtime::enhancements::modern_presentation_enabled()) {
             ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
-            if (installed == 0) {
-                ImGui::TextWrapped("No custom tracks are installed yet.");
-            } else if (installed == 1) {
-                ImGui::TextWrapped("1 custom track is installed and waiting.");
-            } else {
-                ImGui::Text("%zu custom tracks are installed and waiting.",
-                            installed);
-            }
+            ImGui::TextWrapped(
+                "You are on the Accurate profile. Importing, arming or playing "
+                "a track switches to Modern - it needs it - and tells you so. "
+                "Accurate itself stays the untouched reference.");
             ImGui::PopStyleColor();
+            ImGui::Dummy({0.0F, 6.0F});
         }
+        DrawTrackLabControls(width);
+    }
+
+    // One shared single-pack modal, reachable from a browser card's MANAGE
+    // button and from a Track Lab "Manage" line. Rendered here so it exists
+    // whichever section is expanded, and only touched when it might be open.
+    if (g_texture_pack_manage_request ||
+        ImGui::IsPopupOpen("Manage texture pack") ||
+        ImGui::IsPopupOpen("Remove texture pack?")) {
+        if (g_texture_pack_manage_request) {
+            ImGui::OpenPopup("Manage texture pack");
+            g_texture_pack_manage_request = false;
+        }
+        const bool request_remove_modal = DrawTexturePackManagementModal(
+            dkr::runtime::texture_packs::snapshot(true));
+        if (request_remove_modal) ImGui::OpenPopup("Remove texture pack?");
+        DrawTexturePackRemovalModal();
     }
 }
 
@@ -11365,6 +11677,7 @@ dkr::runtime::ui::StartupResult dkr::runtime::ui::run_startup_screen(
             ImGui::EndPopup();
         }
         ImGui::End();
+        PumpDialogJob();
         DrawTexturePackImportModal();
         DrawTextEntryKeyboard();
         DrawOnlineNotification();
@@ -11747,6 +12060,7 @@ void dkr::runtime::ui::draw(RT64::Application& application) {
         }
     ImGui::End();
     }
+    PumpDialogJob();
     DrawTexturePackImportModal();
     DrawTextEntryKeyboard();
     DrawFpsOverlay(application);

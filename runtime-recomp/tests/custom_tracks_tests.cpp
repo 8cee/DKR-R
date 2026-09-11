@@ -4,8 +4,12 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
+#include <utility>
 #include <vector>
+
+#include <miniz/miniz.h>
 
 using namespace dkr::runtime::custom_tracks;
 
@@ -18,6 +22,39 @@ constexpr std::int32_t kRetail[] = {0x0, 0x100, 0x250, 0x400, -1};
 void write_file(const std::filesystem::path& path, const std::string& text) {
     std::ofstream out(path, std::ios::binary);
     out.write(text.data(), static_cast<std::streamsize>(text.size()));
+}
+
+std::string read_file_text(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(in)),
+                       std::istreambuf_iterator<char>());
+}
+
+// A zip with the given (name, contents) entries. Names may carry '/'.
+void write_zip(
+    const std::filesystem::path& path,
+    const std::vector<std::pair<std::string, std::string>>& entries) {
+    std::filesystem::create_directories(path.parent_path());
+    mz_zip_archive zip{};
+    const bool opened =
+        mz_zip_writer_init_file(&zip, path.string().c_str(), 0) != MZ_FALSE;
+    assert(opened);
+    (void) opened;
+    for (const auto& [name, contents] : entries) {
+        const bool added = mz_zip_writer_add_mem(
+            &zip, name.c_str(), contents.data(), contents.size(),
+            MZ_BEST_COMPRESSION) != MZ_FALSE;
+        assert(added);
+        (void) added;
+    }
+    mz_zip_writer_finalize_archive(&zip);
+    mz_zip_writer_end(&zip);
+}
+
+std::string track_manifest(const std::string& id, const std::string& extra) {
+    return "{\"schemaVersion\":1,\"id\":\"" + id + "\",\"name\":\"" + id +
+           "\"," + extra +
+           "\"adds\":[{\"section\":\"LEVEL_HEADERS\",\"file\":\"h.bin\"}]}";
 }
 
 void write_track(const std::filesystem::path& root, const std::string& id,
@@ -515,6 +552,203 @@ int main() {
     }
     assert(tracks().size() == 1U);
     assert(tracks().front().id == "good");
+
+    // ------------------------------------------------------------------
+    // A track's high-resolution texture pack
+    // ------------------------------------------------------------------
+    //
+    // manifest.hdTexturePack names a <track>-hd.zip the exporter wrote beside
+    // the .dkrmap and the digest both files carry. The runtime reads the name
+    // and resolves the sibling; equal digests are what say the pack belongs to
+    // this export. Nothing here imports it - that is the UI layer's job.
+    std::filesystem::remove_all(root);
+    {
+        const std::filesystem::path dir = root / "hd.dkrmap";
+        std::filesystem::create_directories(dir);
+        write_file(dir / "manifest.json",
+                   track_manifest("hd",
+                                  "\"hdTexturePack\":{\"file\":\"hd-hd.zip\","
+                                  "\"textureDigest\":\"abc123\"},"));
+        write_file(dir / "h.bin", std::string(80U, 'h'));
+        write_zip(root / "hd-hd.zip",
+                  {{"dkr-r-track.json", "{\"textureDigest\":\"abc123\"}"},
+                   {"Diddy Kong Racing#0badf00d#0#2_all.png", "not a real png"}});
+    }
+    scan(root);
+    {
+        const HdPack pack = hd_pack("hd");
+        assert(pack.file == "hd-hd.zip");
+        assert(pack.digest == "abc123");
+        assert(!pack.sibling_archive.empty());
+        assert(!pack.sibling_mismatch);
+    }
+
+    // A pack from a different export - digest does not match - is flagged, not
+    // resolved: the track still plays, in 64x32.
+    write_zip(root / "hd-hd.zip",
+              {{"dkr-r-track.json", "{\"textureDigest\":\"deadbeef\"}"}});
+    scan(root);
+    {
+        const HdPack pack = hd_pack("hd");
+        assert(pack.sibling_archive.empty());
+        assert(pack.sibling_mismatch);
+    }
+
+    // Sibling absent entirely: the pack stays declared but there is nothing to
+    // resolve and nothing is wrong - no status line at all.
+    std::filesystem::remove(root / "hd-hd.zip");
+    scan(root);
+    {
+        const HdPack pack = hd_pack("hd");
+        assert(pack.file == "hd-hd.zip");
+        assert(pack.sibling_archive.empty());
+        assert(!pack.sibling_mismatch);
+    }
+
+    // A track that declares no pack reports nothing.
+    assert(hd_pack("good").file.empty());
+
+    // ------------------------------------------------------------------
+    // Installing from a .zip
+    // ------------------------------------------------------------------
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root / "install");
+
+    // A bare .zip of a .dkrmap layout.
+    write_zip(root / "bare.zip",
+              {{"manifest.json", track_manifest("bare", "")},
+               {"h.bin", std::string(72U, 'h')}});
+    scan(root / "install");
+    {
+        std::string install_error;
+        assert(install(root / "bare.zip", install_error));
+        // install() copies synchronously; a rescan while a level table is
+        // already built is deferred to the next build (as in game).
+        assert(std::filesystem::is_regular_file(
+            root / "install" / "bare.dkrmap" / "manifest.json"));
+        build_extended_table(Section::LevelHeaders, kRetail);
+        bool bare_installed = false;
+        for (const Track& track : tracks()) {
+            bare_installed = bare_installed || track.id == "bare";
+        }
+        assert(bare_installed);
+    }
+
+    // A .zip that wraps the .dkrmap AND its <track>-hd.zip. install() reports
+    // the pack for the caller to import, then hands back the temp to clean.
+    write_zip(root / "remix-hd.zip",
+              {{"dkr-r-track.json", "{\"textureDigest\":\"c0ffee\"}"},
+               {"Diddy Kong Racing#0badf00d#0#2_all.png", "not a real png"}});
+    const std::string remix_hd_bytes = read_file_text(root / "remix-hd.zip");
+    write_zip(root / "wrapper.zip",
+              {{"remix.dkrmap/manifest.json",
+                track_manifest("remix",
+                               "\"hdTexturePack\":{\"file\":\"remix-hd.zip\","
+                               "\"textureDigest\":\"c0ffee\"},")},
+               {"remix.dkrmap/h.bin", std::string(64U, 'h')},
+               {"remix-hd.zip", remix_hd_bytes}});
+    {
+        std::string install_error;
+        InstallOutcome outcome;
+        assert(install(root / "wrapper.zip", install_error, &outcome));
+        assert(outcome.track_id == "remix");
+        assert(outcome.hd_pack_digest == "c0ffee");
+        assert(!outcome.hd_pack_mismatch);
+        assert(!outcome.hd_pack_archive.empty());
+        assert(std::filesystem::is_regular_file(outcome.hd_pack_archive));
+        assert(!outcome.temp_root.empty());
+        // The .dkrmap is installed; the pack is NOT copied into custom-tracks/.
+        assert(std::filesystem::is_regular_file(
+            root / "install" / "remix.dkrmap" / "manifest.json"));
+        assert(!std::filesystem::exists(
+            root / "install" / "remix-hd.zip"));
+        build_extended_table(Section::LevelHeaders, kRetail);
+        bool remix_installed = false;
+        for (const Track& track : tracks()) {
+            remix_installed = remix_installed || track.id == "remix";
+        }
+        assert(remix_installed);
+        // The caller imports the pack, then discards the temp.
+        discard_install_temp(outcome.temp_root);
+        assert(!std::filesystem::exists(outcome.temp_root));
+    }
+
+    // ------------------------------------------------------------------
+    // track_textures_published
+    // ------------------------------------------------------------------
+    std::filesystem::remove_all(root);
+    {
+        const std::filesystem::path art = root / "pub.dkrmap";
+        std::filesystem::create_directories(art / "textures");
+        write_file(art / "manifest.json",
+                   "{\"schemaVersion\":1,\"id\":\"pub\",\"name\":\"Pub\","
+                   "\"adds\":[{\"section\":\"LEVEL_MODELS\",\"file\":\"m.bin\"},"
+                   "{\"section\":\"TEXTURES_3D\",\"file\":\"textures/0.bin\"}]}");
+        write_file(art / "m.bin", model_payload({kCustomTextureIdBase}));
+        write_file(art / "textures" / "0.bin", std::string(1056U, 'a'));
+
+        const std::filesystem::path plain = root / "plain.dkrmap";
+        std::filesystem::create_directories(plain);
+        write_file(plain / "manifest.json",
+                   track_manifest("plain", ""));
+        std::string header(200U, '\0');
+        header[0x37] = 73;
+        header[0xBB] = 5;
+        write_file(plain / "h.bin", header);
+    }
+    scan(root);
+    assert(tracks().size() == 2U);
+    // Nothing is published until the once-per-boot table is built.
+    assert(!track_textures_published("pub"));
+    build_extended_table(Section::Textures3D, kTextures);
+    assert(track_textures_published("pub"));     // shipped a texture, table has it
+    assert(!track_textures_published("plain"));  // ships none of its own
+
+    // ------------------------------------------------------------------
+    // The armed track and auto-boot setting persist across a relaunch
+    // ------------------------------------------------------------------
+    std::filesystem::remove_all(root);
+    {
+        const std::filesystem::path dir = root / "persist" / "p.dkrmap";
+        std::filesystem::create_directories(dir);
+        write_file(dir / "manifest.json", track_manifest("p", ""));
+        write_file(dir / "h.bin", std::string(64U, 'h'));
+    }
+    arm_track_override(std::string{});
+    set_auto_boot(false);
+    scan(root / "persist");
+    assert(tracks().size() == 1U);
+
+    // Arming and enabling auto-boot writes the sidecar.
+    arm_track_override("p");
+    set_auto_boot(true);
+    {
+        const std::string state =
+            read_file_text(root / "custom-tracks-state.txt");
+        assert(state.find("armed=p") != std::string::npos);
+        assert(state.find("auto_boot=1") != std::string::npos);
+    }
+
+    // Clear the in-memory state, then prove a scan reloads it from disk - which
+    // is what the relaunch after "Restart & play in HD" relies on.
+    arm_track_override(std::string{});
+    set_auto_boot(false);
+    assert(armed_track_id().empty());
+    assert(!auto_boot_enabled());
+    write_file(root / "custom-tracks-state.txt", "armed=p\nauto_boot=1\n");
+    scan(root / "persist");
+    assert(armed_track_id() == "p");
+    assert(auto_boot_enabled());
+
+    // consume_auto_boot is the per-launch one-shot; the setting stays on.
+    assert(consume_auto_boot());
+    assert(!consume_auto_boot());
+    assert(auto_boot_enabled());
+
+    // Turning both off removes the sidecar.
+    set_auto_boot(false);
+    arm_track_override(std::string{});
+    assert(!std::filesystem::exists(root / "custom-tracks-state.txt"));
 
     std::filesystem::remove_all(root);
     std::printf("custom_tracks_tests: ok\n");

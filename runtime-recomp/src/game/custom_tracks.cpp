@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -9,6 +11,7 @@
 #include <utility>
 
 #include <json/json.hpp>
+#include <miniz/miniz.h>
 #include <unordered_map>
 
 namespace {
@@ -54,8 +57,12 @@ struct SectionState {
 // Track Lab's armed track, by manifest id. Guarded by g_mutex because
 // resolving it reads the same table that build_extended_table writes; the
 // lookup happens once per level load, so the lock is never contended.
+// g_armed_track and g_auto_boot persist to custom-tracks-state.txt so the full
+// relaunch that publishes a just-installed track's textures lands back on the
+// track. g_auto_boot_consumed is the per-launch one-shot and is never written.
 std::string g_armed_track;
 bool g_auto_boot = false;
+bool g_auto_boot_consumed = false;
 
 std::mutex g_mutex;
 std::vector<Track> g_tracks;
@@ -278,8 +285,10 @@ std::int32_t own_texture_index(const std::string& track_id,
 
 namespace dkr::runtime::custom_tracks {
 
-// Defined below; assumes g_mutex is already held.
+// Defined below; all assume g_mutex is already held.
 void scan_locked(const std::filesystem::path& directory);
+void save_state_locked();   // writes armed track + auto boot to disk
+void load_state_locked();   // reads them back, called from scan_locked
 
 std::vector<Track> tracks() {
     std::scoped_lock lock(g_mutex);
@@ -308,12 +317,44 @@ std::int32_t resolved_level_id(const std::string& track_id) {
     return found == g_resolved_level_ids.end() ? -1 : found->second;
 }
 
+HdPack hd_pack(const std::string& track_id) {
+    std::scoped_lock lock(g_mutex);
+    for (const Track& track : g_tracks) {
+        if (track.id != track_id) {
+            continue;
+        }
+        HdPack pack;
+        pack.file = track.hd_pack_file;
+        pack.digest = track.hd_pack_digest;
+        pack.sibling_archive = track.hd_pack_sibling;
+        pack.sibling_mismatch = track.hd_pack_sibling_mismatch;
+        return pack;
+    }
+    return {};
+}
+
+bool track_textures_published(const std::string& track_id) {
+    std::scoped_lock lock(g_mutex);
+    const SectionState& textures =
+        g_sections[section_slot(Section::Textures3D)];
+    if (!textures.built) {
+        return false;
+    }
+    for (const AddedEntry& added : textures.added) {
+        if (added.track_id == track_id) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void arm_track_override(std::string track_id) {
     std::scoped_lock lock(g_mutex);
     if (g_armed_track == track_id) {
         return;
     }
     g_armed_track = std::move(track_id);
+    save_state_locked();
     if (g_armed_track.empty()) {
         std::fprintf(stderr, "[custom-tracks] track override cleared\n");
     } else {
@@ -333,6 +374,9 @@ void set_auto_boot(bool enabled) {
         return;
     }
     g_auto_boot = enabled;
+    // A fresh toggle re-arms this launch's one-shot; disabling clears it.
+    g_auto_boot_consumed = false;
+    save_state_locked();
     std::fprintf(stderr, "[custom-tracks] auto boot %s\n",
                  enabled ? "enabled" : "disabled");
 }
@@ -344,10 +388,12 @@ bool auto_boot_enabled() {
 
 bool consume_auto_boot() {
     std::scoped_lock lock(g_mutex);
-    if (!g_auto_boot) {
+    if (!g_auto_boot || g_auto_boot_consumed) {
         return false;
     }
-    g_auto_boot = false;
+    // The persisted flag stays on - it fires again on the next launch, until
+    // the player turns it off - so only the per-launch one-shot is spent here.
+    g_auto_boot_consumed = true;
     std::fprintf(stderr, "[custom-tracks] auto boot fired\n");
     return true;
 }
@@ -542,6 +588,132 @@ bool read_file(const std::filesystem::path& path,
     return read == bytes.size();
 }
 
+std::string lower_extension(const std::filesystem::path& path) {
+    std::string extension = path.extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+                   [](unsigned char character) {
+                       return static_cast<char>(std::tolower(character));
+                   });
+    return extension;
+}
+
+// One entry out of a zip, into `bytes`. False when the zip or entry is missing.
+// Used for the pack stamp; the payloads a track ships are plain files.
+bool read_zip_entry(const std::filesystem::path& zip_path,
+                    const char* entry_name,
+                    std::vector<std::uint8_t>& bytes) {
+    mz_zip_archive zip{};
+    if (mz_zip_reader_init_file(&zip, zip_path.string().c_str(), 0) == MZ_FALSE) {
+        return false;
+    }
+    std::size_t size = 0;
+    void* data = mz_zip_reader_extract_file_to_heap(&zip, entry_name, &size, 0);
+    mz_zip_reader_end(&zip);
+    if (data == nullptr) {
+        return false;
+    }
+    const auto* first = static_cast<const std::uint8_t*>(data);
+    bytes.assign(first, first + size);
+    mz_free(data);
+    return true;
+}
+
+// The textureDigest stamped into a <track>-hd.zip by the Blender export
+// (rice_pack.STAMP_NAME). Equal to the track manifest's hdTexturePack digest
+// exactly when the pack is from this export of this track.
+bool read_hd_pack_digest(const std::filesystem::path& archive,
+                         std::string& digest) {
+    std::vector<std::uint8_t> bytes;
+    if (!read_zip_entry(archive, "dkr-r-track.json", bytes)) {
+        return false;
+    }
+    const nlohmann::json stamp = nlohmann::json::parse(
+        bytes.begin(), bytes.end(), nullptr, false);
+    if (stamp.is_discarded() || !stamp.is_object()) {
+        return false;
+    }
+    digest = stamp.value("textureDigest", std::string{});
+    return !digest.empty();
+}
+
+// Unpacks every entry of `zip_path` under `destination`. Rejects absolute
+// paths and `..` so an archive can never write outside the target directory.
+bool extract_zip(const std::filesystem::path& zip_path,
+                 const std::filesystem::path& destination,
+                 std::string& error) {
+    mz_zip_archive zip{};
+    if (mz_zip_reader_init_file(&zip, zip_path.string().c_str(), 0) == MZ_FALSE) {
+        error = "the .zip could not be opened";
+        return false;
+    }
+    const mz_uint count = mz_zip_reader_get_num_files(&zip);
+    for (mz_uint index = 0; index < count; ++index) {
+        mz_zip_archive_file_stat stat{};
+        if (mz_zip_reader_file_stat(&zip, index, &stat) == MZ_FALSE) {
+            continue;
+        }
+        std::string name = stat.m_filename;
+        if (name.empty() || name.front() == '/' || name.front() == '\\' ||
+            name.find("..") != std::string::npos ||
+            (name.size() > 1U && name[1] == ':')) {
+            mz_zip_reader_end(&zip);
+            error = "the .zip contains an unsafe path";
+            return false;
+        }
+        const std::filesystem::path target =
+            destination / std::filesystem::u8path(name);
+        std::error_code code;
+        if (mz_zip_reader_is_file_a_directory(&zip, index) == MZ_TRUE) {
+            std::filesystem::create_directories(target, code);
+            continue;
+        }
+        std::filesystem::create_directories(target.parent_path(), code);
+        if (mz_zip_reader_extract_to_file(
+                &zip, index, target.string().c_str(), 0) == MZ_FALSE) {
+            mz_zip_reader_end(&zip);
+            error = "the .zip could not be fully extracted";
+            return false;
+        }
+    }
+    mz_zip_reader_end(&zip);
+    return true;
+}
+
+// In an unpacked zip under `root`, finds the .dkrmap. A manifest.json at the
+// root means the zip was a bare .dkrmap (no wrapped pack). Otherwise the track
+// is one folder down and the wrapper's <track>-hd.zip is a *.zip beside it,
+// still under `root`. Returns false when no manifest is found.
+bool locate_unpacked_track(const std::filesystem::path& root,
+                           std::filesystem::path& track_dir,
+                           std::filesystem::path& hd_pack) {
+    std::error_code code;
+    if (std::filesystem::is_regular_file(root / "manifest.json", code)) {
+        track_dir = root;
+        return true;
+    }
+    for (const auto& item :
+         std::filesystem::directory_iterator(root, code)) {
+        if (item.is_directory(code) &&
+            std::filesystem::is_regular_file(
+                item.path() / "manifest.json", code)) {
+            track_dir = item.path();
+            break;
+        }
+    }
+    if (track_dir.empty()) {
+        return false;
+    }
+    for (const auto& item :
+         std::filesystem::directory_iterator(root, code)) {
+        if (item.is_regular_file(code) &&
+            lower_extension(item.path()) == ".zip") {
+            hd_pack = item.path();
+            break;
+        }
+    }
+    return true;
+}
+
 // Parses one unpacked track. `.dkrmap` archives are unpacked into this form by
 // the importer; the directory form is also what an author edits in place, so
 // reload() can pick up an editor's save without a repack.
@@ -571,6 +743,20 @@ bool parse_track(const std::filesystem::path& root, Track& track,
     if (track.id.empty()) {
         error = "manifest.json has no id";
         return false;
+    }
+
+    // Informational: the exporter records which <track>-hd.zip it wrote beside
+    // the package, and the digest both files carry. Read the keys it knows and
+    // nothing else. The file names a sibling, so it must be a bare filename.
+    const auto hd = manifest.find("hdTexturePack");
+    if (hd != manifest.end() && hd->is_object()) {
+        const std::string file = hd->value("file", std::string{});
+        if (!file.empty() && file.find("..") == std::string::npos &&
+            file.find('/') == std::string::npos &&
+            file.find('\\') == std::string::npos) {
+            track.hd_pack_file = file;
+            track.hd_pack_digest = hd->value("textureDigest", std::string{});
+        }
     }
 
     const auto adds = manifest.find("adds");
@@ -714,6 +900,63 @@ std::filesystem::path working_setting_file() {
         : g_directory.parent_path() / "custom-tracks-path.txt";
 }
 
+std::filesystem::path state_setting_file() {
+    return g_directory.empty()
+        ? std::filesystem::path{}
+        : g_directory.parent_path() / "custom-tracks-state.txt";
+}
+
+} // namespace
+
+// The armed track and the auto-boot setting outlive the process: the relaunch
+// that publishes a just-installed track's textures has to land back on it.
+// Both assume g_mutex is held.
+void save_state_locked() {
+    const std::filesystem::path file = state_setting_file();
+    if (file.empty()) {
+        return;
+    }
+    std::error_code code;
+    if (g_armed_track.empty() && !g_auto_boot) {
+        std::filesystem::remove(file, code);
+        return;
+    }
+    std::ofstream out(file, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        return;
+    }
+    out << "armed=" << g_armed_track << "\n"
+        << "auto_boot=" << (g_auto_boot ? 1 : 0) << "\n";
+}
+
+void load_state_locked() {
+    std::vector<std::uint8_t> bytes;
+    if (!read_file(state_setting_file(), bytes)) {
+        return;
+    }
+    const std::string text(bytes.begin(), bytes.end());
+    std::size_t pos = 0;
+    while (pos < text.size()) {
+        std::size_t end = text.find('\n', pos);
+        if (end == std::string::npos) {
+            end = text.size();
+        }
+        std::string line = text.substr(pos, end - pos);
+        pos = end + 1;
+        while (!line.empty() &&
+               (line.back() == '\r' || line.back() == ' ')) {
+            line.pop_back();
+        }
+        if (line.rfind("armed=", 0) == 0) {
+            g_armed_track = line.substr(6);
+        } else if (line.rfind("auto_boot=", 0) == 0) {
+            g_auto_boot = line.substr(10) == "1";
+        }
+    }
+}
+
+namespace {
+
 // Appends every *.dkrmap in one directory. Called for the install directory
 // and, when set, for the author's working directory.
 void scan_one(const std::filesystem::path& directory, const char* label) {
@@ -735,6 +978,27 @@ void scan_one(const std::filesystem::path& directory, const char* label) {
                          error.c_str());
             continue;
         }
+
+        // Resolve the HD pack sibling against the folder this track was read
+        // from. For an installed copy that folder is the install directory and
+        // the pack is not there - install() handed it to the importer already;
+        // for a working folder the sibling the exporter just wrote is present.
+        if (!track.hd_pack_file.empty()) {
+            const std::filesystem::path sibling =
+                item.path().parent_path() / track.hd_pack_file;
+            std::error_code sib;
+            if (std::filesystem::is_regular_file(sibling, sib)) {
+                std::string digest;
+                if (read_hd_pack_digest(sibling, digest) &&
+                    digest == track.hd_pack_digest &&
+                    !track.hd_pack_digest.empty()) {
+                    track.hd_pack_sibling = sibling;
+                } else {
+                    track.hd_pack_sibling_mismatch = true;
+                }
+            }
+        }
+
         // Ids key every cross-reference: which level a track resolves to, and
         // which object map a header is pointed at. Two tracks sharing one id
         // make those lookups pick an arbitrary winner, so a header can end up
@@ -791,6 +1055,10 @@ void scan_locked(const std::filesystem::path& directory) {
         }
     }
 
+    // Restore the armed track and auto-boot setting for the same reason: a
+    // relaunch is how a just-installed track's textures get published.
+    load_state_locked();
+
     scan_one(directory, "installed");
     if (g_working_directory != directory) {
         scan_one(g_working_directory, "working folder");
@@ -831,7 +1099,16 @@ std::filesystem::path directory() {
     return g_directory;
 }
 
-bool install(const std::filesystem::path& source, std::string& error) {
+void discard_install_temp(const std::filesystem::path& temp_root) {
+    if (temp_root.empty()) {
+        return;
+    }
+    std::error_code code;
+    std::filesystem::remove_all(temp_root, code);
+}
+
+bool install(const std::filesystem::path& source, std::string& error,
+             InstallOutcome* outcome) {
     std::filesystem::path destination_root;
     {
         std::scoped_lock lock(g_mutex);
@@ -843,39 +1120,103 @@ bool install(const std::filesystem::path& source, std::string& error) {
     }
 
     std::error_code code;
-    if (!std::filesystem::is_directory(source, code)) {
-        error = "A track is a .dkrmap folder, not a single file.";
+
+    // A track arrives one of three ways: the .dkrmap folder itself, a .zip of
+    // that folder, or a .zip that also wraps the <track>-hd.zip beside it. The
+    // zip forms are unpacked to a temp directory and handled as the folder
+    // case; the wrapped pack, when present, is reported for the caller to
+    // import before it calls discard_install_temp().
+    std::filesystem::path track_dir = source;
+    std::filesystem::path temp_root;
+    std::filesystem::path wrapped_hd_pack;
+
+    if (std::filesystem::is_regular_file(source, code) &&
+        lower_extension(source) == ".zip") {
+        temp_root = destination_root.parent_path() /
+            (".custom-track-import-" +
+             std::to_string(std::chrono::steady_clock::now()
+                                .time_since_epoch()
+                                .count()));
+        std::filesystem::remove_all(temp_root, code);
+        std::filesystem::create_directories(temp_root, code);
+        std::string extract_error;
+        if (!extract_zip(source, temp_root, extract_error)) {
+            discard_install_temp(temp_root);
+            error = "That .zip is not a track: " + extract_error + ".";
+            return false;
+        }
+        if (!locate_unpacked_track(temp_root, track_dir, wrapped_hd_pack)) {
+            discard_install_temp(temp_root);
+            error = "That .zip does not contain a .dkrmap track.";
+            return false;
+        }
+    } else if (!std::filesystem::is_directory(source, code)) {
+        error = "A track is a .dkrmap folder or a .zip of one.";
         return false;
-    }
-    if (source.extension() != ".dkrmap") {
+    } else if (source.extension() != ".dkrmap") {
         error = "That folder is not named *.dkrmap.";
         return false;
     }
-    if (!std::filesystem::is_regular_file(source / "manifest.json", code)) {
-        error = "That folder has no manifest.json.";
+
+    if (!std::filesystem::is_regular_file(track_dir / "manifest.json", code)) {
+        discard_install_temp(temp_root);
+        error = "That track has no manifest.json.";
         return false;
     }
 
     // Parse before copying so a broken track is rejected rather than installed
     // and then reported as skipped on the next scan.
     Track probe;
-    if (!parse_track(source, probe, error)) {
+    if (!parse_track(track_dir, probe, error)) {
+        discard_install_temp(temp_root);
         return false;
     }
 
-    const std::filesystem::path destination =
-        destination_root / source.filename();
+    // A zip's inner folder can be named anything; fall back to the manifest id.
+    const std::string folder_name =
+        track_dir.extension() == ".dkrmap"
+            ? track_dir.filename().string()
+            : probe.id + ".dkrmap";
+    const std::filesystem::path destination = destination_root / folder_name;
     std::filesystem::create_directories(destination_root, code);
     if (std::filesystem::exists(destination, code)) {
         std::filesystem::remove_all(destination, code);
     }
-    std::filesystem::copy(source, destination,
+    std::filesystem::copy(track_dir, destination,
                           std::filesystem::copy_options::recursive, code);
     if (code) {
+        discard_install_temp(temp_root);
         error = "Could not copy the track: " + code.message();
         return false;
     }
 
+    if (outcome != nullptr) {
+        *outcome = InstallOutcome{};
+        outcome->track_id = probe.id;
+        outcome->hd_pack_digest = probe.hd_pack_digest;
+        if (!probe.hd_pack_file.empty()) {
+            // Beside the source on disk, or lifted out of the wrapper zip.
+            const std::filesystem::path sibling =
+                wrapped_hd_pack.empty()
+                    ? source.parent_path() / probe.hd_pack_file
+                    : wrapped_hd_pack;
+            std::string digest;
+            if (std::filesystem::is_regular_file(sibling, code)) {
+                if (read_hd_pack_digest(sibling, digest) &&
+                    !probe.hd_pack_digest.empty() &&
+                    digest == probe.hd_pack_digest) {
+                    outcome->hd_pack_archive = sibling;
+                    // The caller imports from here, then cleans the temp up.
+                    outcome->temp_root = temp_root;
+                    temp_root.clear();
+                } else {
+                    outcome->hd_pack_mismatch = true;
+                }
+            }
+        }
+    }
+
+    discard_install_temp(temp_root);
     reload();
     error.clear();
     return true;

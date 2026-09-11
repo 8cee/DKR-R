@@ -1077,6 +1077,7 @@ if(BUILD_TESTING)
         add_executable(DKRCustomTracksTests
             tests/custom_tracks_tests.cpp
             src/game/custom_tracks.cpp
+            "${DKR_RT64_SOURCE}/src/contrib/miniz/miniz.c"
         )
         target_include_directories(DKRCustomTracksTests PRIVATE
             "${CMAKE_CURRENT_LIST_DIR}/src/game"

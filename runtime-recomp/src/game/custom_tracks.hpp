@@ -110,6 +110,12 @@ struct Track {
     std::filesystem::path source;
     std::vector<Entry> entries;
     bool enabled = true;
+    // manifest.hdTexturePack, and the sibling archive resolved at scan time.
+    // See "A track's high-resolution texture pack" below.
+    std::string hd_pack_file;                 // hdTexturePack.file, "" when none
+    std::string hd_pack_digest;               // hdTexturePack.textureDigest
+    std::filesystem::path hd_pack_sibling;    // matched <track>-hd.zip, else empty
+    bool hd_pack_sibling_mismatch = false;    // sibling present, digest differs
 };
 
 // Scans `directory` for *.dkrmap archives and parses their manifests. Invalid
@@ -130,9 +136,32 @@ void scan(const std::filesystem::path& directory);
 void set_working_directory(const std::filesystem::path& directory);
 [[nodiscard]] std::filesystem::path working_directory();
 
-// Copies a *.dkrmap directory into the install location and rescans. Returns
-// false with a reason in `error` when the source is not a track.
-bool install(const std::filesystem::path& source, std::string& error);
+// What install() found beside the track, for the caller to finish wiring up.
+// The HD-pack import itself runs in the UI layer, which can see texture_packs;
+// this module deliberately cannot (its unit test builds it on its own).
+struct InstallOutcome {
+    std::string track_id;
+    // A <track>-hd.zip the track declares that was found with a matching
+    // digest, ready for texture_packs::import_archive. Empty when the track
+    // declares no pack, or the sibling was absent or from another export.
+    std::filesystem::path hd_pack_archive;
+    std::string hd_pack_digest;           // manifest digest, for import idempotence
+    bool hd_pack_mismatch = false;        // sibling present but from another export
+    // Set when hd_pack_archive points inside a temporary unpacking of a wrapper
+    // zip. The caller imports the pack, then calls discard_install_temp(this).
+    std::filesystem::path temp_root;
+};
+
+// Installs a track into the install location and rescans. `source` may be the
+// *.dkrmap directory, a *.zip of that directory, or a *.zip that also wraps the
+// <track>-hd.zip beside it. Returns false with a reason in `error` when the
+// source is not a track. `outcome`, when given, reports the HD pack sibling.
+bool install(const std::filesystem::path& source, std::string& error,
+             InstallOutcome* outcome = nullptr);
+
+// Removes a temporary directory reported in InstallOutcome::temp_root. A no-op
+// for an empty path.
+void discard_install_temp(const std::filesystem::path& temp_root);
 
 // Returns a snapshot. The UI thread reads this while an authoring reload can
 // be replacing the backing vector, so a reference would dangle.
@@ -149,6 +178,40 @@ void reload();
 // when the track is disabled or contributes no header.
 [[nodiscard]] std::int32_t resolved_level_id(const std::string& track_id);
 
+// ---------------------------------------------------------------------------
+// A track's high-resolution texture pack
+// ---------------------------------------------------------------------------
+//
+// The Blender export writes each of a track's own pictures twice: the 64x32
+// the console can load, inside the .dkrmap, and the author's full-resolution
+// original in a Rice pack named <track>-hd.zip, written BESIDE the .dkrmap
+// (HD_TEXTURE_PLAN.md keeps the two files separate so a track can be shipped
+// without the pack). manifest.json names the pack and carries a digest of the
+// payloads it was built from; the pack's own dkr-r-track.json carries the same
+// digest. Equal digests are what prove a pack belongs to this export of this
+// track. Nothing here imports or enables the pack - that is the UI layer's
+// job, next to texture_packs - this only reports what is on disk.
+struct HdPack {
+    std::string file;                        // hdTexturePack.file ("" when none)
+    std::string digest;                      // hdTexturePack.textureDigest
+    std::filesystem::path sibling_archive;   // <track>-hd.zip beside the source,
+                                             // digest matched; else empty
+    bool sibling_mismatch = false;           // sibling present but another export
+};
+
+// The HD pack the given track declares, resolved against the folder it was
+// scanned from. A track scanned from the install copy has no sibling there
+// (install() handed its pack to the importer separately); a track watched in a
+// working folder has the sibling the exporter just wrote.
+[[nodiscard]] HdPack hd_pack(const std::string& track_id);
+
+// True once the once-per-boot 3D texture table has been published with this
+// track's own texture entries in it. False means the track joined after that
+// table was built, so nothing it draws - the HD pack or the 64x32 in the
+// .dkrmap - can load until DKR-R is relaunched. Always false for a track that
+// ships no artwork of its own.
+[[nodiscard]] bool track_textures_published(const std::string& track_id);
+
 // Track Lab: force every level load to resolve to one level id, so an author
 // can reach a track without walking the retail menus for it.
 //
@@ -164,6 +227,10 @@ void reload();
 // track receives is only known once the extended table has been built - which
 // happens on the first level load, long after the launcher has drawn its list.
 // Resolution is therefore deferred to the moment the game asks.
+//
+// The armed track persists beside the settings (custom-tracks-state.txt), so
+// the full relaunch that loads a just-installed track's artwork lands back on
+// it rather than the retail menus. An empty string clears it and the file.
 inline constexpr std::int32_t kNoTrackOverride = -1;
 
 void arm_track_override(std::string track_id);   // empty string disarms
@@ -181,10 +248,15 @@ void arm_track_override(std::string track_id);   // empty string disarms
 // It fires once per launch. Restarting in place with L+Z keeps reloading the
 // same track, while quitting still returns to the menus rather than trapping
 // the player in a loop they cannot leave.
+//
+// The setting persists beside the settings (custom-tracks-state.txt): it stays
+// on across relaunches until the player turns it off, so a track installed
+// once boots straight in on every launch after that. consume_auto_boot() is
+// the per-launch one-shot; the persisted flag is untouched by it.
 void set_auto_boot(bool enabled);
 [[nodiscard]] bool auto_boot_enabled();
 
-// Returns true exactly once while auto boot is armed, then disarms it.
+// Returns true exactly once per launch while auto boot is enabled.
 [[nodiscard]] bool consume_auto_boot();
 
 // Builds the replacement table for `section` from the retail table (terminated
