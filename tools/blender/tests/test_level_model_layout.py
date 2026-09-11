@@ -153,6 +153,46 @@ def check_rebuilt_round_trip(path):
     return "the model changed but no differing part was found"
 
 
+def check_facets_match_retail(path):
+    """The generated collision facets are the ones retail ships.
+
+    They are authored adjacency the loader reads, not scratch it fills, so a
+    rebuilt layout has to write them - and writing them wrongly would bound
+    every triangle wrongly. The rule is held to retail's own data: 99.6% of
+    all facets match, and the lowest single model, Snowflake Mountain Hub, is
+    at 91% - 167 edges it leaves as walls where the game's rule joins them, for
+    a reason not found yet. Ninety per cent per model is the floor.
+    """
+    with open(path, "rb") as handle:
+        blob = level_model.decompress(handle.read())
+    model = level_model.parse(blob)
+    same = total = 0
+    for segment in model.segments:
+        mine = level_model_layout.collision_facets(segment)
+        for face, triangle in enumerate(segment.triangles):
+            if triangle[0] & level_model_layout.TRI_FLAG_NO_COLLISION:
+                continue
+            at = segment.collision_facets_ptr + face * level_model_layout.FACET_SIZE
+            total += 1
+            same += blob[at:at + 8] == mine[face * 8:face * 8 + 8]
+    if total and same < 0.90 * total:
+        return "only %d of %d facets match retail" % (same, total)
+    return None
+
+
+def check_rebuilt_facets(path):
+    """A rebuilt layout writes the facets rather than leaving them zeroed."""
+    model = load(path)
+    level_model_layout.rebuild(model)
+    payload = level_model_encoder.encode(model)
+    for segment in level_model.parse(payload).segments:
+        start = segment.collision_facets_ptr
+        written = payload[start:start + len(segment.triangles) * 8]
+        if written != level_model_layout.collision_facets(segment):
+            return "segment %d's collision facets were not written" % segment.index
+    return None
+
+
 def check_added_triangle(path):
     """Adding a face must be refused in place and accepted by the builder."""
     model = load(path)
@@ -467,6 +507,8 @@ CASES = (
     ("a rebuilt layout round trips", check_rebuilt_round_trip),
     ("an added face is built, not patched", check_added_triangle),
     ("every model fits the memory budget", check_budget),
+    ("collision facets follow retail's rule", check_facets_match_retail),
+    ("a rebuilt layout writes the facets", check_rebuilt_facets),
     ("degenerate triangles survive", check_degenerate_carried),
     ("out-of-range values are refused", check_range_refusals),
     ("collision pressure is calibrated", check_collision_pressure),

@@ -230,28 +230,43 @@ model, the region from `unkC` to EOF is the sum of `numberOfTriangles * 8` plus
 a little slack: Jungle Falls 20,740 against 20,736, Ancient Lake 9,316 against
 9,248.
 
-The *contents* are uninitialised — whatever the build machine left there — and
-`track_init_collision` fills them at load. `collisionPlanes` genuinely is
-runtime-only: the loader assigns it from the scratch arena past `modelSize`,
-never from the file.
+The *contents* are **authored, not uninitialised** — an earlier version of this
+section said otherwise, and an encoder that believed it shipped tracks a racer
+falls through. Each 8-byte `CollisionFacetPlanes` holds a triangle's
+`basePlaneIndex` and, for each of its three edges, the plane index of the
+triangle across that edge — its own index for an edge with no neighbour. In
+retail, Ancient Lake's first triangle is `(0, 5, 0, 2)`.
 
-**An encoder therefore never computes collision, but it must reserve the facet
-array and write correct offsets to it.** It only decides which batches are
-solid. The game derives both from the triangles:
+`track_init_collision` (`tracks.c:3064-3223`) derives one plane per triangle
+(skipping `TRI_FLAG_80`) into `collisionPlanes`, which genuinely is
+runtime-only — assigned from the scratch arena past `modelSize`, never from the
+file. Then it **reads** each facet: for every edge it takes the neighbour's
+plane and builds the plane bounding that edge — the bisector of the two, or,
+for an edge naming its own triangle, a wall straight up from the edge — and
+rewrites the edge entry with the plane it made (marking the neighbour's
+matching entry `| 0x8000` to share it). Zeroed facets point every triangle at
+the first one's plane.
+
+The mistake came from **object models**, whose loader does generate facets
+itself when the pointer is NULL (`object_models.c:409`):
 
 ```c
 if (model->collisionFacets != NULL) return;
-for (i = 0; i < model->numberOfBatches; i++) {
-    facesOffset     = model->batches[i].facesOffset;
-    nextFacesOffset = model->batches[i + 1].facesOffset;
-    if (model->batches[i].flags & RENDER_NO_COLLISION) continue;
-    s4 += nextFacesOffset - facesOffset;
-}
-model->collisionPlanes = mempool_alloc(s4 * (sizeof(f32) * 16), COLOUR_TAG_RED);
+/* ... count collidable faces, allocate facets and 16 floats each ... */
+model->collisionFacets[s4].basePlaneIndex = s4;   /* then func_80060910 */
 ```
 
-Sixteen floats per facet is four planes of `(A, B, C, D)`: the triangle's own
-plane plus three edge bisectors. A batch opts out with
+Its neighbour search (`func_80060AC8` / `func_80060C58`) is also the best
+account of the rule the level model tool used: the first triangle in a
+collidable batch with an edge on the same vertices or on corners within 3
+units per axis, either way round. Applied to the 55 retail level models it
+reproduces 99.6% of their 90,617 facets; `level_model_layout.collision_facets`
+implements it.
+
+**An encoder therefore has to write the facet array** — adjacency, not
+collision planes — and correct offsets to it, and decide which batches are
+solid. Sixteen floats per facet at runtime is four planes of `(A, B, C, D)`: the
+triangle's own plane plus three edge planes. A batch opts out with
 `RENDER_NO_COLLISION = 1 << 9` (`textures_sprites.h`), which shares bit 9 with
 coverage because level geometry ignores coverage.
 
@@ -290,7 +305,7 @@ count, not file size, is what runs a track out of memory, and
 | Segment the mesh spatially | the author's choice of partition |
 | Build the BSP over segments | standard axis/split-value tree |
 | Batch triangles | group by texture and flags |
-| Reserve collision facets | `numberOfTriangles * 8` per segment, contents irrelevant |
+| Write collision facets | `numberOfTriangles * 8` per segment: each triangle's plane index and its edge neighbours (see above) |
 | Recompute the PVS | only when segmentation changes |
 | Collision planes | nothing to do; runtime derives them |
 

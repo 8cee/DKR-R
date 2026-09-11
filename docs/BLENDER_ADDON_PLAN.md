@@ -388,8 +388,11 @@ invisible walls and collision changes all wait on writing one.
 The format is fully decoded in `docs/LEVEL_MODEL_FORMAT.md`, which closed the
 last two gaps in it: `segmentsBitfields` is a PVS sized
 `numberOfSegments * ceil(numberOfSegments / 8)`, and the fifth of the blob past
-`unkC` is reserved `CollisionFacetPlanes` storage at `numberOfTriangles * 8`
-bytes a segment. Nothing in a level model is unaccounted for now.
+`unkC` is the `CollisionFacetPlanes` array, `numberOfTriangles * 8` bytes a
+segment of triangle adjacency that the loader reads - not scratch it fills,
+which is what this once said, and why rebuilt tracks were once exported with
+it zeroed and could not be driven on. Nothing in a level model is unaccounted
+for now.
 
 That turns one large encoder into three steps that ship independently, because
 what an author can do grows with each and only the last needs a mesh rebuilt
@@ -445,8 +448,8 @@ return trip yet. Textures are wired, both ways — see "Textures" below.
 Adding or removing geometry shifts every offset after it, so the blob is laid
 out afresh. `level_model_layout.py` does that: it decomposes a segment into
 loose faces, re-batches them opaque-first, assigns fresh offsets in retail's
-section order, resizes the collision facet reservations and rewrites
-`modelSize`. Segmentation and the PVS carry through unchanged.
+section order, regenerates the collision facets from the triangles' adjacency
+and rewrites `modelSize`. Segmentation and the PVS carry through unchanged.
 
 Retail's own layout cannot be regenerated — its padding follows no rule — so
 this step cannot be gated on byte equality the way step 1 was. What replaces it
