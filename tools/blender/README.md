@@ -32,6 +32,21 @@ extension or as a legacy addon.
 
 ## Use
 
+**Choose the Level Type first.** A new scene shows one panel, *Level Type*,
+asking what kind of level this is: Race, Boss Race, Challenge (Battle, Bananas
+or Eggs), Hub, or the advanced *Special* group (Cutscene, Menu Backdrop, Test
+Race). Everything else follows the answer, so the other panels stay hidden
+until it is given: what the Place list offers, how many start positions a grid
+gets, what validation demands, and the header's race type. Importing a retail
+track answers it from that track's header. Changing it later asks first when
+objects or grids would be affected, and offers to rebuild the grids where they
+stand. `LEVEL_TYPE_PLAN.md` gives the source of every rule.
+
+Under the dropdown sit the settings the level type owns, which the header
+never has a second answer for: the boss (a boss race is raced in the boss's own
+vehicle), the vehicles the track allows and the default one (a challenge
+allows exactly one), the lap count, and the start grid.
+
 **Import a track.** Press **Import Track** and pick one of the 65 retail levels
 by name. That loads its geometry and *both* of its object maps in one go.
 
@@ -236,9 +251,16 @@ Once geometry is loaded, Blender's own face snapping works, and *Drop To
 Surface* casts the selected objects straight down onto the road - carrying the
 ray on through decoration and walls, which now share one mesh with it.
 
-**Place objects.** The Place panel lists all 85 object types that appear in
-retail tracks, filtered by category, with the ones a track author reaches for
-first pinned at the top. Press *Coin* and a coin appears; press *Frog* and the
+**Place objects.** The Place panel has two tabs, *Structure* and
+*Collectables*, and the tab is both the list and the object map a placed
+object joins. The list shows what the level type uses - the Egg Creator only in
+an egg challenge, hub doors only in a hub - measured from where the 65 retail
+levels place each type rather than decided by taste; *Show incompatible types*
+lists the rest, marked, and validation warns about them. The weapon balloon is
+offered in its five colours (red missile, blue boost, green trap, yellow
+shield, the rainbow magnet), and every button's tooltip says what it places,
+where retail uses it and whether this level type does. The types an author
+reaches for first are pinned at the top. Press *Coin* and a coin appears; press *Frog* and the
 decoded frog mesh appears, textured. A new object is placed at the 3D cursor
 carrying the field values retail uses most, so it behaves like the ones already
 shipped.
@@ -269,7 +291,21 @@ which 15 are `unk`, which buried the four that decide how it behaves. Thirteen
 object types are nothing but raw bytes; the panel says so rather than showing a
 wall of them.
 
-**Draw the AI node graph.** This is *not* the racing line, which the game
+**Generate the start grid.** *Generate Start Grid*, under Level Type, places
+the start positions the level type needs at the 3D cursor - eight in two
+staggered rows for a race (the median of the 20 retail grids), two side by side
+for a boss race, four around the arena facing the centre for a challenge, one
+per entrance for a hub - with `racerIndex` and `entranceID` filled in. They are
+parented to one root Empty: move and turn the root and the grid follows, and
+each start position exports its world position and world angle. The root itself
+is never exported. *Adjust Last Operation* tunes the spacing, a challenge's
+radius and facing, and whether each position is dropped onto the road. A
+missing index is not cosmetic - the game starts that racer at the map origin,
+facing nowhere in particular - so validation reports it as an error.
+
+**Draw the AI node graph.** The panel is greyed out and marked *in
+development* while how the racers use the checkpoints is studied; the
+operators below are still there, in F3 search. This is *not* the racing line, which the game
 interpolates from the checkpoints and which no node is read for. The graph
 drives the Battle and Bananas challenges, hub NPCs and loop-de-loops, so it is
 worth drawing for an arena or a hub and does nothing for a normal circuit.
@@ -280,13 +316,21 @@ wires the adjacency, closing the loop if the curve is cyclic. A second curve can
 be spliced on as a branch, attaching to the nearest nodes that still have a free
 link slot.
 
-**Validate.** Checks the things that are painful to diagnose in game: an AI
+**Validate.** Uses the rules of the track's level type, and checks the things
+that are painful to diagnose in game: a start grid missing a racer, an AI
 graph with one-way or dangling links, duplicate checkpoint indices, two racers
-on the same start square, an exit pointing nowhere. Errors mean the map is
-wrong; warnings mean it is unusual, which retail tracks sometimes are too.
+on the same start square, an exit pointing nowhere, a grid built for another
+level type. Errors mean the map is wrong; warnings mean it is unusual, which
+retail tracks sometimes are too. Every retail level passes in its own level
+type.
 
-**Package.** Fill in the track name and author, then *Export .dkrmap*. The next
-section covers what lands in the package and the one rule about sharing it.
+**Package.** Fill in the track name and author, then *Export .dkrmap*. The
+export refuses a track with no level type, since the header's race type comes
+from it. The *Level Header* subpanel shows what Level Type sets as locked rows,
+steps through the game's music list by name, and holds the skybox; listening to
+the music and previewing skyboxes are not there yet, and the *Minimap* panel is
+marked *in development*. The next section covers what lands in the package and
+the one rule about sharing it.
 
 ## What the packager produces
 

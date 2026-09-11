@@ -251,6 +251,20 @@ def document(overrides: Optional[Dict[str, Any]] = None,
     return built
 
 
+def apply_overrides(document: Dict[str, Any],
+                    overrides: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Write ``overrides`` into an existing header document, in place.
+
+    For a header inherited from a retail track: the fields the Level Type owns
+    have to reach it as well, and nothing else about it may change. A pointer
+    the layout does not know is refused, as in :func:`document`.
+    """
+    for pointer, value in (overrides or {}).items():
+        _field(pointer)
+        _set(document, pointer, copy.deepcopy(value))
+    return document
+
+
 def asset_defaults(path: str = DATA) -> Dict[str, str]:
     """Defaults that name an asset, which the template deliberately omits.
 

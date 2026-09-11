@@ -10,7 +10,7 @@ import bpy
 from bpy.props import BoolProperty, StringProperty
 from bpy_extras.io_utils import ExportHelper
 
-from .. import catalog as catalog_module, dkrmap, prefs, scene, validate
+from .. import catalog as catalog_module, dkrmap, level_types, prefs, scene, validate
 from . import geometry_export
 
 
@@ -45,10 +45,17 @@ class DKR_OT_export_dkrmap(bpy.types.Operator, ExportHelper):
             self.report({"ERROR"}, "nothing to export; no DKR objects in the scene")
             return {"CANCELLED"}
 
+        # The header's race type comes from here, and zero is a real race type
+        # rather than an absence - a track that never chose would quietly
+        # become a default race.
+        key = level_types.current_key(settings)
+        if key is None:
+            self.report({"ERROR"}, "choose the level type first, at the top of "
+                        "the DKR sidebar; the header's race type comes from it")
+            return {"CANCELLED"}
+
         if self.validate_first:
-            report = validate.validate(
-                object_map, catalog, require_racing_track=settings.is_racing_track
-            )
+            report = validate.validate(object_map, catalog, level_key=key)
             if report.errors:
                 self.report(
                     {"ERROR"},
@@ -120,10 +127,15 @@ class DKR_OT_export_dkrmap(bpy.types.Operator, ExportHelper):
                     "the level-object translation table was unavailable"
                 )
 
-            # The header comes from the track being remixed, so the geometry,
-            # world and race type stay whatever the base track had.
+            # The header comes from the track being remixed, so the geometry
+            # and world stay whatever the base track had - except what the
+            # Level Type owns, which the import filled from this same header,
+            # so an untouched remix writes it back unchanged.
+            from .. import level_header_template as template  # noqa: PLC0415
             base = _base_header(context, tree)
-            if base is None:
+            if base is not None:
+                template.apply_overrides(base, level_types.settings_overrides(settings))
+            else:
                 base = _authored_header(context)
             if base is not None:
                 header = package.encode_header(
@@ -551,9 +563,11 @@ def _authored_header(context):
     from . import header as header_ops
     from .. import level_header_template as template
 
-    overrides = header_ops.overrides(context)
-    if not overrides:
+    # The Level Type always has something to say, so it cannot be what decides
+    # whether the author wanted a header; their own answers are.
+    if not header_ops.overrides(context):
         return None
+    overrides = header_ops.effective_overrides(context)
 
     outstanding = template.missing(overrides)
     if outstanding:

@@ -11,12 +11,14 @@ runs and leaves the scene in the state it claims, not that the UI looks right.
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import struct
 import sys
 import traceback
 import tempfile
+import types
 
 import bmesh
 import bpy
@@ -46,8 +48,15 @@ def check(condition, message):
         FAILURES.append(message)
 
 
-def fresh():
+def fresh(level_type="RACE"):
+    """A factory-default scene, with a Level Type chosen unless told otherwise.
+
+    Chosen by default because the export refuses a track that has not said what
+    it is, and most of these tests are about something else.
+    """
     bpy.ops.wm.read_factory_settings(use_empty=True)
+    if level_type:
+        bpy.context.scene.dkr.level_type = level_type
 
 
 # ---------------------------------------------------------------------------
@@ -63,7 +72,11 @@ def test_registration():
                  "set_surface_type", "resegment", "track_from_mesh",
                  "track_from_mesh_blank", "pick_texture", "apply_texture",
                  "clear_texture", "sync_uvs", "select_by_texture",
-                 "refresh_artwork", "set_slot"):
+                 "refresh_artwork", "set_slot",
+                 "set_level_type", "use_imported_level_type", "toggle_vehicle",
+                 "set_default_vehicle", "generate_start_grid",
+                 "select_grid_children", "step_music", "play_music",
+                 "pick_skybox", "minimap_fit", "make_convertible"):
         check(hasattr(bpy.ops.dkr, name), "operator dkr.%s exists" % name)
     check(hasattr(bpy.types.Scene, "dkr"), "scene settings registered")
 
@@ -188,32 +201,240 @@ def run_validate():
 
 def test_validation():
     print("validation")
-    fresh()
-    bpy.context.scene.dkr.is_racing_track = True
-    bpy.ops.dkr.place_object(object_id="ASSET_OBJECT_GROUNDZIPPER")
-
-    results = run_validate()
-    check(bool(results), "validate fills in the results list")
-    check(any(r.severity == "error" for r in results),
-          "a track with no start line is an error")
-
-    bpy.ops.dkr.place_object(object_id="ASSET_OBJECT_SETUPPOINT")
-    results = run_validate()
-    errors = [r for r in results if r.severity == "error"]
-    check(not errors, "adding a start position clears the error")
-
-    # A hub is not a race, so the same scene must pass with the flag off.
-    fresh()
-    bpy.context.scene.dkr.is_racing_track = False
+    fresh(level_type=None)
     bpy.ops.dkr.place_object(object_id="ASSET_OBJECT_GROUNDZIPPER")
     errors = [r for r in run_validate() if r.severity == "error"]
-    check(not errors, "a non-racing map is not required to have a start line")
+    check(len(errors) == 1 and "level type" in errors[0].message,
+          "without a level type, choosing one is the only error")
+
+    bpy.ops.dkr.set_level_type(mode="RACE")
+    results = run_validate()
+    check(bool(results), "validate fills in the results list")
+    check(any(r.severity == "error" and "start positions" in r.message
+              for r in results),
+          "a race with no start line is an error")
+
+    bpy.ops.dkr.place_object(object_id="ASSET_OBJECT_SETUPPOINT")
+    check(any(r.severity == "error" and "racerIndex 1" in r.message
+              for r in run_validate()),
+          "one start position is not a race grid: racers 1-7 would start at "
+          "the map origin")
+
+    bpy.ops.dkr.generate_start_grid()
+    errors = [r for r in run_validate() if r.severity == "error"]
+    check(not errors, "a generated grid clears it (%s)"
+          % [e.message for e in errors])
+
+    # A cutscene spawns nobody, so it is not required to have a start line.
+    fresh(level_type=None)
+    bpy.ops.dkr.set_level_type(mode="SPECIAL", sub="CUTSCENE")
+    bpy.ops.dkr.place_object(object_id="ASSET_OBJECT_GROUNDZIPPER")
+    errors = [r for r in run_validate() if r.severity == "error"]
+    check(not errors, "a cutscene is not required to have a start line")
+
+    # An object the level type does not use is a warning, never an error.
+    fresh(level_type="HUB")
+    bpy.ops.dkr.generate_start_grid()
+    bpy.ops.dkr.place_object(object_id="ASSET_OBJECT_GROUNDZIPPER")
+    results = run_validate()
+    check(any(r.severity == "warning" and "not used in a Hub" in r.message
+              for r in results),
+          "a zipper in a hub is flagged as unused there")
+    check(not [r for r in results if r.severity == "error"],
+          "and only as a warning")
+
+
+def test_level_type_flow():
+    print("level type")
+    from dkr_track_editor import level_types
+    from dkr_track_editor.ui import panels
+
+    fresh(level_type=None)
+    settings = bpy.context.scene.dkr
+    check(settings.level_type == "NONE", "a new scene has no level type")
+    check(not panels.DKR_PT_track.poll(bpy.context)
+          and not panels.DKR_PT_export.poll(bpy.context),
+          "only the Level Type card shows before a choice")
+
+    bpy.ops.dkr.set_level_type(mode="BOSS")
+    check(panels.DKR_PT_track.poll(bpy.context), "the rest appears once chosen")
+    settings.boss = "BOSS_RACE_BLUEY1"
+    overrides = level_types.settings_overrides(settings)
+    check(overrides.get("/race-type") == "RACETYPE_BOSS"
+          and overrides.get("/boss-race-id") == "BOSS_RACE_BLUEY1",
+          "a boss race writes its race type and boss to the header")
+    check(overrides.get("/avaliable-vehicles") == ["VEHICLE_HOVERCRAFT"],
+          "and is raced in the boss's vehicle")
+
+    bpy.ops.dkr.set_level_type(mode="CHALLENGE", sub="EGGS")
+    check(level_types.current_key(settings) == "EGGS", "the challenge kind is kept")
+    bpy.ops.dkr.toggle_vehicle(vehicle="VEHICLE_PLANE")
+    check(set(settings.vehicles) == {"VEHICLE_PLANE"},
+          "a challenge allows exactly one vehicle")
+
+    bpy.ops.dkr.set_level_type(mode="RACE")
+    bpy.ops.dkr.toggle_vehicle(vehicle="VEHICLE_CAR")
+    check(set(settings.vehicles) == {"VEHICLE_PLANE", "VEHICLE_CAR"},
+          "a race allows several")
+    bpy.ops.dkr.toggle_vehicle(vehicle="VEHICLE_CAR")
+    bpy.ops.dkr.toggle_vehicle(vehicle="VEHICLE_PLANE")
+    check(set(settings.vehicles) == {"VEHICLE_PLANE"},
+          "the last vehicle cannot be removed")
+
+
+def _grid_children(root):
+    return [c for c in root.children if scene.is_dkr_object(c)]
+
+
+def test_start_grid():
+    print("start grid")
+    for mode, sub, count in (("RACE", "", 8), ("BOSS", "", 2),
+                             ("CHALLENGE", "BATTLE", 4), ("HUB", "", 1)):
+        fresh(level_type=None)
+        bpy.ops.dkr.set_level_type(mode=mode, sub=sub)
+        bpy.ops.dkr.generate_start_grid()
+        roots = scene.grid_roots(bpy.context)
+        check(len(roots) == 1, "%s: one grid root" % mode)
+        if not roots:
+            continue
+        children = _grid_children(roots[0])
+        check(len(children) == count, "%s: %d start positions (got %d)"
+              % (mode, count, len(children)))
+        check(sorted(int(c["racerIndex"]) for c in children) == list(range(count)),
+              "%s: racerIndex 0-%d filled in" % (mode, count - 1))
+
+    fresh(level_type=None)
+    bpy.ops.dkr.set_level_type(mode="SPECIAL", sub="CUTSCENE")
+    check(not bpy.ops.dkr.generate_start_grid.poll(),
+          "a cutscene spawns nobody, so it offers no start grid")
+
+    # The export reads each start position's world position and angle, so
+    # turning the root turns the grid.
+    fresh()
+    bpy.context.scene.cursor.location = (1000.0, 0.0, 0.0)
+    bpy.ops.dkr.generate_start_grid()
+    root = scene.grid_roots(bpy.context)[0]
+    catalog = catalog_module.load()
+
+    def exported():
+        return {o.fields["racerIndex"]: o
+                for o in scene.export_object_map(bpy.context, catalog).objects}
+
+    before = exported()
+    root.rotation_euler.z = math.radians(90.0)
+    after = exported()
+    check(all(abs(after[i].fields["angleY"] - before[i].fields["angleY"] - 90.0) < 1e-6
+              for i in range(8)),
+          "turning the root 90 degrees adds 90 to every angleY")
+
+    def reach(obj):
+        x, _y, z = obj.translation
+        return math.hypot(x - 1000.0, z)
+
+    check(after[0].translation != before[0].translation
+          and abs(reach(after[0]) - reach(before[0])) < 1e-3,
+          "and swings every position around the root")
+
+    root.location = (500.0, 500.0, 0.0)
+    bpy.ops.dkr.set_level_type(mode="BOSS")
+    roots = scene.grid_roots(bpy.context)
+    check(len(roots) == 1 and len(_grid_children(roots[0])) == 2,
+          "changing to a boss race rebuilds the grid with two")
+    check(tuple(roots[0].location)[:2] == (500.0, 500.0)
+          and roots[0].get(scene.PROP_GRID_KEY) == "BOSS",
+          "where the old one stood")
+
+    fresh(level_type="HUB")
+    bpy.ops.dkr.generate_start_grid()
+    bpy.ops.dkr.generate_start_grid()
+    entrances = sorted(int(r[scene.PROP_GRID_ENTRANCE])
+                       for r in scene.grid_roots(bpy.context))
+    check(entrances == [0, 1], "a hub adds one entrance at a time (%r)" % entrances)
+
+
+def test_presets_and_tooltips():
+    print("balloon presets and tooltips")
+    from dkr_track_editor.operators.edit import DKR_OT_place_object
+
+    fresh()
+    catalog = catalog_module.load()
+    bpy.ops.dkr.place_object(object_id="ASSET_OBJECT_WEAPONBALLOON", preset="GREEN")
+    green = bpy.context.active_object
+    check(green.get("balloonType") == "BALLOON_TYPE_TRAP", "the green balloon is a trap")
+    check(green.get(scene.PROP_NODE_NAME)
+          == catalog.get("ASSET_OBJECT_WEAPONBALLOON").node_name,
+          "the exported node name stays the type's own")
+    bpy.ops.dkr.place_object(object_id="ASSET_OBJECT_WEAPONBALLOON", preset="RAINBOW")
+    check(bpy.context.active_object.get("balloonType") == "BALLOON_TYPE_MAGNET",
+          "the coloured balloon is the rainbow magnet")
+
+    eggs = DKR_OT_place_object.description(
+        bpy.context, types.SimpleNamespace(object_id="ASSET_OBJECT_EGGCREATOR", preset=""))
+    zipper = DKR_OT_place_object.description(
+        bpy.context, types.SimpleNamespace(object_id="ASSET_OBJECT_GROUNDZIPPER", preset=""))
+    check(eggs != zipper, "each Place button has its own tooltip")
+    check("Not used in a Race level" in eggs,
+          "and says when the level type does not use it")
+
+    # A panel draws in a region the background test never has, so an icon
+    # Blender does not know would only surface as a traceback in the sidebar.
+    from dkr_track_editor import level_types
+    icons = {item.identifier for item in
+             bpy.types.UILayout.bl_rna.functions["label"].parameters["icon"].enum_items}
+    unknown = [p.icon for p in level_types.PRESETS if p.icon not in icons]
+    check(not unknown, "every balloon preset's icon exists in this Blender (%r)" % unknown)
+
+    bpy.ops.dkr.place_object(object_id="ASSET_OBJECT_SETUPPOINT")
+    bpy.ops.dkr.place_object(object_id="ASSET_OBJECT_SETUPPOINT")
+    check(int(bpy.context.active_object["racerIndex"]) == 1,
+          "a hand-placed start position takes the next free racerIndex")
+
+
+def test_refresh_keeps_grids():
+    print("refresh artwork keeps objects and grids")
+    from dkr_track_editor import prefs
+
+    fresh()
+    bpy.ops.dkr.generate_start_grid()
+    bpy.ops.dkr.place_object(object_id="ASSET_OBJECT_GROUNDZIPPER")
+    before = len(scene.iter_dkr_objects(bpy.context))
+    if prefs.resolve(bpy.context) is None:
+        print("  skip: no decomp assets")
+        return
+    bpy.ops.dkr.refresh_artwork()
+    after = scene.iter_dkr_objects(bpy.context)
+    check(len(after) == before,
+          "every object survives a refresh (%d of %d)" % (len(after), before))
+    root = scene.grid_roots(bpy.context)[0]
+    check(sum(1 for o in after if o.parent == root) == 8,
+          "and the start positions stay in their grid")
+
+
+def test_import_sets_level_type():
+    print("importing a retail track sets its level type")
+    from dkr_track_editor import level_types, prefs
+
+    fresh(level_type=None)
+    tree = prefs.resolve(bpy.context)
+    # By label, since an extraction may suffix the name with its revision.
+    names = {level.label: level.name for level in tree.levels()} if tree else {}
+    if "Bluey1" not in names or "Horseshoe Gulch" not in names:
+        print("  skip: no decomp assets")
+        return
+    settings = bpy.context.scene.dkr
+    bpy.ops.dkr.import_level(level=names["Bluey1"], with_geometry=False)
+    check(level_types.current_key(settings) == "BOSS"
+          and settings.boss == "BOSS_RACE_BLUEY1",
+          "Bluey 1 comes in as a boss race against Bluey")
+    bpy.ops.dkr.import_level(level=names["Horseshoe Gulch"], with_geometry=False)
+    check(level_types.current_key(settings) == "TEST_RACE",
+          "Horseshoe Gulch comes in as Special > Test Race")
 
 
 def test_dkrmap_export():
     print("dkrmap package")
     fresh()
-    bpy.ops.dkr.place_object(object_id="ASSET_OBJECT_SETUPPOINT")
+    bpy.ops.dkr.generate_start_grid()
     bpy.ops.dkr.place_object(object_id="ASSET_OBJECT_GROUNDZIPPER")
 
     settings = bpy.context.scene.dkr
@@ -268,8 +489,8 @@ def test_dkrmap_export():
         check(os.path.isfile(source), "asset-tool source glTF written per slot")
         if os.path.isfile(source):
             written = gltf_io.load(source)
-            check(len(written.objects) == 2,
-                  "both objects went to the structure map by default")
+            check(len(written.objects) == 9,
+                  "the grid and the zipper went to the structure map by default")
         check(os.path.isfile(os.path.join(target, "source",
                                           "objects_structure.json")),
               "sidecar written")
@@ -1470,7 +1691,7 @@ def test_header_from_scratch():
     from dkr_track_editor import level_header_template as template
     from dkr_track_editor.operators import header as header_ops
 
-    fresh()
+    fresh(level_type=None)
     check(not header_ops.overrides(bpy.context),
           "a fresh scene answers nothing")
     check(sorted(header_ops.unanswered(bpy.context)) == ["/race-type", "/world"],
@@ -1483,21 +1704,27 @@ def test_header_from_scratch():
     check(sorted(header_ops.unanswered(bpy.context)) == ["/race-type", "/world"],
           "but never invents a world or a race type, because zero is a real "
           "value for both rather than an absence")
+    check(header_ops.key_for("/race-type") not in bpy.context.scene,
+          "and leaves what the Level Type owns to the Level Type")
+
+    bpy.ops.dkr.set_level_type(mode="RACE")
+    check(header_ops.unanswered(bpy.context) == ["/world"],
+          "choosing the level type answers the race type")
 
     world = _pick("World")
-    race = _pick("RaceType")
-    if not world or not race:
-        print("  skip: the catalogue has no World/RaceType enum")
+    if not world:
+        print("  skip: the catalogue has no World enum")
         return
     bpy.context.scene[header_ops.key_for("/world")] = world
-    bpy.context.scene[header_ops.key_for("/race-type")] = race
     check(not header_ops.unanswered(bpy.context),
-          "answering those two completes the header")
+          "answering the world completes the header")
 
     # The template has to accept what the panel collected, unchanged.
-    document = template.document(header_ops.overrides(bpy.context))
+    document = template.document(header_ops.effective_overrides(bpy.context))
     check(document.get("world") == world,
           "the answer reaches the document (%r)" % document.get("world"))
+    check(document.get("race-type") == "RACETYPE_DEFAULT",
+          "and so does the Level Type's race type")
 
 
 def test_header_reaches_the_package():
@@ -1509,9 +1736,9 @@ def test_header_reaches_the_package():
     if prefs.resolve(bpy.context) is None:
         print("  skip: no decomp assets")
         return
-    world, race = _pick("World"), _pick("RaceType")
-    if not world or not race:
-        print("  skip: the catalogue has no World/RaceType enum")
+    world = _pick("World")
+    if not world:
+        print("  skip: the catalogue has no World enum")
         return
 
     fresh()
@@ -1524,9 +1751,9 @@ def test_header_reaches_the_package():
     try:
         target = os.path.join(temporary, "scratch-track.dkrmap")
 
-        # Answering only some of it is refused, not filled in: the two fields
-        # with no default are world and race type, and shipping zero for them
-        # would quietly make the track something else.
+        # Answering only some of it is refused, not filled in: the field with
+        # no default is the world (the race type comes from the Level Type),
+        # and shipping zero for it would quietly make the track something else.
         bpy.ops.dkr.header_defaults()
         try:
             bpy.ops.dkr.export_dkrmap(filepath=target, validate_first=False)
@@ -1534,11 +1761,10 @@ def test_header_reaches_the_package():
         except RuntimeError as error:
             check("unanswered" in str(error),
                   "a partly answered header is refused (%s)" % str(error)[:70])
-            check("/world" in str(error) and "/race-type" in str(error),
-                  "and the message names which fields")
+            check("/world" in str(error) and "/race-type" not in str(error),
+                  "and the message names the world, the one field left")
 
         bpy.context.scene[header_ops.key_for("/world")] = world
-        bpy.context.scene[header_ops.key_for("/race-type")] = race
         result = bpy.ops.dkr.export_dkrmap(filepath=target, validate_first=False)
         check(result == {"FINISHED"}, "a complete header exports")
 
@@ -3109,6 +3335,11 @@ def main():
         test_ai_from_curve()
         test_ai_limits()
         test_validation()
+        test_level_type_flow()
+        test_start_grid()
+        test_presets_and_tooltips()
+        test_refresh_keeps_grids()
+        test_import_sets_level_type()
         test_dkrmap_export()
         test_import_export_operators()
         test_geometry_import()

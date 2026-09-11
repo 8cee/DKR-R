@@ -43,6 +43,17 @@ PROP_UNKNOWN = "dkr_unknown"
 PROP_SLOT = "dkr_slot"
 RESERVED = {PROP_ID, PROP_NODE_NAME, PROP_ABSENT, PROP_UNKNOWN, PROP_SLOT}
 
+#: A start grid is an Empty that the start positions are parented to, so the
+#: whole grid moves and turns as one. It carries no ``dkr_id`` and so is never
+#: exported; what it carries is what it was built from, so it can be rebuilt in
+#: place when the level type changes.
+PROP_GRID_ROOT = "dkr_grid_root"
+PROP_GRID_KEY = "dkr_grid_key"
+PROP_GRID_ENTRANCE = "dkr_grid_entrance"
+PROP_GRID_SPACING = "dkr_grid_spacing"
+PROP_GRID_RADIUS = "dkr_grid_radius"
+PROP_GRID_FACING = "dkr_grid_facing"
+
 #: A level holds **two** object maps and the game loads them into a two-element
 #: array, spawning both the same way. So the split is not semantic: 39 of the 85
 #: object types appear in both across retail tracks, many near half and half.
@@ -292,6 +303,29 @@ def iter_dkr_objects(context, selected_only=False):
     return [obj for obj in source if is_dkr_object(obj)]
 
 
+def is_grid_root(obj) -> bool:
+    return obj is not None and PROP_GRID_ROOT in obj
+
+
+def grid_roots(context) -> List[bpy.types.Object]:
+    return [obj for obj in context.scene.objects if is_grid_root(obj)]
+
+
+def world_yaw(obj) -> float:
+    """The Z rotation an object points at, in radians, through its parents.
+
+    Summed rather than read off ``matrix_world``, because a matrix wraps the
+    angle into one turn and a retail object can sit at -410.625 degrees - an
+    unparented object has to come back exactly as it went in, which the plain
+    ``rotation_euler.z`` it starts from guarantees.
+    """
+    total = 0.0
+    while obj is not None:
+        total += obj.rotation_euler.z
+        obj = obj.parent
+    return total
+
+
 def read_object(empty: bpy.types.Object, catalog) -> MapObject:
     """Rebuild one :class:`MapObject` from an Empty."""
     object_id = str(empty[PROP_ID])
@@ -317,8 +351,9 @@ def read_object(empty: bpy.types.Object, catalog) -> MapObject:
                 # The viewport rotation is authoritative, so an object turned
                 # with R writes the angle it now points at. Coercion snaps it
                 # back onto the format's step, which is what makes an untouched
-                # object come out byte-identical.
-                value = math.degrees(empty.rotation_euler.z)
+                # object come out byte-identical. Through the parents, so a
+                # start position turns with the grid it belongs to.
+                value = math.degrees(world_yaw(empty))
             # Coerce, but do not clamp. The catalogue's range is a UI guide, and
             # the asset tool clamps to the C type itself on encode; clipping a
             # value here would silently change what the author placed.

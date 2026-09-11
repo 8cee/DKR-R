@@ -27,13 +27,21 @@ table that could fall out of step.
 from __future__ import annotations
 
 import bpy
-from bpy.props import EnumProperty, StringProperty
+from bpy.props import EnumProperty, IntProperty, StringProperty
 
 from .. import catalog as catalog_module, level_header_template as template
-from .. import prefs
+from .. import level_types, prefs
 
 #: Prefix for the scene properties holding an author's answers.
 PREFIX = "dkr_hdr_"
+
+#: Fields the Level Type answers. The header panel shows them locked, since two
+#: sources of truth for one byte is the thing that must not exist.
+LEVEL_OWNED = ("/race-type", "/lap-count", "/avaliable-vehicles",
+               "/default-vehicle")
+
+MUSIC = "/music"
+SKYBOX = "/background/skybox/id"
 
 
 def key_for(pointer: str) -> str:
@@ -76,9 +84,27 @@ def surveyed(pointer: str):
     return node
 
 
+def effective_overrides(context) -> dict:
+    """The author's answers with the Level Type's fields laid over them."""
+    found = overrides(context)
+    found.update(level_types.settings_overrides(context.scene.dkr))
+    return found
+
+
 def unanswered(context) -> list:
     """Pointers that have no answer and no default, so the header cannot say."""
-    return template.missing(overrides(context))
+    return template.missing(effective_overrides(context))
+
+
+def music_index(context) -> int:
+    """What ``/music`` will be: the author's answer, or the surveyed default."""
+    value = context.scene.get(key_for(MUSIC))
+    if value is None:
+        value = surveyed(MUSIC)
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def enum_members(choice) -> list:
@@ -214,6 +240,8 @@ class DKR_OT_header_defaults(bpy.types.Operator):
     def execute(self, context):
         filled = 0
         for choice in template.CHOICES:
+            if choice.pointer in LEVEL_OWNED:
+                continue
             value = choice.default
             if value is None:
                 value = surveyed(choice.pointer)
@@ -248,6 +276,38 @@ class DKR_OT_header_defaults(bpy.types.Operator):
                            if assets_filled else ""))
         _redraw(context)
         return {"FINISHED"}
+
+
+class DKR_OT_step_music(bpy.types.Operator):
+    """Step through the game's music list. The track showing when you export is
+    the one the header gets (/music)"""
+
+    bl_idname = "dkr.step_music"
+    bl_label = "Music"
+    bl_options = {"REGISTER", "UNDO", "INTERNAL"}
+
+    step: IntProperty(default=1, options={"SKIP_SAVE"})
+
+    @classmethod
+    def description(cls, context, properties):
+        return "Next track" if properties.step > 0 else "Previous track"
+
+    def execute(self, context):
+        tracks = level_types.music_tracks(_catalog_or_none())
+        count = len(tracks) or 256
+        context.scene[key_for(MUSIC)] = (music_index(context) + self.step) % count
+        choice = choice_for(MUSIC)
+        if choice is not None:
+            _apply_ui(context.scene, choice)
+        _redraw(context)
+        return {"FINISHED"}
+
+
+def _catalog_or_none():
+    try:
+        return catalog_module.load()
+    except Exception:  # noqa: BLE001 - the music list is a nicety
+        return None
 
 
 def _apply_ui(scene, choice) -> None:
@@ -285,4 +345,5 @@ CLASSES = (
     DKR_OT_set_header_choice,
     DKR_OT_clear_header_choice,
     DKR_OT_header_defaults,
+    DKR_OT_step_music,
 )

@@ -1480,7 +1480,9 @@ class DKR_OT_drop_to_surface(bpy.types.Operator):
             if landing is None:
                 missed += 1
                 continue
-            obj.location = landing + Vector((0.0, 0.0, self.offset))
+            # The world position, not ``location``: a start position in a grid
+            # is parented, and its location is relative to the grid's root.
+            obj.matrix_world.translation = landing + Vector((0.0, 0.0, self.offset))
             moved += 1
 
         if not moved:
@@ -1494,56 +1496,66 @@ class DKR_OT_drop_to_surface(bpy.types.Operator):
         return {"FINISHED"}
 
     def _raycast(self, origin, targets, depsgraph):
-        """Nearest hit straight down, falling back to straight up.
+        return surface_below(origin, targets, depsgraph,
+                             self.search_distance, self.surface_only)
 
-        Looking up matters: an object sitting slightly under the road should
-        come back to the surface rather than be left buried.
-        """
-        best = None
-        for direction in (Vector((0.0, 0.0, -1.0)), Vector((0.0, 0.0, 1.0))):
-            for target in targets:
-                world = self._hit(target, depsgraph, origin, direction)
-                if world is None:
-                    continue
-                distance = (world - origin).length
-                if best is None or distance < best[0]:
-                    best = (distance, world)
-            if best is not None:
-                break
-        return best[1] if best else None
 
-    def _hit(self, target, depsgraph, origin, direction):
-        """First hit on this object that counts, in world space.
+def surface_below(origin, targets, depsgraph, search_distance=20000.0,
+                  surface_only=True):
+    """Nearest hit straight down, falling back to straight up, in world space.
 
-        Surface, decoration and wall all live in one mesh now, so a hit has to
-        be asked which it is; a decoration that is drawn but not driven on is
-        the wrong thing to stand a checkpoint on. The ray is restarted just past
-        a rejected hit rather than filtered afterwards, because a ray cast
-        reports only the first thing it meets.
-        """
-        matrix = target.matrix_world
-        inverse = matrix.inverted()
-        start = inverse @ origin
-        local_direction = (inverse.to_3x3() @ direction).normalized()
-        evaluated = target.evaluated_get(depsgraph)
-        categories = slot_categories(target)
-        remaining = self.search_distance
+    Looking up matters: an object sitting slightly under the road should
+    come back to the surface rather than be left buried. Shared with the start
+    grid, which drops each start position it makes.
+    """
+    best = None
+    for direction in (Vector((0.0, 0.0, -1.0)), Vector((0.0, 0.0, 1.0))):
+        for target in targets:
+            world = _first_hit(target, depsgraph, origin, direction,
+                               search_distance, surface_only)
+            if world is None:
+                continue
+            distance = (world - origin).length
+            if best is None or distance < best[0]:
+                best = (distance, world)
+        if best is not None:
+            break
+    return best[1] if best else None
 
-        for _attempt in range(8):
-            hit, location, _normal, index = target.ray_cast(
-                start, local_direction, distance=remaining
-            )
-            if not hit:
-                return None
-            if not self.surface_only or \
-                    _category_at(evaluated, categories, index) == SURFACE:
-                return matrix @ location
-            stepped = location + local_direction * 0.01
-            remaining -= (stepped - start).length
-            if remaining <= 0.0:
-                return None
-            start = stepped
-        return None
+
+def _first_hit(target, depsgraph, origin, direction, search_distance,
+               surface_only):
+    """First hit on this object that counts, in world space.
+
+    Surface, decoration and wall all live in one mesh now, so a hit has to
+    be asked which it is; a decoration that is drawn but not driven on is
+    the wrong thing to stand a checkpoint on. The ray is restarted just past
+    a rejected hit rather than filtered afterwards, because a ray cast
+    reports only the first thing it meets.
+    """
+    matrix = target.matrix_world
+    inverse = matrix.inverted()
+    start = inverse @ origin
+    local_direction = (inverse.to_3x3() @ direction).normalized()
+    evaluated = target.evaluated_get(depsgraph)
+    categories = slot_categories(target)
+    remaining = search_distance
+
+    for _attempt in range(8):
+        hit, location, _normal, index = target.ray_cast(
+            start, local_direction, distance=remaining
+        )
+        if not hit:
+            return None
+        if not surface_only or \
+                _category_at(evaluated, categories, index) == SURFACE:
+            return matrix @ location
+        stepped = location + local_direction * 0.01
+        remaining -= (stepped - start).length
+        if remaining <= 0.0:
+            return None
+        start = stepped
+    return None
 
 
 def _category_at(evaluated, categories, index):

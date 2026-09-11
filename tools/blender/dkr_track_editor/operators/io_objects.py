@@ -9,7 +9,7 @@ import bpy
 from bpy.props import BoolProperty, StringProperty
 from bpy_extras.io_utils import ExportHelper, ImportHelper
 
-from .. import assets, catalog as catalog_module, gltf_io, prefs, scene
+from .. import assets, catalog as catalog_module, gltf_io, level_types, prefs, scene
 
 
 def _report_exception(operator, message, error):
@@ -166,7 +166,9 @@ class DKR_OT_import_object_map(bpy.types.Operator, ImportHelper):
 
 
 def _clear_existing(context):
-    for obj in list(scene.iter_dkr_objects(context)):
+    # Grid roots too: they are not DKR objects, so without this a re-import
+    # leaves an empty root behind for every grid the scene had.
+    for obj in list(scene.iter_dkr_objects(context)) + scene.grid_roots(context):
         bpy.data.objects.remove(obj, do_unlink=True)
 
 
@@ -272,8 +274,19 @@ def level_items(self, context):
         if not level.is_complete:
             continue
         world = level.world_label or "Other"
-        entries.append((level.name, level.label, "%s | %s" % (world, level.race_type)))
-    return entries or [("NONE", "no levels found", "")]
+        key = level_types.key_for_race_type(level.race_type)
+        entries.append((level.name, level.label, "%s | %s" % (
+            world, level_types.label(key) if key else level.race_type)))
+    return _keep_levels(entries or [("NONE", "no levels found", "")])
+
+
+_LEVEL_ITEMS = []
+
+
+def _keep_levels(items):
+    """Blender does not hold the strings an enum callback returns; this does."""
+    _LEVEL_ITEMS[:] = items
+    return items
 
 
 class DKR_OT_import_level(bpy.types.Operator):
@@ -333,6 +346,27 @@ class DKR_OT_import_level(bpy.types.Operator):
         layout.prop(self, "with_geometry")
         layout.prop(self, "with_collectables")
 
+        # The level type comes with the track, so say which before loading.
+        chosen = tree.level(self.level) if self.level not in ("", "NONE") else None
+        key = level_types.key_for_race_type(chosen.race_type) if chosen else None
+        if key:
+            text = "Level Type: %s" % level_types.label(key)
+            if key == level_types.BOSS:
+                from . import level_type as level_type_ops  # noqa: PLC0415
+                header = level_type_ops._read_header(chosen.header_path) or {}
+                if header.get("boss-race-id"):
+                    text += " / %s" % level_types.boss_label(header["boss-race-id"])
+            box = layout.box()
+            box.label(text=text, icon="INFO")
+            column = box.column(align=True)
+            column.active = False
+            if key in level_types.SPECIALS:
+                column.label(text="This is a Special level. It can be remixed,")
+                column.label(text="but it is not a normal game mode.")
+            else:
+                column.label(text="Read from the track's header; change it")
+                column.label(text="afterwards in Level Type.")
+
     def execute(self, context):
         tree = prefs.resolve(context)
         if tree is None:
@@ -384,13 +418,26 @@ class DKR_OT_import_level(bpy.types.Operator):
         prefs.invalidate()
         _frame_view(context)
 
+        # A retail level brings its level type, boss, vehicles and laps; taking
+        # all of them is what keeps an untouched remix's header byte-identical.
+        from . import level_type as level_type_ops  # noqa: PLC0415
+        header = level_type_ops._read_header(level.header_path) \
+            if level.header_path else None
+        key = level_type_ops.adopt_header(context.scene.dkr, header) if header else ""
+        described = ""
+        if key:
+            described = "; Level Type set to %s" % level_types.label(key)
+            if key == level_types.BOSS:
+                described += " / %s" % level_types.boss_label(context.scene.dkr.boss)
+
         counts = scene.slot_counts(context)
         self.report(
             {"INFO"},
-            "loaded %s: %d objects (%d structure, %d collectables)%s"
+            "loaded %s: %d objects (%d structure, %d collectables)%s%s"
             % (level.label, total, counts[scene.SLOT_STRUCTURE],
                counts[scene.SLOT_COLLECTABLES],
-               ", plus geometry" if self.with_geometry and level.model_path else ""),
+               ", plus geometry" if self.with_geometry and level.model_path else "",
+               described),
         )
         return {"FINISHED"}
 

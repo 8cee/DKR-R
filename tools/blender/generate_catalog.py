@@ -294,6 +294,44 @@ def survey_object_maps(decomp_root):
     return paths, observed
 
 
+def survey_level_modes(decomp_root):
+    """Which kinds of level place each type, and in which of the two maps.
+
+    The survey above cannot say this, because an object map does not know what
+    level it belongs to - its header does. So each retail header's race type
+    decides the kind of level (a :data:`level_types.KEYS` member), and its
+    ``map-2`` and ``map-collectables`` name the two maps. This is what lets the
+    Place list hide the Egg Creator outside an egg challenge on evidence rather
+    than taste. A level two extracted revisions both carry is counted once.
+
+    Returns ``({object_id: Counter(key)}, {object_id: Counter(slot)})``.
+    """
+    sys.path.insert(0, HERE)
+    from dkr_track_editor import assets, gltf_io, level_types  # noqa: PLC0415
+
+    by_mode = collections.defaultdict(collections.Counter)
+    by_slot = collections.defaultdict(collections.Counter)
+    seen = set()
+    pattern = os.path.join(decomp_root, "assets", ".vanilla", "*")
+    for root in sorted(glob.glob(pattern)):
+        if not os.path.isfile(os.path.join(root, assets.META_OBJECTS)):
+            continue
+        for level in assets.AssetTree(root).levels():
+            if level.label in seen:
+                continue
+            seen.add(level.label)
+            key = level_types.key_for_race_type(level.race_type)
+            for slot, path in (("structure", level.objects_path),
+                               ("collectables", level.collectables_path)):
+                if not path or not os.path.isfile(path):
+                    continue
+                for obj in gltf_io.load(path).objects:
+                    by_slot[obj.object_id][slot] += 1
+                    if key:
+                        by_mode[obj.object_id][key] += 1
+    return by_mode, by_slot
+
+
 def _record_value(info, value):
     if isinstance(value, bool):
         info["kinds"].add("bool")
@@ -653,6 +691,9 @@ EXPORTED_ENUMS = [
     # knowledge, and a fallback table copied into a bpy module is exactly the
     # kind of thing that drifts from the decomp without anything noticing.
     "SurfaceType",
+    # The header's /music is an index into this list, so the music player can
+    # name what it plays rather than show a number.
+    "SequenceID",
 ]
 
 
@@ -662,6 +703,7 @@ def build_catalog(decomp_root):
     header_paths = (
         os.path.join(decomp_root, "include", "enums.h"),
         os.path.join(decomp_root, "include", "asset_enums.h"),
+        os.path.join(decomp_root, "include", "sequence_ids.h"),
     )
     enums = parse_enums(*header_paths)
     enum_values = parse_enum_values(*header_paths)
@@ -671,6 +713,7 @@ def build_catalog(decomp_root):
             "no extracted object maps found under %s; run the decomp's extract.sh"
             % decomp_root
         )
+    by_mode, by_slot = survey_level_modes(decomp_root)
 
     objects = {}
     unmatched = []
@@ -718,6 +761,13 @@ def build_catalog(decomp_root):
             "entry_size": struct_size(struct_fields),
             "fields": described,
         }
+        if by_mode.get(object_id):
+            objects[object_id]["modes"] = dict(sorted(by_mode[object_id].items()))
+        if by_slot.get(object_id):
+            objects[object_id]["slots"] = {
+                slot: by_slot[object_id][slot]
+                for slot in ("structure", "collectables")
+            }
 
     catalog = {
         "schemaVersion": SCHEMA_VERSION,

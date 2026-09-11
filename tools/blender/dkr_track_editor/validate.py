@@ -19,7 +19,7 @@ from __future__ import annotations
 import collections
 from typing import List, Optional
 
-from . import ai_graph, catalog as catalog_module
+from . import ai_graph, catalog as catalog_module, level_types
 from .gltf_io import ObjectMap
 
 AINODE = "ASSET_OBJECT_AINODE"
@@ -81,23 +81,152 @@ class Report:
         return iter(self.issues)
 
 
-def validate(object_map: ObjectMap, catalog=None, require_racing_track=True) -> Report:
+def validate(object_map: ObjectMap, catalog=None, require_racing_track=True,
+             level_key: Optional[str] = None) -> Report:
     """Run every check over an object map.
 
-    ``require_racing_track`` turns off the checks that only make sense for a
-    track people race on, so a hub or a cutscene map is not flagged for having
-    no start line.
+    ``level_key`` is the track's :mod:`level_types` key, and when given it
+    decides the rules: how many start positions there must be, whether
+    checkpoints are needed, which object types belong. ``level_types.NONE``
+    means the author has not chosen, and that is the only thing reported.
+
+    Without one, ``require_racing_track`` is the older and blunter switch, which
+    the retail sanity check still uses: it turns off the checks that only make
+    sense for a track people race on.
     """
     if catalog is None:
         catalog = catalog_module.load()
+    if level_key is not None and level_key not in level_types.KEYS:
+        return Report([Issue(
+            ERROR,
+            "Choose the level type first. Nothing can be checked or exported "
+            "without it.",
+        )])
+
     issues: List[Issue] = []
     issues += _check_known_types(object_map, catalog)
     issues += _check_ai_graph(object_map)
-    issues += _check_checkpoints(object_map, require_racing_track)
-    issues += _check_setup_points(object_map, require_racing_track)
+    if level_key is None:
+        issues += _check_checkpoints(object_map, require_racing_track)
+        issues += _check_setup_points(object_map, require_racing_track)
+    else:
+        issues += _check_checkpoints(object_map,
+                                     level_types.needs_checkpoints(level_key))
+        issues += _check_start_grid(object_map, level_key)
+        issues += _check_level_type(object_map, catalog, level_key)
     issues += _check_exits(object_map, catalog)
     issues += _check_budget(object_map, catalog)
     return Report(issues)
+
+
+def _check_start_grid(object_map: ObjectMap, key: str) -> List[Issue]:
+    """Start positions against the number of racers this kind of level spawns.
+
+    The game zeroes every start position before reading the map and never
+    zeroes the angle, so a missing ``racerIndex`` below the racer count starts
+    that racer at the map origin facing an undefined direction - that is an
+    error, not a style point (``objects.c:1121-1136``). An index of 8 or more
+    is ignored (``objects.c:1131``).
+    """
+    count = level_types.spawn_count(key)
+    if not count:
+        # The game returns before reading start positions at all.
+        return []
+
+    positions = {id(obj): position for position, obj in enumerate(object_map.objects)}
+    points = object_map.by_id(SETUPPOINT)
+    if not points:
+        return [Issue(
+            ERROR,
+            "No start positions: racers have nowhere to start. Use Generate "
+            "Start Grid.",
+            SETUPPOINT,
+        )]
+
+    issues = []
+    by_entrance = collections.defaultdict(list)
+    for point in points:
+        by_entrance[point.fields.get("entranceID", 0)].append(
+            (point.fields.get("racerIndex"), positions.get(id(point)))
+        )
+
+    first = {index for index, _ in by_entrance.get(0, [])}
+    missing = [k for k in range(count) if k not in first]
+    if missing:
+        issues.append(Issue(
+            ERROR,
+            "Entrance 0 has no racerIndex %s: %s would start at the map origin, "
+            "facing an undefined direction."
+            % (", ".join(str(k) for k in missing),
+               "those racers" if len(missing) > 1 else "that racer"),
+            SETUPPOINT,
+        ))
+
+    for entrance, racers in sorted(by_entrance.items()):
+        seen = collections.defaultdict(list)
+        for index, position in racers:
+            if index is not None:
+                seen[index].append(position)
+        duplicated = sorted(i for i, where in seen.items() if len(where) > 1)
+        if duplicated:
+            issues.append(Issue(
+                ERROR,
+                "entrance %s puts more than one racer on index %s"
+                % (entrance, ", ".join(str(d) for d in duplicated)),
+                SETUPPOINT,
+                objects=[p for i in duplicated for p in seen[i] if p is not None],
+            ))
+        over = [p for i, p in racers
+                if isinstance(i, int) and i >= level_types.MAX_RACER_INDEX]
+        if over:
+            issues.append(Issue(
+                WARNING,
+                "%d start position(s) at entrance %s use racerIndex 8 or more, "
+                "which the game ignores." % (len(over), entrance),
+                SETUPPOINT, objects=over,
+            ))
+        unused = [p for i, p in racers if isinstance(i, int)
+                  and count <= i < level_types.MAX_RACER_INDEX]
+        if unused and key != level_types.HUB:
+            issues.append(Issue(
+                INFO,
+                "%d start position(s) at entrance %s are beyond the %d a %s "
+                "uses." % (len(unused), entrance, count, level_types.label(key)),
+                SETUPPOINT, objects=unused,
+            ))
+
+    issues.append(Issue(
+        INFO,
+        "%d start position(s) across %d entrance(s)"
+        % (len(points), len(by_entrance)),
+        SETUPPOINT,
+    ))
+    return issues
+
+
+def _check_level_type(object_map: ObjectMap, catalog, key: str) -> List[Issue]:
+    """Types the level does not use, and the level types that need a word."""
+    issues = []
+    unused = collections.defaultdict(list)
+    for position, obj in enumerate(object_map.objects):
+        object_type = catalog.get(obj.object_id)
+        if object_type is not None and not level_types.visible(object_type, key):
+            unused[obj.object_id].append(position)
+    for object_id, where in sorted(unused.items()):
+        issues.append(Issue(
+            WARNING,
+            "%d %s not used in a %s level."
+            % (len(where), catalog.get(object_id).label, level_types.label(key)),
+            object_id, objects=where,
+        ))
+    if key == level_types.TEST_RACE:
+        issues.append(Issue(WARNING, "Test Race: " + level_types.TEST_RACE_WARNING))
+    if key == level_types.BACKDROP:
+        issues.append(Issue(
+            WARNING,
+            "Menu Backdrop does not draw the track geometry, only the objects.",
+        ))
+    return issues
 
 
 def _check_known_types(object_map: ObjectMap, catalog) -> List[Issue]:

@@ -20,8 +20,11 @@ Três pedidos, nesta ordem de importância:
    filhos de um objeto raiz para mover a grelha inteira de uma vez, com os
    índices já preenchidos.
 
-Estado: **proposta**, revisão 2 (o modo virou o primeiro contato; Horseshoe
-Gulch e as cenas foram para um grupo *Special*). Nada abaixo foi implementado.
+Estado: **implementado** (revisão 2: o modo virou o primeiro contato; Horseshoe
+Gulch e as cenas foram para um grupo *Special*), com o layout de
+`tools/blender/ui_mockup.html`. Fora do escopo por ora: o Minimap e o AI Node
+Graph ficam na sidebar marcados *in development*, e o player de música e a
+galeria de skybox mostram a estrutura sem tocar áudio nem ler as imagens.
 Os números vêm de um levantamento feito sobre os 65 headers e os 136 object maps
 retail extraídos em `extern/dkr-decomp/assets/.vanilla/us.v77` e do código do
 decomp; cada fato cita a sua fonte.

@@ -37,12 +37,16 @@ def _module_classes():
     """
     from . import prefs, props
     from .operators import (ai, checks, custom_textures, edit, geometry,
-                            header, io_objects, new_track, pack, textures)
+                            header, io_objects, level_type, new_track, pack,
+                            placeholders, start_grid, textures)
     from .ui import panels
 
     classes = []
     classes += list(prefs.CLASSES)
     classes += list(props.CLASSES)
+    classes += list(level_type.CLASSES)
+    classes += list(start_grid.CLASSES)
+    classes += list(placeholders.CLASSES)
     classes += list(io_objects.CLASSES)
     classes += list(geometry.CLASSES)
     classes += list(textures.CLASSES)

@@ -6,11 +6,37 @@ import traceback
 
 import bpy
 
-from .. import catalog as catalog_module, scene, validate
+from .. import catalog as catalog_module, level_types, scene, validate
+
+
+def grid_issues(context, key) -> list:
+    """Start grids built for another level type, which the object map cannot see.
+
+    A grid root is not exported, so :mod:`validate` never meets one; but a root
+    built for a race that now sits in a boss race holds eight start positions
+    where the game reads two, and the author should hear it here.
+    """
+    issues = []
+    wanted = level_types.spawn_count(key)
+    for root in scene.grid_roots(context):
+        built = root.get(scene.PROP_GRID_KEY)
+        if built == key or level_types.spawn_count(built) == wanted:
+            continue
+        orders = [int(c.get("dkr_order", -1)) for c in root.children
+                  if scene.is_dkr_object(c)]
+        issues.append(validate.Issue(
+            validate.WARNING,
+            '"%s" was built for %s: %d positions, this level uses %d.'
+            % (root.name, level_types.label(built),
+               level_types.spawn_count(built), wanted),
+            level_types.SETUPPOINT, objects=orders,
+        ))
+    return issues
 
 
 class DKR_OT_validate(bpy.types.Operator):
-    """Check the track for problems that are hard to diagnose in game"""
+    """Check the track for problems that are hard to diagnose in game, using the
+    rules of its level type"""
 
     bl_idname = "dkr.validate"
     bl_label = "Validate Track"
@@ -18,13 +44,15 @@ class DKR_OT_validate(bpy.types.Operator):
 
     def execute(self, context):
         settings = context.scene.dkr
+        key = level_types.current_key(settings)
         try:
             catalog = catalog_module.load()
             object_map = scene.export_object_map(context, catalog)
             report = validate.validate(
-                object_map, catalog,
-                require_racing_track=settings.is_racing_track,
+                object_map, catalog, level_key=key or level_types.NONE,
             )
+            if key:
+                report = validate.Report(list(report) + grid_issues(context, key))
         except Exception as error:  # noqa: BLE001
             traceback.print_exc()
             self.report({"ERROR"}, "validation failed: %s" % error)

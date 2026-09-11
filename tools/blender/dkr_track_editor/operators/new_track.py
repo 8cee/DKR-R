@@ -69,6 +69,15 @@ def convertible(context) -> list:
     ]
 
 
+def converted_meshes(context) -> list:
+    """The author's meshes already turned into a track, kept hidden beside it."""
+    return [
+        obj for obj in context.scene.objects
+        if obj.type == "MESH" and PROP_CONVERTED in obj
+        and geometry.PROP_GEOMETRY not in obj
+    ]
+
+
 def _texture_for(material, slot: int, count: int, own=None) -> int:
     """Which entry of the starting texture table a material draws.
 
@@ -838,4 +847,31 @@ class DKR_OT_track_from_mesh_blank(bpy.types.Operator):
                            keep_textures=self.keep_textures)
 
 
-CLASSES = (DKR_OT_track_from_mesh, DKR_OT_track_from_mesh_blank)
+class DKR_OT_make_convertible(bpy.types.Operator):
+    """Remove the converted mark from a mesh and show it, so Track From Mesh
+    offers it again. Converting replaces the current track geometry, and edits
+    made on the converted geometry are lost"""
+
+    bl_idname = "dkr.make_convertible"
+    bl_label = "Make Convertible Again"
+    bl_options = {"REGISTER", "UNDO"}
+
+    object_name: StringProperty(options={"HIDDEN"})
+
+    def execute(self, context):
+        obj = bpy.data.objects.get(self.object_name)
+        if obj is None or PROP_CONVERTED not in obj:
+            self.report({"ERROR"}, "no converted mesh called %r" % self.object_name)
+            return {"CANCELLED"}
+        del obj[PROP_CONVERTED]
+        try:
+            obj.hide_set(False)
+        except RuntimeError:
+            pass  # not in this view layer; nothing to show
+        self.report({"INFO"}, "%s can be converted again; converting replaces the "
+                    "current track geometry" % obj.name)
+        return {"FINISHED"}
+
+
+CLASSES = (DKR_OT_track_from_mesh, DKR_OT_track_from_mesh_blank,
+           DKR_OT_make_convertible)

@@ -129,7 +129,8 @@ class ObjectType:
     """One of the 85 object types a retail track can contain."""
 
     __slots__ = ("object_id", "node_name", "struct", "category",
-                 "retail_count", "featured", "fields", "_by_name")
+                 "retail_count", "featured", "modes", "slots", "fields",
+                 "_by_name")
 
     def __init__(self, object_id: str, raw: Dict[str, Any]):
         self.object_id = object_id
@@ -138,6 +139,11 @@ class ObjectType:
         self.category = raw.get("category", "misc")
         self.retail_count = raw.get("retail_count", 0)
         self.featured = bool(raw.get("featured"))
+        #: How many retail levels of each kind place this type, keyed as
+        #: :data:`level_types.KEYS`. What the Place list filters on.
+        self.modes: Dict[str, int] = dict(raw.get("modes") or {})
+        #: How many retail instances sit in each object map.
+        self.slots: Dict[str, int] = dict(raw.get("slots") or {})
         self.fields: List[Field] = [Field(f) for f in raw.get("fields", [])]
         self._by_name = {f.name: f for f in self.fields}
 

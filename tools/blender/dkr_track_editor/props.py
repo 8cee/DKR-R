@@ -8,7 +8,7 @@ from bpy.props import (
     PointerProperty, StringProperty,
 )
 
-from . import catalog as catalog_module
+from . import catalog as catalog_module, level_types
 
 #: Blender hands an enum callback's strings to C without taking a reference, so
 #: a list built fresh each call can be collected while the menu still points at
@@ -23,16 +23,46 @@ def _keep(key, items):
 
 
 def category_items(self, context):
-    items = [("ALL", "All", "Every object type")]
+    """Categories with something usable in the chosen tab and level type.
+
+    Counted the way the list will show them, so a category never opens onto
+    nothing. ``ALL`` stays first whatever else changes: the tab and the level
+    type both reset the choice to it, and a dynamic enum is stored by position.
+    """
     try:
         catalog = catalog_module.load()
     except Exception:  # noqa: BLE001 - an enum callback must not raise
-        return items
+        return _keep("category", [("ALL", "All", "Every object type")])
+    counts = level_types.category_counts(
+        catalog, level_types.current_key(self), self.slot,
+        show_all=self.show_incompatible,
+    )
+    items = [("ALL", "All (%d)" % sum(counts.values()),
+              "Every type in this tab")]
     for category in catalog.categories:
-        count = len(catalog.in_category(category))
-        if count:
-            items.append((category, category.title(), "%d types" % count))
+        if counts.get(category):
+            items.append((category, "%s (%d)" % (category.title(), counts[category]),
+                          "%d types" % counts[category]))
+    return _keep("category", items)
+
+
+def _reset_category(self, context):
+    """A new tab or level type has a different set of categories."""
+    self.category = "ALL"
+
+
+def _level_items():
+    items = [(level_types.NONE, "Not Chosen", "No level type yet", 0)]
+    for number, key in enumerate(level_types.FAMILIES, start=1):
+        family = level_types.FAMILIES[key]
+        items.append((key, family.label, family.tooltip, number))
     return items
+
+
+def _sub_items(family):
+    return [(key, text, help_text, number)
+            for number, (key, text, help_text)
+            in enumerate(level_types.SUBTYPES[family])]
 
 
 def texture_group_items(self, context):
@@ -170,9 +200,112 @@ class DKR_SceneSettings(bpy.types.PropertyGroup):
         subtype="FILE_PATH",
     )
 
+    # -- the Level Type ----------------------------------------------------
+    #
+    # Written only by dkr.set_level_type and the importers, so a change always
+    # passes through the confirmation that says what it affects. The three
+    # sub-selectors are separate static enums rather than one that changes
+    # meaning with the family, because Blender stores an enum by position.
+
+    level_type: EnumProperty(
+        name="Level Type",
+        description=(
+            "What kind of level this is. Everything in the addon follows it: "
+            "what can be placed, the start grid, validation and the header"
+        ),
+        items=_level_items(),
+        default=level_types.NONE,
+        update=_reset_category,
+    )
+    challenge_type: EnumProperty(
+        name="Challenge",
+        description=(
+            "The game treats these three differently (race types 64, 65, 66), "
+            "and some objects only work in one of them"
+        ),
+        items=_sub_items(level_types.CHALLENGE),
+        default=level_types.BATTLE,
+        update=_reset_category,
+    )
+    special_type: EnumProperty(
+        name="Kind",
+        description="The level types the game uses for scenes, menus and testing",
+        items=_sub_items(level_types.SPECIAL),
+        default=level_types.CUTSCENE,
+        update=_reset_category,
+    )
+    boss: EnumProperty(
+        name="Boss",
+        description=(
+            "Which boss the player races. Written to the header as "
+            "/boss-race-id (byte 0xB8), and the race is run in its vehicle"
+        ),
+        items=[
+            (boss_id, text, "%s. The retail race uses the %s"
+             % (boss_id, level_types.vehicle_name(vehicle).lower()), number)
+            for number, (boss_id, text, vehicle) in enumerate(level_types.BOSSES)
+        ],
+        default="BOSS_RACE_TRICKY1",
+    )
+    vehicles: EnumProperty(
+        name="Vehicles",
+        description=(
+            "The vehicles the track allows. The player picks from them, and "
+            "the bots race in the player's vehicle"
+        ),
+        items=[(vehicle, name, "", 1 << number)
+               for number, (vehicle, name) in enumerate(level_types.PLAYER_VEHICLES)],
+        options={"ENUM_FLAG"},
+        default={"VEHICLE_CAR"},
+    )
+    default_vehicle: EnumProperty(
+        name="Default Vehicle",
+        description="The vehicle selected when the player enters the track",
+        items=[(vehicle, level_types.vehicle_name(vehicle), "", number)
+               for number, (vehicle, _name) in enumerate(level_types.PLAYER_VEHICLES)],
+        default="VEHICLE_CAR",
+    )
+    laps: IntProperty(
+        name="Laps",
+        description="How many laps the race has, from 1 to 9",
+        default=3, min=1, max=9,
+    )
+    vehicle_override: EnumProperty(
+        name="Vehicle Override",
+        description=(
+            "These are not player vehicles: the bots never use them, and no "
+            "retail track lists them. For debugging only. Replaces the default "
+            "vehicle chosen in Level Type"
+        ),
+        items=[("NONE", "None", "Use the vehicles chosen in Level Type", 0)]
+        + [(vehicle, vehicle, "", number)
+           for number, vehicle in enumerate(level_types.DEBUG_VEHICLES, start=1)],
+        default="NONE",
+    )
+    show_special: BoolProperty(
+        name="Special (advanced)",
+        description=(
+            "The level types the game uses for scenes, menus and testing. "
+            "Not normal game modes"
+        ),
+        default=False,
+    )
+    show_incompatible: BoolProperty(
+        name="Show Incompatible Types",
+        description=(
+            "Also list the types this level type does not use, marked with a "
+            "warning. They can still be placed; validation warns about them"
+        ),
+        default=False,
+        update=_reset_category,
+    )
+
     category: EnumProperty(
         name="Category",
-        description="Narrow the object list",
+        description=(
+            "Narrow the list. Only categories with something usable in this "
+            "tab and level type are offered"
+        ),
         items=category_items,
     )
 
@@ -197,27 +330,24 @@ class DKR_SceneSettings(bpy.types.PropertyGroup):
     )
     track_author: StringProperty(name="Author", default="")
 
-    is_racing_track: BoolProperty(
-        name="Racing Track",
-        description=(
-            "Apply the checks that only make sense for a track people race on, "
-            "such as needing somewhere to start. Turn it off for a hub"
-        ),
-        default=True,
-    )
-
     slot: EnumProperty(
         name="Object Map",
         description=(
-            "Which of the level's two object maps a newly placed object joins. "
-            "The split is not semantic - retail puts the same object types in "
-            "both - so it is remembered per object rather than inferred"
+            "Which of the level's two object maps a newly placed object joins, "
+            "and which types the Place list shows. The game loads both maps "
+            "the same way, so the split is kept per object rather than inferred"
         ),
         items=[
-            ("structure", "Structure", "The track: checkpoints, spawns, scenery"),
-            ("collectables", "Collectables", "Pickups: coins, balloons"),
+            ("structure", "Structure",
+             "The track itself: start positions, checkpoints, zippers, doors, "
+             "scenery. What you place from this tab goes into the structure "
+             "object map"),
+            ("collectables", "Collectables",
+             "Pickups: bananas, coins, weapon balloons, keys. What you place "
+             "from this tab goes into the collectables object map"),
         ],
         default="structure",
+        update=_reset_category,
     )
 
     show_raw: BoolProperty(

@@ -5,7 +5,7 @@ from __future__ import annotations
 import bpy
 from bpy.props import EnumProperty, StringProperty
 
-from .. import catalog as catalog_module, prefs, scene
+from .. import catalog as catalog_module, level_types, prefs, scene
 from ..gltf_io import MapObject
 
 
@@ -21,10 +21,12 @@ def _asset_tree(context):
 #: Types whose field must be unique among their peers, and what groups them.
 #: A checkpoint index has to be unique within its (vehicleType, isAltCheckpoint)
 #: chain - the rule holds across all 51 retail chains - and an AI node's id has
-#: to be unique outright.
+#: to be unique outright. A start position's racerIndex is unique within its
+#: entrance, and a missing one starts that racer at the map origin.
 UNIQUE_FIELDS = {
     "ASSET_OBJECT_CHECKPOINT": ("index", ("vehicleType", "isAltCheckpoint")),
     "ASSET_OBJECT_AINODE": ("nodeID", ()),
+    "ASSET_OBJECT_SETUPPOINT": ("racerIndex", ("entranceID",)),
 }
 
 
@@ -83,7 +85,8 @@ def object_type_items(self, context):
         if object_type.featured:
             label += "  *"
         items.append((object_type.object_id, label, description))
-    return items or [("NONE", "no types in this category", "")]
+    return _keep("object_type",
+                 items or [("NONE", "no types in this category", "")])
 
 
 class DKR_OT_place_object(bpy.types.Operator):
@@ -97,6 +100,25 @@ class DKR_OT_place_object(bpy.types.Operator):
         name="Object Type",
         description="ASSET_OBJECT_* identifier to place",
     )
+    preset: StringProperty(
+        name="Preset",
+        description="A preset of the type, such as a weapon balloon's colour",
+        default="", options={"SKIP_SAVE"},
+    )
+
+    @classmethod
+    def description(cls, context, properties):
+        """Each Place button says what it places, not what placing is."""
+        try:
+            object_type = _catalog().get(properties.object_id)
+        except Exception:  # noqa: BLE001 - a tooltip must not raise
+            object_type = None
+        if object_type is None:
+            return cls.__doc__
+        return level_types.place_description(
+            object_type, level_types.current_key(context.scene.dkr),
+            level_types.preset(properties.preset) if properties.preset else None,
+        )
 
     def execute(self, context):
         catalog = _catalog()
@@ -107,6 +129,11 @@ class DKR_OT_place_object(bpy.types.Operator):
             return {"CANCELLED"}
 
         fields = object_type.fresh_fields()
+        chosen = level_types.preset(self.preset) if self.preset else None
+        if chosen is not None and chosen.object_id == object_id:
+            fields.update(chosen.fields)
+        else:
+            chosen = None
         _assign_free_index(context, object_id, fields)
 
         placed = MapObject(
@@ -121,21 +148,32 @@ class DKR_OT_place_object(bpy.types.Operator):
                                    _asset_tree(context),
                                    context.scene.dkr.slot)
         empty["dkr_order"] = scene.next_order(context)
+        if chosen is not None:
+            # A label for the outliner only; the node name the export writes
+            # stays the type's own, in dkr_node_name.
+            empty.name = chosen.label.replace(" ", "")
 
         for obj in context.selected_objects:
             obj.select_set(False)
         empty.select_set(True)
         context.view_layer.objects.active = empty
 
+        shown = chosen.label if chosen else object_type.label
+        key = level_types.current_key(context.scene.dkr)
         if empty.type == "EMPTY" and _asset_tree(context) is None:
             self.report(
                 {"WARNING"},
                 "placed %s as a marker; set the decomp asset path in the addon "
-                "preferences to draw objects with their real artwork"
-                % object_type.label,
+                "preferences to draw objects with their real artwork" % shown,
             )
+        elif not level_types.visible(object_type, key):
+            self.report({"WARNING"}, "placed %s, which a %s level does not use"
+                        % (shown, level_types.label(key)))
         else:
-            self.report({"INFO"}, "placed %s" % object_type.label)
+            index = (" (racerIndex %d)" % fields["racerIndex"]
+                     if "racerIndex" in fields else "")
+            self.report({"INFO"}, "placed %s%s in the %s map"
+                        % (shown, index, scene.slot_of(empty)))
         return {"FINISHED"}
 
 
@@ -231,6 +269,17 @@ class DKR_OT_select_by_type(bpy.types.Operator):
 
     object_id: StringProperty(options={"HIDDEN"})
 
+    @classmethod
+    def description(cls, context, properties):
+        if not properties.object_id:
+            return cls.__doc__
+        try:
+            object_type = _catalog().get(properties.object_id)
+        except Exception:  # noqa: BLE001 - a tooltip must not raise
+            object_type = None
+        name = object_type.label if object_type else properties.object_id
+        return "Select every %s in the scene" % name
+
     def execute(self, context):
         target = self.object_id
         if not target:
@@ -270,21 +319,38 @@ class DKR_OT_refresh_artwork(bpy.types.Operator):
             return {"CANCELLED"}
 
         catalog = _catalog()
-        existing = scene.export_object_map(context, catalog)
         root = scene.ensure_root(context)
+        context.view_layer.update()
+
+        # Everything each object is has to be read before any is removed: the
+        # slot and the parent live on the object, and reading them afterwards
+        # reads an empty scene and rebuilds nothing. A parent that is itself a
+        # DKR object is about to be replaced, so only a grid root is kept.
+        existing = sorted(scene.iter_dkr_objects(context),
+                          key=lambda o: o.get("dkr_order", 1 << 30))
+        records = []
+        for obj in existing:
+            parent = obj.parent
+            if parent is not None and scene.is_dkr_object(parent):
+                parent = None
+            records.append((scene.read_object(obj, catalog), scene.slot_of(obj),
+                            parent, obj.matrix_world.copy(), obj.get("dkr_order")))
 
         # An object's Blender type is fixed at creation, so an Empty cannot grow
         # a mesh. Rebuilding is the only way to give artwork to objects that
         # were placed before the asset path was known.
-        for obj in list(scene.iter_dkr_objects(context)):
+        for obj in existing:
             bpy.data.objects.remove(obj, do_unlink=True)
 
-        slots = [scene.slot_of(o) for o in scene.iter_dkr_objects(context)]
-        rebuilt = [
-            scene.create_empty(context, obj, catalog, root, tree, slot)
-            for obj, slot in zip(existing.objects, slots)
-        ]
-        scene.stamp_order(rebuilt)
+        rebuilt = []
+        for placed, slot, parent, matrix, order in records:
+            obj = scene.create_empty(context, placed, catalog, root, tree, slot)
+            if parent is not None:
+                obj.parent = parent
+            obj.matrix_world = matrix
+            if order is not None:
+                obj["dkr_order"] = order
+            rebuilt.append(obj)
 
         drawn = sum(1 for o in rebuilt if preview.PROP_PREVIEW in o)
         self.report(
