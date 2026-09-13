@@ -9,6 +9,8 @@
 /.vs/
 /.vscode/
 /--portable/
+/unified-mod-test-902561023969800/
+/unified-mod-test-902924382217100/
 CMakeUserPresets.json
 
 # Build-system and compiler intermediates

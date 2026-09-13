@@ -69,6 +69,7 @@ struct Group {
 struct EndScopeResult {
     Group ended{};
     bool had_scope = false;
+    bool rejected_begin = false;
 };
 
 class GroupState {
@@ -79,6 +80,7 @@ public:
         selected_matrix_ = 0U;
         scope_depth_ = 0U;
         rejected_scope_begins_ = 0U;
+        rejected_scope_depth_ = 0U;
     }
 
     constexpr void load_matrix(std::size_t slot, std::uint32_t identity,
@@ -108,8 +110,9 @@ public:
                                              bool interpolate_vertices,
                                              bool interpolate_texcoords = false,
                                              bool interpolate_tiles = false) {
-        if (scope_depth_ >= scopes_.size()) {
+        if (rejected_scope_depth_ != 0U || scope_depth_ >= scopes_.size()) {
             ++rejected_scope_begins_;
+            ++rejected_scope_depth_;
             return false;
         }
         scopes_[scope_depth_++] = Group{
@@ -119,6 +122,12 @@ public:
     }
 
     [[nodiscard]] constexpr EndScopeResult end_scope() {
+        // A rejected nested begin still has a matching end command. Consume
+        // that end without popping a successfully recorded outer scope.
+        if (rejected_scope_depth_ != 0U) {
+            --rejected_scope_depth_;
+            return {{}, false, true};
+        }
         if (scope_depth_ == 0U) {
             return {};
         }
@@ -150,6 +159,10 @@ public:
         return rejected_scope_begins_;
     }
 
+    [[nodiscard]] constexpr bool has_rejected_scope() const {
+        return rejected_scope_depth_ != 0U;
+    }
+
     [[nodiscard]] constexpr bool contains_mode(std::uint8_t mode) const {
         for (std::size_t index = 0U; index < scope_depth_; ++index) {
             if (scopes_[index].mode == mode) {
@@ -169,6 +182,7 @@ private:
     std::size_t selected_matrix_ = 0U;
     std::size_t scope_depth_ = 0U;
     std::uint32_t rejected_scope_begins_ = 0U;
+    std::uint32_t rejected_scope_depth_ = 0U;
 };
 
 } // namespace dkr::runtime::interpolation

@@ -180,19 +180,36 @@ bool DatagramSocket::receive(PeerAddress& source,
     std::array<std::uint8_t, 2048> buffer{};
 #if defined(_WIN32)
     int source_size = static_cast<int>(source.storage.size());
+    constexpr int receive_flags = 0;
 #else
     socklen_t source_size = static_cast<socklen_t>(source.storage.size());
+    constexpr int receive_flags = MSG_TRUNC;
 #endif
     const int received = ::recvfrom(impl_->handle,
-        reinterpret_cast<char*>(buffer.data()), static_cast<int>(buffer.size()), 0,
+        reinterpret_cast<char*>(buffer.data()), static_cast<int>(buffer.size()), receive_flags,
         address_ptr(source), &source_size);
     if (received < 0) {
         const int code = last_error();
-        if (would_block(code)) {
+        // These errors do not invalidate this unconnected UDP socket.
+        // Oversized datagrams are discarded before authentication. ICMP
+        // errors cannot identify an authenticated peer; the session's
+        // progress/liveness policy, not an arbitrary datagram, owns expiry.
+#if defined(_WIN32)
+        const bool transient = code == WSAEMSGSIZE || code == WSAEINTR ||
+            code == WSAECONNRESET || code == WSAECONNREFUSED;
+#else
+        const bool transient = code == EINTR || code == EMSGSIZE ||
+            code == ECONNREFUSED;
+#endif
+        if (would_block(code) || transient) {
             error.clear();
             return false;
         }
         error = socket_error("Receiving a UDP datagram", code);
+        return false;
+    }
+    if (static_cast<std::size_t>(received) > buffer.size()) {
+        error.clear();
         return false;
     }
     source.size = static_cast<std::uint32_t>(source_size);
