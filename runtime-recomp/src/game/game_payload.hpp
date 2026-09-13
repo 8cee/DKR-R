@@ -18,6 +18,11 @@ struct GamePayload {
     RecompiledEntrypoint main_game_loop;
     RecompiledEntrypoint get_settings;
     RecompiledEntrypoint leveltable_type;
+    // Asset plumbing used by the custom track hooks: the extended level table
+    // is allocated through the retail pool, and retail offsets are delegated
+    // back to the retail loader rather than reimplemented.
+    RecompiledEntrypoint asset_load;
+    RecompiledEntrypoint mempool_alloc_safe;
     RecompiledEntrypoint get_misc_asset;
     RecompiledEntrypoint sound_clear_delayed;
     RecompiledEntrypoint reset_delayed_text;

@@ -31,6 +31,8 @@ const dkr::runtime::GamePayload& dkr::runtime::payload_v77() {
         .main_game_loop = main_game_loop,
         .get_settings = get_settings,
         .leveltable_type = leveltable_type,
+        .asset_load = asset_load,
+        .mempool_alloc_safe = mempool_alloc_safe,
         .get_misc_asset = get_misc_asset,
         .sound_clear_delayed = sound_clear_delayed,
         .reset_delayed_text = reset_delayed_text,

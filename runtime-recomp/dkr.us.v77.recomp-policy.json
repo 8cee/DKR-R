@@ -901,6 +901,42 @@
       "beforeVram": "0x800A4044",
       "text": "extern void dkr_restore_multiplayer_race_music(uint8_t*, recomp_context*); dkr_restore_multiplayer_race_music(rdram, ctx);",
       "reason": "Modern may route the original 3/4-player mute decision through DKR's existing level_music_start branch; Accurate preserves the retail silence and both modes retain the authored countdown, fade and sequence ownership."
+    },
+    {
+      "function": "asset_table_load",
+      "beforeVram": "0x80076C58",
+      "text": "extern void dkr_custom_tracks_table_load_begin(uint8_t*, recomp_context*); dkr_custom_tracks_table_load_begin(rdram, ctx);",
+      "reason": "Record the requested asset section at asset_table_load's entry. The argument register is reused before the epilogue, so the section cannot be recovered later."
+    },
+    {
+      "function": "asset_table_load",
+      "beforeVram": "0x80076CE0",
+      "text": "extern void dkr_custom_tracks_table_load_end(uint8_t*, recomp_context*); dkr_custom_tracks_table_load_end(rdram, ctx);",
+      "reason": "At the common epilogue, publish a longer ASSET_LEVEL_HEADERS table when custom tracks are installed. level_global_init counts to the -1 terminator and derives both the retail range check and gNumberOfWorlds from the table, so a longer table adds levels and worlds without patching a single bounds check."
+    },
+    {
+      "function": "asset_load",
+      "beforeVram": "0x80076E68",
+      "text": "extern void dkr_custom_tracks_asset_load_begin(uint8_t*, recomp_context*); dkr_custom_tracks_asset_load_begin(rdram, ctx);",
+      "reason": "Capture asset_load's four arguments at entry. dmacopy clobbers the destination register before the DMA path's epilogue is reached."
+    },
+    {
+      "function": "asset_load",
+      "beforeVram": "0x80076ED0",
+      "text": "extern void dkr_custom_tracks_asset_load_end(uint8_t*, recomp_context*); dkr_custom_tracks_asset_load_end(rdram, ctx);",
+      "reason": "Reached only on asset_load's DMA path. Custom level header offsets sit just past the retail section, so the authored DMA has read unrelated but in-ROM bytes; replacing them here serves the mod payload without patching the retail loader."
+    },
+    {
+      "function": "get_track_id_to_load",
+      "beforeVram": "0x8009C21C",
+      "text": "extern void dkr_custom_tracks_track_id_override(uint8_t*, recomp_context*); dkr_custom_tracks_track_id_override(rdram, ctx);",
+      "reason": "Common return convergence of get_track_id_to_load. Track Lab replaces the chosen level id here so an author can reach a custom track without walking the retail menus, reusing the same return value that Track Select and Trophy Race already drive through gTrackIdToLoad rather than adding a second selection path."
+    },
+    {
+      "function": "mode_menu",
+      "beforeVram": "0x8006DD70",
+      "text": "extern void dkr_custom_tracks_auto_boot(uint8_t*, recomp_context*); dkr_custom_tracks_auto_boot(rdram, ctx);",
+      "reason": "Immediately after mode_menu reads menu_loop result, before the MENU_RESULT_FLAGS_200 test. Track Lab auto boot answers with the same value the menus produce when a track is chosen, so retail performs its own start sequence rather than the host reproducing vehicle, entrance, cutscene and game mode by hand."
     }
   ],
   "stubs": [
