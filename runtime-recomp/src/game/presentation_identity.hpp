@@ -1,5 +1,8 @@
 #pragma once
 
+#include "presentation_marker_policy.hpp"
+#include "hud_group_layout.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -2368,6 +2371,8 @@ struct PresentationMarker {
     std::uint8_t mode = 0U;
     std::uint16_t token = 0U;
     std::uint8_t variant = 0U;
+    PresentationMarkerKind kind = PresentationMarkerKind::Geometry;
+    hud::groups::Transform hud_transform{};
 };
 
 inline constexpr std::size_t kMaximumMarkersPerCommand = 8U;
@@ -2397,7 +2402,9 @@ constexpr bool submitted_task_matches(std::uint32_t submitted_scene,
 bool record_presentation_marker(std::uint32_t command_address,
                                 std::uint8_t mode,
                                 std::uint16_t token,
-                                std::uint8_t variant);
+                                std::uint8_t variant,
+                                PresentationMarkerKind kind,
+                                hud::groups::Transform hud_transform = {});
 PresentationMarkerList active_presentation_markers(
     std::uint32_t command_address);
 
