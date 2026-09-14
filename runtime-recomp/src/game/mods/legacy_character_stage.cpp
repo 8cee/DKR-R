@@ -15,16 +15,17 @@ std::uint32_t invoke(OriginalPiHandler fn,std::span<std::uint8_t> memory,const r
     fn(memory.data(),&ctx);return static_cast<std::uint32_t>(ctx.r2);
 }
 void face_camera(CharacterMenuMemory& g,std::uint32_t object,std::uint32_t camera) {
-    // Both native transforms use +Z as forward. A fixed half-turn exposes the
-    // sides of actors at the stage's outer edges. Aim only their yaw toward the
-    // actual (including cutscene) camera; retain position, scale, pitch and roll.
+    // Selection models face local -Z, not +Z. The authored stage puts its
+    // camera at +Z and its actors near a half-turn (Conker ~193, Timber ~159
+    // degrees). Preserve that convention while aiming the outer actors at the
+    // actual camera. Only yaw changes; animation, scale and position do not.
     const double dx=static_cast<double>(std::bit_cast<float>(g.read(camera+0x0c)))-
         std::bit_cast<float>(g.read(object+0x0c));
     const double dz=static_cast<double>(std::bit_cast<float>(g.read(camera+0x14)))-
         std::bit_cast<float>(g.read(object+0x14));
     if(!std::isfinite(dx)||!std::isfinite(dz))throw Error("Invalid selection camera position.");
     if(dx*dx+dz*dz<0.000001)return; // No defined yaw when directly above the actor.
-    const auto yaw=static_cast<int>(std::lround(std::atan2(dx,dz)*32768.0/std::numbers::pi));
+    const auto yaw=0x8000+static_cast<int>(std::lround(std::atan2(dx,dz)*32768.0/std::numbers::pi));
     g.write(object,static_cast<unsigned>(yaw)&0xffffU,2);
 }
 }

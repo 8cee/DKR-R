@@ -1,4 +1,4 @@
-# Legacy activation milestone — v1.0.5 Beta 5
+# Legacy activation phase — v1.0.5 Beta 5
 
 Implementation authorized 2026-09-08. This checklist is implementation state,
 not a declaration of gameplay compatibility. Do not package as complete until
@@ -46,7 +46,7 @@ not establish real scene lifetimes, full gameplay, or online compatibility.
 
 ## Private qualification progress — 2026-09-09
 
-Not a packaged or finished milestone. The accepted rollback archives remain
+Not a packaged or finished phase. The accepted rollback archives remain
 unchanged. The main Windows development build is deliberately configured with
 `DKR_LEGACY_QUALIFICATION=ON`; both packaging scripts reject it before staging.
 

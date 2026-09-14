@@ -1,4 +1,13 @@
-# DKR-R 1.0.4
+# DKR-R 1.0.5 Beta 9
+
+This playtest build corrects custom-character selection facing and expands
+custom portrait/voice coverage while retaining the Blender Track Lab additions.
+Track Lab is available in **Mods/Hacks**, directly below **Magic Codes**, with
+its Blender working-folder, import and testing controls intact.
+Custom legacy mods remain offline-only, with at most two active custom characters.
+Characters can only use replacement portraits and sounds actually supplied by
+their mod; unchanged donor assets remain unchanged. Saved ghost identities still
+use the original game's character IDs.
 
 DKR-R is a native static recompilation of Diddy Kong Racing. This package does
 not include the game ROM or extracted game assets. Supply your own legally
@@ -17,8 +26,7 @@ Open settings with Escape, F1 or controller Back/View. Alt+Enter and F11 toggle
 fullscreen. Local settings, saves, Controller Paks, imported filters and texture
 packs are stored outside this package.
 
-Modern mode includes compact HUD controls for original placement, a protected
-safe area or fit-to-viewport positioning, plus a global HUD-size adjustment.
+Modern mode includes HUD controls for original 4:3 or fit-to-window placement.
 HUD artwork retains its original proportions; these presentation settings do
 not alter gameplay or online determinism.
 

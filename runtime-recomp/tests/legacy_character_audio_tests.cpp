@@ -65,11 +65,12 @@ int main(int argc,char** argv){try{
  for(const auto& cue:race.cues)check(cue.sound==1 && cue.min_volume==17 && cue.range==15000 && cue.pitch==95);
  for(unsigned base=0;base<10;++base) {
   check(character_race_cue(0x156+base,base)==16);
+  check(character_race_cue(0x7b+base,base)==17);
   for(unsigned i=0;i<8;++i){check(character_race_cue(0x162+i*12+base,base)==int(i));check(character_race_cue(0x1c2+i*12+base,base)==int(i+8));}
  }
  for(unsigned id=0;id<65536;++id) {
   unsigned character=999,cue=999;const bool encoded=decode_character_race_sound(id,character,cue);
-  check(encoded==(id>=0x4000 && id<0x4200 && (id&31)<17));
+  check(encoded==(id>=0x4000 && id<0x4200 && (id&31)<18));
   if(encoded)check(character_race_sound(character,cue)==id);
  }
  auto bad_race=race;bad_race.cues[16].sound=1000;rejects([&]{validate_character_race_audio(bad_race);});

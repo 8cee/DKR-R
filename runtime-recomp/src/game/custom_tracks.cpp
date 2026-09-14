@@ -965,8 +965,17 @@ void scan_one(const std::filesystem::path& directory, const char* label) {
         !std::filesystem::is_directory(directory, code)) {
         return;
     }
-    for (const auto& item :
-         std::filesystem::directory_iterator(directory, code)) {
+    // Filesystems enumerate entries differently. Assign appended asset indices
+    // in a stable order on Windows and Linux, preserving installed-first
+    // precedence over the author's working folder.
+    std::vector<std::filesystem::directory_entry> items;
+    for (const auto& item : std::filesystem::directory_iterator(directory, code)) {
+        items.push_back(item);
+    }
+    std::sort(items.begin(), items.end(), [](const auto& a, const auto& b) {
+        return a.path().filename().generic_u8string() < b.path().filename().generic_u8string();
+    });
+    for (const auto& item : items) {
         if (!item.is_directory() || item.path().extension() != ".dkrmap") {
             continue;
         }

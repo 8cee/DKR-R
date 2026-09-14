@@ -96,7 +96,8 @@ if(NOT DKR_LEGACY_CHARACTER_MENU_PIPELINE_ROOT STREQUAL "")
         set(generated "${DKR_LEGACY_CHARACTER_MENU_PIPELINE_ROOT}/RecompiledFuncs-v${rev}")
         add_executable(${target} ../legacy_character_presentation_guest_tests.cpp)
         foreach(fn IN ITEMS postrace_load results_render func_80098774 play_random_character_voice racer_play_sound
-                sound_play_spatial audspat_play_sound_at_position sound_play_direct sound_play)
+                sound_play_spatial audspat_play_sound_at_position sound_play_direct sound_play
+                hud_eggs_portrait hud_lives_render hud_treasure hud_main_hub hud_element_render menu_cinematic_loop)
             target_sources(${target} PRIVATE "${generated}/${fn}.c")
         endforeach()
         target_link_libraries(${target} PRIVATE DKRLegacyGuestIO)

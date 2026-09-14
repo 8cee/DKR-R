@@ -16,7 +16,7 @@ struct CharacterRaceCue : CharacterCue {
 };
 struct CharacterRaceAudio {
     Bytes control,samples;
-    std::array<CharacterRaceCue,17> cues{}; // eight positive, eight negative, horn
+    std::array<CharacterRaceCue,18> cues{}; // eight positive, eight negative, horn, ten bananas
 };
 CharacterRaceAudio prepare_character_race_audio(View control,View samples,View sound_table,unsigned base_character);
 void validate_character_race_audio(const CharacterRaceAudio&);

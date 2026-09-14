@@ -9352,14 +9352,50 @@ void DrawTrackLabControls(float width) {
     }
 }
 
-void DrawModsHacks(float width) {
 #include "runtime_mod_library_ui.inl"
+
+void DrawTrackLabSection(float width) {
+    static bool track_lab_expanded = true;
+    if (DrawDisclosureButton("TRACK LAB", "track-lab", track_lab_expanded, width)) {
+        ImGui::Dummy({0.0F, 6.0F});
+        // Retain the authored Track Lab import/arming/profile behaviour.
+        if (!dkr::runtime::enhancements::modern_presentation_enabled()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
+            ImGui::TextWrapped(
+                "You are on the Accurate profile. Importing, arming or playing "
+                "a track switches to Modern - it needs it - and tells you so. "
+                "Accurate itself stays the untouched reference.");
+            ImGui::PopStyleColor();
+            ImGui::Dummy({0.0F, 6.0F});
+        }
+        DrawTrackLabControls(width);
+    }
+}
+
+// Texture cards and Track Lab live on different pages but use the same modal.
+// Render it in the active page, outside either disclosure's expanded state.
+void DrawPendingTexturePackModals() {
+    if (g_texture_pack_manage_request ||
+        ImGui::IsPopupOpen("Manage texture pack") ||
+        ImGui::IsPopupOpen("Remove texture pack?")) {
+        if (g_texture_pack_manage_request) {
+            ImGui::OpenPopup("Manage texture pack");
+            g_texture_pack_manage_request = false;
+        }
+        const bool request_remove_modal = DrawTexturePackManagementModal(
+            dkr::runtime::texture_packs::snapshot(true));
+        if (request_remove_modal) ImGui::OpenPopup("Remove texture pack?");
+        DrawTexturePackRemovalModal();
+    }
+}
 
 void DrawModsHacks(float width, bool game_running = false) {
     DrawPageHeading("MODS / HACKS");
     ImGui::TextDisabled("Choose the island rules that DKR-R applies on the next launch.");
     ImGui::Dummy({0.0F, 16.0F});
     DrawMagicCodes(width);
+    ImGui::Dummy({0.0F, 10.0F});
+    DrawTrackLabSection(width);
     ImGui::Dummy({0.0F, 10.0F});
     const auto mods=g_legacy_imports.snapshot();
     const bool mods_locked=game_running || dkr::runtime::netplay::session().active() || g_mod_launch.snapshot().modal;
@@ -9414,6 +9450,7 @@ void DrawModsHacks(float width, bool game_running = false) {
             }
         }
     }
+    DrawPendingTexturePackModals();
 }
 
 void DrawTextures(float width) {
@@ -9432,43 +9469,7 @@ void DrawTextures(float width) {
         if(dkr::runtime::enhancements::modern_presentation_enabled())DrawCrtOverlayControls(width);
         else DrawColoredWrapped(kMuted,"CRT overlays are available in the Modern presentation profile. Accurate mode remains unchanged.");
     }
-    ImGui::Dummy({0.0F, 10.0F});
-
-    static bool track_lab_expanded = true;
-    if (DrawDisclosureButton("TRACK LAB", "track-lab", track_lab_expanded,
-                             width)) {
-        ImGui::Dummy({0.0F, 6.0F});
-        // Track Lab draws in Accurate too - the list, import and arming. What
-        // stays impossible in Accurate is a custom track actually loading, and
-        // it still is: every arm/play path here goes through Modern first, so
-        // the "untouched regression baseline" is never a custom track.
-        if (!dkr::runtime::enhancements::modern_presentation_enabled()) {
-            ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
-            ImGui::TextWrapped(
-                "You are on the Accurate profile. Importing, arming or playing "
-                "a track switches to Modern - it needs it - and tells you so. "
-                "Accurate itself stays the untouched reference.");
-            ImGui::PopStyleColor();
-            ImGui::Dummy({0.0F, 6.0F});
-        }
-        DrawTrackLabControls(width);
-    }
-
-    // One shared single-pack modal, reachable from a browser card's MANAGE
-    // button and from a Track Lab "Manage" line. Rendered here so it exists
-    // whichever section is expanded, and only touched when it might be open.
-    if (g_texture_pack_manage_request ||
-        ImGui::IsPopupOpen("Manage texture pack") ||
-        ImGui::IsPopupOpen("Remove texture pack?")) {
-        if (g_texture_pack_manage_request) {
-            ImGui::OpenPopup("Manage texture pack");
-            g_texture_pack_manage_request = false;
-        }
-        const bool request_remove_modal = DrawTexturePackManagementModal(
-            dkr::runtime::texture_packs::snapshot(true));
-        if (request_remove_modal) ImGui::OpenPopup("Remove texture pack?");
-        DrawTexturePackRemovalModal();
-    }
+    DrawPendingTexturePackModals();
 }
 
 std::string FormatRecordTime(std::uint16_t frames) {

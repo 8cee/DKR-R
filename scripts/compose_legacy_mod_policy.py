@@ -168,12 +168,20 @@ def compose(policy: dict, fragment: dict, sections: list) -> dict:
         expected = [int(word, 0) for word in site["expected"]]
         if len(expected) != 3 or [words.get(address + i * 4) for i in range(3)] != expected:
             raise ValueError(f"Asset API entry signature changed: {name}")
-        if any(int(entry["beforeVram"], 0) == address for entry in hooks) or any(
-                int(entry["vram"], 0) == address for entry in patches):
+        owners=[entry for entry in hooks if int(entry["beforeVram"],0)==address]
+        text="extern int dkr_legacy_asset_api(uint8_t*, recomp_context*, unsigned); " + f"if (dkr_legacy_asset_api(rdram, ctx, {operation}U)) return;"
+        shared={"asset_table_load":"dkr_custom_tracks_table_load_begin", "asset_load":"dkr_custom_tracks_asset_load_begin"}
+        callback=shared.get(name)
+        allowed=f"extern void {callback}(uint8_t*, recomp_context*); {callback}(rdram, ctx);" if callback else None
+        if any(int(entry["vram"], 0) == address for entry in patches) or (owners and
+                (len(owners)!=1 or owners[0].get('function')!=name or owners[0].get('text')!=allowed)):
             raise ValueError(f"Asset API entry conflicts with an existing policy: {name}")
-        hooks.append({"function": name, "beforeVram": f"0x{address:08X}",
-                      "text": "extern int dkr_legacy_asset_api(uint8_t*, recomp_context*, unsigned); "
-                              f"if (dkr_legacy_asset_api(rdram, ctx, {operation}U)) return;",
+        if owners:
+            # Mounted legacy reads explicitly run the Blender extension via
+            # the runtime bridge. Unmounted reads retain its retail hooks.
+            owners[0]['text']=text+' '+owners[0]['text']
+        else:hooks.append({"function": name, "beforeVram": f"0x{address:08X}",
+                      "text": text,
                       "reason": "Resolve a mounted immutable bank at the original function entry; leave the complete retail path intact without a mount."})
     return result
 

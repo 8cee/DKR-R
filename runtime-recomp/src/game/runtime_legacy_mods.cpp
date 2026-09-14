@@ -20,6 +20,8 @@
 
 extern "C" void osPiStartDma_recomp(std::uint8_t*,recomp_context*);
 extern "C" void dkr_character_select_animation_fraction(std::uint8_t*,recomp_context*);
+extern "C" void dkr_custom_tracks_extend_table(std::uint8_t*,recomp_context*,std::uint32_t);
+extern "C" int dkr_custom_tracks_asset_override(std::uint8_t*,recomp_context*);
 namespace dkr::runtime::legacy {
 namespace {
 std::atomic<std::shared_ptr<mods::RuntimeSession>> session;
@@ -238,6 +240,35 @@ extern "C" unsigned dkr_legacy_character_race_sound(std::uint8_t* rdram,recomp_c
     } catch(const ultramodern::thread_terminated&){throw;}
       catch(const std::exception& e){legacy::fail(e.what());}
 }
+extern "C" void dkr_legacy_character_hud_bind(std::uint8_t* rdram,recomp_context* ctx,std::uint32_t hud,std::uint32_t racer) {
+    using namespace dkr::runtime;
+    const auto state=legacy::characters.load();if(!state || !state->selector)return;
+    try {
+        dkr::mods::CharacterMenuFields fields;fields.fill(0x80000000U);
+        dkr::mods::CharacterMenuMemory guest({rdram,recomp::mem_size},fields);
+        // 0/1 are explicit Adventure player slots; other values are verified
+        // native Object_Racer pointers. AI's signed -1 never matches a player.
+        const auto player=racer<4?racer:guest.read(racer,2);
+        std::lock_guard lock(state->mutex);
+        state->presentation.bind_hud(std::uint32_t(ctx->r29),hud,state->roster,state->selector->entries(),player);
+    } catch(const ultramodern::thread_terminated&){throw;}
+      catch(const std::exception& e){legacy::fail(e.what());}
+}
+extern "C" void dkr_legacy_character_hud_unbind(std::uint8_t*,recomp_context* ctx) {
+    const auto state=dkr::runtime::legacy::characters.load();if(!state)return;
+    std::lock_guard lock(state->mutex);state->presentation.unbind_hud(std::uint32_t(ctx->r29));
+}
+extern "C" std::uint32_t dkr_legacy_character_hud_lookup(std::uint8_t* rdram,recomp_context* ctx,std::uint32_t stack,std::uint32_t hud) {
+    using namespace dkr::runtime;
+    const auto state=legacy::characters.load();if(!state || !state->selector)return 0;
+    try {
+        dkr::mods::CharacterMenuFields fields;fields.fill(0x80000000U);
+        dkr::mods::CharacterMenuMemory guest({rdram,recomp::mem_size},fields);
+        const auto sprite=guest.read(hud+6,2);
+        std::lock_guard lock(state->mutex);return state->presentation.hud_lookup(stack,hud,sprite);
+    } catch(const ultramodern::thread_terminated&){throw;}
+      catch(const std::exception& e){legacy::fail(e.what());}
+}
 extern "C" int dkr_legacy_character_play_sound(std::uint8_t* rdram,recomp_context* ctx,unsigned kind) {
     using namespace dkr::runtime;
     const auto state=legacy::characters.load();if(!state || !state->selector)return 0;
@@ -246,6 +277,20 @@ extern "C" int dkr_legacy_character_play_sound(std::uint8_t* rdram,recomp_contex
         return state->presentation.play({rdram,recomp::mem_size},*ctx,legacy::presentation_calls(*p),state->selector->entries(),kind);
     } catch(const ultramodern::thread_terminated&){throw;}
       catch(const std::exception& e){legacy::fail(e.what());}
+}
+extern "C" unsigned dkr_legacy_character_cinematic_id(std::uint8_t*,recomp_context*,unsigned racer,unsigned native_id) {
+    using namespace dkr::runtime;
+    const auto state=legacy::characters.load();if(!state || !state->selector)return native_id;
+    try {
+        std::lock_guard lock(state->mutex);
+        return state->presentation.cinematic_id(state->roster,state->selector->entries(),racer,native_id);
+    } catch(const std::exception& e){legacy::fail(e.what());}
+}
+extern "C" std::uint32_t dkr_legacy_character_cinematic_portrait(std::uint8_t*,recomp_context*,unsigned id) {
+    using namespace dkr::runtime;
+    const auto state=legacy::characters.load();if(!state || !state->selector)return 0;
+    try {return state->presentation.cinematic_portrait(id);}
+    catch(const std::exception& e){legacy::fail(e.what());}
 }
 extern "C" int dkr_legacy_track_menu(std::uint8_t* rdram,recomp_context* ctx,unsigned event,const std::uint32_t* fields,unsigned observed) {
     using namespace dkr::runtime;
@@ -310,8 +355,12 @@ extern "C" int dkr_legacy_asset_api(std::uint8_t* rdram,recomp_context* ctx,unsi
         auto lease=active->acquire();const auto mount=lease.route();if(!mount)return 0;
         const auto payload=active_payload();
         if(!payload)throw dkr::mods::Error("The custom asset loader has no selected revision.");
-        return dkr::mods::dispatch_asset_api(static_cast<dkr::mods::AssetOperation>(operation),mount,
+        const auto section=std::uint32_t(ctx->r4);
+        if(operation==unsigned(dkr::mods::AssetOperation::PartialLoad) && dkr_custom_tracks_asset_override(rdram,ctx))return 1;
+        const bool handled=dkr::mods::dispatch_asset_api(static_cast<dkr::mods::AssetOperation>(operation),mount,
             {rdram,recomp::mem_size},*ctx,{payload->asset_allocate,payload->asset_release,payload->asset_copy});
+        if(handled && operation==unsigned(dkr::mods::AssetOperation::TableLoad))dkr_custom_tracks_extend_table(rdram,ctx,section);
+        return handled;
     } catch(const ultramodern::thread_terminated&){throw;}
       catch(const std::exception& error){legacy::fail(error.what());}
 }

@@ -37,6 +37,18 @@ class PipelineTests(unittest.TestCase):
             put('play_random_character_voice', voice+4, 0x3104ffff)
             put('racer_play_sound', horn, 0x0c0004c0)
             put('racer_play_sound', horn+4, 0xafa00010)
+            bonus,banana=(0x8003b30c,0x8003db10) if rev=='us.v77' else (0x8003b34c,0x8003db50)
+            for name,pc,delay in [('obj_loop_bonus',bonus,0x01202025),('obj_loop_banana',banana,0xafa00010)]:
+                put(name,pc,0x0c0004c0);put(name,pc+4,delay)
+            renderer=0x800aa600 if rev=='us.v77' else 0x800aab5c
+            put('hud_element_render',renderer,0x27bdff48)
+            for name,pc,owner,offset,delay in presentation.HUD_CALLS[rev]:
+                put(name,pc,0x0c000000|((renderer>>2)&0x3ffffff));put(name,pc+4,delay);put(name,pc+8,0)
+            for pc,lookup,expected in presentation.HUD_LOADS[rev]:put('hud_element_render',pc,expected)
+            capture,draw=presentation.CINEMATIC[rev]
+            put('menu_trophy_race_rankings_loop',capture-4,0x80820059)
+            put('menu_trophy_race_rankings_loop',capture,0x14600005)
+            put('menu_cinematic_loop',draw,0x8f050000)
             sections = [(pc, struct.pack('>I', word)) for pc, word in words.items()]
             symbols = {name: {(lo, hi-lo+4)} for name, (lo, hi) in bounds.items()}
             base = {'instructionPatches': [], 'functionHooks': []}
@@ -44,7 +56,10 @@ class PipelineTests(unittest.TestCase):
             with patch.dict(presentation.ELFS, {rev: hashlib.sha256(elf.read_bytes()).hexdigest()}):
                 result = presentation.compose_presentation(base, elf, rev, sections, symbols)
                 self.assertEqual(base, {'instructionPatches': [], 'functionHooks': []})
-                self.assertEqual(len(result['functionHooks']), 10)
+                self.assertEqual(len(result['functionHooks']), 25)
+                self.assertEqual(result,presentation.refresh_presentation(result,elf,rev,sections,symbols))
+                legacy=presentation.compose_presentation(base,elf,rev,sections,symbols,extended=False)
+                self.assertEqual(result,presentation.refresh_presentation(legacy,elf,rev,sections,symbols))
                 for site in result['functionHooks']:
                     for key, address in (('functionHooks', 'beforeVram'), ('instructionPatches', 'vram')):
                         bad = copy.deepcopy(base); bad[key].append({address: site['beforeVram'], 'function': site['function'], 'text': 'unreviewed'})
@@ -60,6 +75,16 @@ class PipelineTests(unittest.TestCase):
     def test_sidebar_visual_and_navigation_order_match(self):
         source = (ROOT / 'runtime-recomp/src/game/runtime_ui.cpp').read_text()
         self.assertIn('kSidebarOrder{0,1,2,3,4,8,6,5,7,9,10}', source.replace(' ', ''))
+
+    def test_track_lab_is_in_mods_and_keeps_its_texture_modal(self):
+        source=(ROOT/'runtime-recomp/src/game/runtime_ui.cpp').read_text()
+        mods=source.split('void DrawModsHacks(float width, bool game_running = false) {',1)[1].split('void DrawTextures(float width)',1)[0]
+        textures=source.split('void DrawTextures(float width) {',1)[1].split('std::string FormatRecordTime',1)[0]
+        self.assertLess(mods.index('DrawMagicCodes(width)'),mods.index('DrawTrackLabSection(width)'))
+        self.assertNotIn('DrawTrackLabSection',textures)
+        for page in (mods,textures):self.assertEqual(page.count('DrawPendingTexturePackModals();'),1)
+        section=source.split('void DrawTrackLabSection(float width) {',1)[1].split('void DrawPendingTexturePackModals()',1)[0]
+        self.assertIn('DrawTrackLabControls(width);',section)
 
     def test_custom_stage_reuses_stock_clock_and_revision_camera(self):
         # The custom early-return hook must not bypass the stock beat override.
@@ -209,9 +234,17 @@ class PipelineTests(unittest.TestCase):
             after = compose.compose(policy, fragment, sections)
             self.assertEqual(before, policy)
             self.assertEqual(after["instructionPatches"][:-2], before["instructionPatches"])
-            self.assertEqual(after["functionHooks"][:-8], before["functionHooks"])
+            for old in before['functionHooks']:
+                matches=[h for h in after['functionHooks'] if h['function']==old['function'] and h['beforeVram']==old['beforeVram']]
+                self.assertEqual(len(matches),1)
+                new=matches[0]
+                if old['function'] in ('asset_table_load','asset_load') and '_begin(rdram, ctx)' in old['text']:
+                    self.assertTrue(new['text'].endswith(' '+old['text']))
+                    self.assertEqual(new['reason'],old['reason'])
+                else:self.assertEqual(new,old)
             self.assertTrue(all(p["value"] == "0x00000000" for p in after["instructionPatches"][-2:]))
-            for site, hook in zip(fragment["sites"], after["functionHooks"][-8:-6]):
+            bridges=[h for h in after['functionHooks'] if 'dkr_legacy_pi_start_dma' in h['text']]
+            for site, hook in zip(fragment["sites"], bridges,strict=True):
                 self.assertEqual(int(hook["beforeVram"], 0), int(site["vram"], 0) + 8)
 
     def test_every_instruction_signature_is_required(self):

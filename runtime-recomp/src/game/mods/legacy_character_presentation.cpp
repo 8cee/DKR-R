@@ -1,5 +1,6 @@
 #include "legacy_character_presentation.hpp"
 #include <bit>
+#include <algorithm>
 
 namespace dkr::mods {
 namespace {
@@ -72,6 +73,34 @@ unsigned CharacterPresentation::sound(const CharacterRoster& roster,const std::v
     if(i==entries.size() || !banks_.at(i) || native_character!=entries[i].base_character)return native_sound;
     const auto cue=character_race_cue(native_sound,native_character);
     return cue<0?native_sound:character_race_sound(unsigned(i),unsigned(cue));
+}
+void CharacterPresentation::bind_hud(std::uint32_t stack,std::uint32_t hud,const CharacterRoster& roster,
+    const std::vector<AllocatedCharacter>& entries,unsigned racer) {
+    unbind_hud(stack);
+    if(!ready_)return;
+    const auto i=selected(roster,entries,racer);if(i==entries.size())return;
+    if(hud_bindings_.size()>=16)throw Error("Custom portrait draw nesting exceeds its budget.");
+    hud_bindings_.push_back({stack,hud,portrait_cells_.at(i)-16,56+entries[i].base_character});
+}
+void CharacterPresentation::unbind_hud(std::uint32_t stack) {
+    std::erase_if(hud_bindings_,[&](const auto& b){return b.stack==stack;});
+}
+std::uint32_t CharacterPresentation::hud_lookup(std::uint32_t stack,std::uint32_t hud,unsigned sprite)const {
+    for(const auto& b:hud_bindings_)if(b.stack==stack && b.hud==hud && b.sprite==sprite)return b.cell;
+    return 0;
+}
+unsigned CharacterPresentation::cinematic_id(const CharacterRoster& roster,const std::vector<AllocatedCharacter>& entries,
+    unsigned racer,unsigned native_id)const {
+    if(!ready_)return native_id;
+    const auto i=selected(roster,entries,racer);
+    // This byte belongs exclusively to the transient trophy portrait list;
+    // never put it in Settings, racer behaviour, saves or ghost recordings.
+    return i<entries.size()?64U+unsigned(i):native_id;
+}
+std::uint32_t CharacterPresentation::cinematic_portrait(unsigned id)const {
+    if(id<64 || id>=80)return 0;
+    if(!ready_ || id-64>=portrait_cells_.size())throw Error("Unowned cinematic portrait identity.");
+    return portrait_cells_[id-64];
 }
 bool CharacterPresentation::play(std::span<std::uint8_t> memory,const recomp_context& ctx,
     const CharacterPresentationCalls& f,const std::vector<AllocatedCharacter>& entries,unsigned kind)const {
