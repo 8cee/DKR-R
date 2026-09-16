@@ -94,6 +94,32 @@ std::shared_ptr<const AssetBank> AssetBank::augment(std::shared_ptr<const AssetB
     bank->fingerprint_=sha256(View(reinterpret_cast<const std::uint8_t*>(identity.data()),identity.size()));
     return bank;
 }
+std::shared_ptr<const AssetBank> AssetBank::append_textures(
+    std::shared_ptr<const AssetBank> input,const std::vector<Bytes>& textures) {
+    if(!input)throw Error("Shared artwork requires a verified asset bank.");
+    if(textures.empty())return input;
+    auto bank=std::shared_ptr<AssetBank>(new AssetBank);
+    bank->stock_=input->stock_?input->stock_:input;
+    bank->revision_=input->revision_;bank->digest_=input->digest_;
+    bank->overrides_=input->overrides_;bank->augmented_=true;
+    for(unsigned s=0;s<50;++s)bank->counts_[s]=input->record_count(s);
+    std::size_t total=bank->owned_override_bytes();
+    for(const auto& bytes:textures) {
+        if(bank->counts_[2]>=32767 || bytes.empty() || bytes.size()>MaxImage || bytes.size()>MaxStaged-total)
+            throw Error("Shared artwork exceeds the boot namespace budget.");
+        total+=bytes.size();bank->overrides_.emplace(AssetKey{2,bank->counts_[2]++},bytes);
+    }
+    // The augmented-bank contract includes a raw model-animation range table,
+    // even when no custom character models were appended.
+    if(!input->augmented_) {
+        const auto ids=input->stock_section(30);
+        bank->overrides_[{30,0}]=Bytes(ids.begin(),ids.end());
+    }
+    std::string identity="dkr-shared-artwork-v1:"+input->fingerprint_;
+    for(const auto& bytes:textures)identity+=":"+sha256(bytes);
+    bank->fingerprint_=sha256(View(reinterpret_cast<const std::uint8_t*>(identity.data()),identity.size()));
+    return bank;
+}
 std::size_t AssetBank::record_count(unsigned section) const {
     if(section>=50) throw Error("Invalid bank asset section.");
     return augmented_?counts_[section]:stock_?stock_->record_count(section):records_[section].size();

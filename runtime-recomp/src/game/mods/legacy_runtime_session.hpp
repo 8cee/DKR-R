@@ -11,12 +11,13 @@ namespace dkr::mods {
 class RuntimeSession {
 public:
     explicit RuntimeSession(std::shared_ptr<const AssetBank> stock,
-        std::shared_ptr<const CharacterNamespace> characters=nullptr);
+        std::shared_ptr<const CharacterNamespace> characters=nullptr,
+        std::vector<Bytes> shared_textures={});
     void admit(PreparedTrack track);
     // Explicit identity is required even if the carrier matches a loaded scene.
     // An empty identity means the ORIGINAL course, never "keep the last mod".
     void request(std::string content_id,unsigned carrier);
-    void begin_scene(std::span<std::uint8_t> guest,unsigned carrier);
+    void begin_scene(std::span<std::uint8_t> guest,unsigned carrier,bool external_course=false);
     ResidentAssetState::Lease acquire();
     const AssetBus& bus() const {return bus_;}
     std::string current_content() const;
@@ -28,6 +29,7 @@ public:
 private:
     std::shared_ptr<const AssetBank> stock_;
     std::shared_ptr<const CharacterNamespace> characters_;
+    std::vector<Bytes> shared_textures_;
     std::shared_ptr<const AssetBank> boot_;
     AssetBus bus_;
     std::vector<std::shared_ptr<const AssetBus::Mount>> character_audio_mounts_;

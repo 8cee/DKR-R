@@ -220,6 +220,10 @@ extern "C" void dkr_custom_tracks_table_load_end(std::uint8_t* rdram,
                    extended[index]);
     }
     context->r2 = static_cast<gpr>(static_cast<std::int32_t>(allocated));
+    if(payload->asset_release) {
+        call=*context;call.r4=rdram_address(retail_address);
+        payload->asset_release(rdram,&call);
+    }
 }
 
 // Entry of asset_load. The destination register is clobbered by the DMA call
@@ -284,6 +288,23 @@ extern "C" void dkr_custom_tracks_asset_load_end(std::uint8_t* rdram,
                      "%d\n",
                      request.offset, fixup.label, index);
     }
+}
+
+// A mounted legacy section has strict bounds and cannot DMA beyond its end.
+// Serve authored payloads before entering that path, including header fixups.
+extern "C" int dkr_custom_tracks_asset_load_override(std::uint8_t* rdram,
+                                                      recomp_context* context) {
+    Section section;
+    const auto size=static_cast<std::int32_t>(context->r7);
+    const auto destination=static_cast<std::uint32_t>(context->r5);
+    if(!section_for_data(static_cast<std::uint32_t>(context->r4),section) || size<=0 ||
+       !addressable(destination) || std::uint64_t(destination)+size>std::uint64_t(kRdramHigh)+1 ||
+       !dkr::runtime::custom_tracks::payload_for(section,static_cast<std::uint32_t>(context->r6),size))
+        return 0;
+    dkr_custom_tracks_asset_load_begin(rdram,context);
+    dkr_custom_tracks_asset_load_end(rdram,context);
+    context->r2=size;
+    return 1;
 }
 
 // Common return convergence of get_track_id_to_load. All three retail paths -

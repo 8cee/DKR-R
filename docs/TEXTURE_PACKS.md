@@ -108,10 +108,15 @@ texture's own size for every size the addon accepts.
 - **It fails cleanly.** A name that does not match finds no replacement, and the
   game draws the 64x32. Nothing about the track changes.
 - **Modern only**, as for every pack. Accurate draws the track's own textures.
-- **Alpha.** RGBA16 keeps one bit of alpha, and the track's render mode was
-  chosen for that bit. An original with soft alpha can draw differently from
-  the 64x32 the addon's thumbnail shows. That is the pack working, not failing;
-  an original whose alpha is hard-edged matches the track.
+- **Alpha.** The pack's picture is drawn with the render mode the track gives
+  the texture. An opaque texture ignores the original's alpha. A blended one
+  uses all of it, so an original with soft alpha looks softer than the 64x32,
+  which RGBA16 limits to one bit - that is the pack working. A cut-out is drawn
+  with `G_RM_AA_ZB_TEX_EDGE`, which RT64 turns into a discard below an eighth of
+  alpha where the console reads a hardened texture; the export therefore puts
+  a copy of a cut-out's original in the pack, hardened at half and with its
+  edge colours spread into the holes, so the HD picture is cut where the
+  64x32 is.
 - **Some sizes cannot have one.** A texture whose rows are narrower than one
   8-byte word of texture memory - a 4-bit texture under 16 texels wide, an
   8-bit one under 8 - is read by the game with a stride its rows do not have,

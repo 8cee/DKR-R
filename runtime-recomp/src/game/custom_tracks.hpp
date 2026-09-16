@@ -103,12 +103,62 @@ struct Entry {
     std::vector<std::uint8_t> bytes;
 };
 
+// ---------------------------------------------------------------------------
+// A track's own texture, as its header describes it
+// ---------------------------------------------------------------------------
+//
+// A TEXTURES_3D payload is what dkr_assets_tool's BuildTexture writes: a
+// 32-byte TextureHeader and its texels for every frame, the frames laid end to
+// end and walked by each header's own textureSize (load_texture). material_init
+// reads three things out of each header that decide how the game draws it:
+//
+//   format & 0x0F       the texel format;
+//   format >> 4         the render mode. TRANSPARENT (0) and TRANSPARENT_2 (2)
+//                       give RGBA32, RGBA16 and CI4 RENDER_SEMI_TRANSPARENT;
+//                       IA16, IA8 and IA4 get it whatever the nibble says;
+//   numOfTextures >> 8  how many frames the animation has.
+//
+// A semi-transparent texture is drawn only in render_level_segment's second
+// pass, so a level model has to put the batches drawing it past
+// numberofOpaqueBatches or they are never drawn at all. The Blender exporter
+// does that; this reads the header so the runtime can say what a track ships
+// and refuse a payload the loader would misread.
+struct TextureInfo {
+    std::uint8_t width = 0;
+    std::uint8_t height = 0;
+    std::uint8_t format = 0;        // TextureHeader.format & 0x0F
+    std::uint8_t render_mode = 0;   // TextureHeader.format >> 4
+    std::uint16_t frames = 0;       // TextureHeader.numOfTextures >> 8
+    bool compressed = false;        // TextureHeader.isCompressed
+    bool translucent = false;       // what material_init makes of it
+};
+
+// material_init's rule for RENDER_SEMI_TRANSPARENT, format by format.
+[[nodiscard]] constexpr bool texture_translucent(std::uint8_t format,
+                                                 std::uint8_t render_mode) noexcept {
+    switch (format) {
+    case 0U:   // RGBA32
+    case 1U:   // RGBA16
+    case 7U:   // CI4
+        return render_mode == 0U || render_mode == 2U;
+    case 4U:   // IA16
+    case 5U:   // IA8
+    case 6U:   // IA4
+        return true;
+    default:   // I8, I4, CI8
+        return false;
+    }
+}
+
 struct Track {
     std::string id;
     std::string name;
     std::string author;
     std::filesystem::path source;
     std::vector<Entry> entries;
+    // One per TEXTURES_3D entry, in manifest order - the order that is each
+    // texture's identity.
+    std::vector<TextureInfo> textures;
     bool enabled = true;
     // manifest.hdTexturePack, and the sibling archive resolved at scan time.
     // See "A track's high-resolution texture pack" below.
@@ -177,6 +227,7 @@ void reload();
 // Level id assigned to a track's header after the last table build, or -1
 // when the track is disabled or contributes no header.
 [[nodiscard]] std::int32_t resolved_level_id(const std::string& track_id);
+[[nodiscard]] bool owns_level_id(std::int32_t level_id);
 
 // ---------------------------------------------------------------------------
 // A track's high-resolution texture pack
@@ -302,5 +353,24 @@ inline constexpr std::int32_t kCustomTextureIdCount = 255;
 // shorter payload would have the loader fall off the end of it and read the
 // ROM's own bytes as a TextureHeader.
 inline constexpr std::size_t kMinimumTexturePayload = 40;
+
+// Reads a TEXTURES_3D payload's headers into `info`. Returns false, with the
+// reason in `error`, for a payload the game would misread: shorter than
+// load_texture's peek, not a multiple of 16, a colour-indexed format (its
+// palette would have to come from ASSET_EMPTY_14, which a track cannot add), a
+// render mode material_init does not know, no frames, or a frame whose header
+// or texels run past the payload. A compressed payload's frames are packed and
+// are not walked; its first header, which the loader reads raw, still is.
+[[nodiscard]] bool inspect_texture_payload(const std::vector<std::uint8_t>& bytes,
+                                           TextureInfo& info,
+                                           std::string& error);
+
+// What an installed track's own artwork is, for Track Lab.
+struct ArtworkSummary {
+    std::size_t textures = 0;
+    std::size_t translucent = 0;
+    std::size_t animated = 0;
+};
+[[nodiscard]] ArtworkSummary artwork(const std::string& track_id);
 
 } // namespace dkr::runtime::custom_tracks

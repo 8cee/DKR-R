@@ -47,6 +47,14 @@ agrees with itself exactly: over all 10,389 batches in the 55 level models the
 bit is set on the 619 whose texture is animated and on none of the 9,770 whose
 texture is not. So applying an animated texture sets it and applying a still one
 clears it. Getting that wrong is what makes a picked waterfall render frozen.
+
+**Transparency is partly a choice, and the rest follows from it.** Which pass
+the game draws a face in is the texture's to decide, so applying a see-through
+texture moves the faces to the see-through side of ``numberofOpaqueBatches``
+and a solid one moves them back - left where they were, a road retextured with
+the ROM's water was never drawn at all. What the author does choose is whether
+the alpha cuts holes or blends, which is ``RENDER_CUTOUT`` on the faces. See
+:mod:`..transparency`.
 """
 
 from __future__ import annotations
@@ -55,9 +63,10 @@ import os
 import traceback
 
 import bpy
-from bpy.props import IntProperty
+from bpy.props import EnumProperty, IntProperty
 
 from .. import level_model, prefs, scene, textures as texture_catalogue
+from .. import transparency as looks
 from . import geometry
 
 #: How many thumbnails the browser draws before it asks for a narrower search.
@@ -164,6 +173,26 @@ def picked(context):
         return own
     tree = prefs.resolve(context)
     return None if tree is None else texture_catalogue.by_index(tree, index)
+
+
+def texture_by_id(context, texture_id):
+    """The texture an id in a table entry names, the track's own or the ROM's."""
+    from . import custom_textures  # noqa: PLC0415 - registered alongside this
+
+    return geometry.texture_object(texture_id, prefs.resolve(context),
+                                   custom_textures.entries(context))
+
+
+def look_for(texture, requested=looks.AUTO) -> str:
+    """The look a face drawing ``texture`` gets when ``requested`` is asked for.
+
+    ``AUTO`` is the texture's own look. Anything the texture cannot have - a
+    blend on a texture the game draws solid - settles on what it can.
+    """
+    allowed = looks.face_modes(texture.format, texture.render_mode)
+    natural = texture.transparency
+    wanted = natural if requested in (None, "", looks.AUTO) else requested
+    return looks.settle(wanted, allowed, natural)
 
 
 def _attribute(mesh, name, width=1):
@@ -276,7 +305,8 @@ PROJECT = "PROJECT"
 class ApplyResult:
     """What one apply changed, so the operator can say it in one line."""
 
-    __slots__ = ("index", "faces", "mapped", "unmapped", "walls", "animated")
+    __slots__ = ("index", "faces", "mapped", "unmapped", "walls", "animated",
+                 "look", "settled")
 
     def __init__(self, index):
         self.index = index
@@ -287,26 +317,37 @@ class ApplyResult:
         self.unmapped = 0
         self.walls = 0
         self.animated = False
+        #: The look the faces were given, and whether it is not the one asked
+        #: for because the texture cannot have that one.
+        self.look = looks.OPAQUE
+        self.settled = False
 
 
-def apply_texture(obj, faces, texture, surface, mapping, scale) -> ApplyResult:
+def apply_texture(obj, faces, texture, surface, mapping, scale,
+                  look=looks.AUTO) -> ApplyResult:
     """Point faces at a texture, map them, and give them a material.
 
     Every write lands on the mesh's own record of the file - the face's texture
-    index, its render flags and its raw texel UVs - because those are what the
-    exporter reads. The ``UVMap`` and the material are updated alongside so the
-    viewport agrees with what was written, and neither is read back.
+    index, its render flags, its side of the opaque split and its raw texel UVs
+    - because those are what the exporter reads. The ``UVMap`` and the material
+    are updated alongside so the viewport agrees with what was written, and
+    neither is read back.
     """
     mesh = obj.data
     index = allocate(obj, texture, surface)
     entry = geometry.texture_table(obj)[index]
     result = ApplyResult(index)
     result.animated = texture.frames > 1
+    result.look = look_for(texture, look)
+    result.settled = look not in (None, "", looks.AUTO, result.look)
+    translucent = bool(texture.translucent)
 
     texture_attr, texture_values = _attribute(mesh, geometry.ATTR_TEXTURE)
     flags_attr, flag_values = _attribute(mesh, geometry.ATTR_FLAGS)
     uv_attr, uv_values = _attribute(mesh, geometry.ATTR_UV, width=2)
-    if texture_attr is None or flags_attr is None or uv_attr is None:
+    opaque_attr, opaque_values = _attribute(mesh, geometry.ATTR_OPAQUE)
+    if (texture_attr is None or flags_attr is None or uv_attr is None
+            or opaque_attr is None):
         raise TextureError(
             "%s is missing the attributes the exporter reads, so a texture "
             "written onto it would not reach the file; import the track "
@@ -358,20 +399,129 @@ def apply_texture(obj, faces, texture, surface, mapping, scale) -> ApplyResult:
     stem = str(obj.get(geometry.PROP_STEM) or obj.name)
     for face in faces:
         texture_values[face] = index
-        flag_values[face] = _with_animation(flag_values[face], texture.frames > 1)
-        category = geometry.category_of(geometry.to_unsigned32(flag_values[face]))
+        value = _with_animation(flag_values[face], texture.frames > 1)
+        value = geometry.to_unsigned32(value)
+        value = looks.with_mode(value, result.look)
+        flag_values[face] = geometry.to_signed32(value)
+        opaque_values[face] = looks.draws_in_opaque_pass(value, translucent)
+        category = geometry.category_of(value)
         if category == geometry.INVISIBLE_WALLS:
             result.walls += 1
         mesh.polygons[face].material_index = _slot_for(
-            obj, stem, category, index, texture, surface
+            obj, stem, category, index, texture, surface, result.look
         )
         result.faces += 1
 
     texture_attr.data.foreach_set("value", texture_values)
     flags_attr.data.foreach_set("value", flag_values)
     uv_attr.data.foreach_set("value", uv_values)
+    opaque_attr.data.foreach_set("value", opaque_values)
     mesh.update()
     return result
+
+
+class LookResult:
+    """What a transparency change did, for the operator's report."""
+
+    __slots__ = ("changed", "untextured", "refused", "unknown")
+
+    def __init__(self):
+        self.changed = 0
+        self.untextured = 0
+        #: ``{texture name: look it can have}`` for faces that cannot take the
+        #: look asked for.
+        self.refused = {}
+        self.unknown = 0
+
+
+def set_face_look(context, obj, faces, look) -> LookResult:
+    """Give faces a look without changing their texture.
+
+    Only the cut-out bit is the face's; whether the texture blends is the
+    texture's own. So a blend on a solid texture is refused with the reason,
+    rather than quietly giving the faces something else.
+    """
+    mesh = obj.data
+    result = LookResult()
+    texture_attr, texture_values = _attribute(mesh, geometry.ATTR_TEXTURE)
+    flags_attr, flag_values = _attribute(mesh, geometry.ATTR_FLAGS)
+    opaque_attr, opaque_values = _attribute(mesh, geometry.ATTR_OPAQUE)
+    if texture_attr is None or flags_attr is None or opaque_attr is None:
+        raise TextureError(
+            "%s is missing the attributes the exporter reads; import the track "
+            "geometry again" % mesh.name
+        )
+    table = geometry.texture_table(obj)
+    known = {}
+    for face in faces:
+        index = texture_values[face] & 0xFF
+        if index == level_model.NO_TEXTURE or not 0 <= index < len(table):
+            result.untextured += 1
+            continue
+        if index not in known:
+            known[index] = texture_by_id(context, table[index].get("id", 0))
+        texture = known[index]
+        if texture is None:
+            result.unknown += 1
+            continue
+        allowed = looks.face_modes(texture.format, texture.render_mode)
+        if look not in allowed:
+            result.refused[texture.name] = allowed
+            continue
+        value = looks.with_mode(geometry.to_unsigned32(flag_values[face]), look)
+        flag_values[face] = geometry.to_signed32(value)
+        opaque_values[face] = looks.draws_in_opaque_pass(value,
+                                                         texture.translucent)
+        slot = mesh.polygons[face].material_index
+        if 0 <= slot < len(mesh.materials):
+            geometry.show_look(mesh.materials[slot], look)
+        result.changed += 1
+    flags_attr.data.foreach_set("value", flag_values)
+    opaque_attr.data.foreach_set("value", opaque_values)
+    mesh.update()
+    return result
+
+
+def refresh_texture_faces(context, texture_id) -> int:
+    """Bring every face drawing ``texture_id`` in line with its texture's look.
+
+    For a texture of the track's own whose look just changed: its render mode
+    moved, so the faces' pass does, and the cut-out bit follows the look.
+    Returns how many faces changed.
+    """
+    texture = texture_by_id(context, texture_id)
+    if texture is None:
+        return 0
+    changed = 0
+    for obj in geometry.geometry_objects(context):
+        table = geometry.texture_table(obj)
+        indices = {index for index, record in enumerate(table)
+                   if int(record.get("id", -1)) == int(texture_id)}
+        if not indices:
+            continue
+        mesh = obj.data
+        texture_attr, texture_values = _attribute(mesh, geometry.ATTR_TEXTURE)
+        flags_attr, flag_values = _attribute(mesh, geometry.ATTR_FLAGS)
+        opaque_attr, opaque_values = _attribute(mesh, geometry.ATTR_OPAQUE)
+        if texture_attr is None or flags_attr is None or opaque_attr is None:
+            continue
+        for face, value in enumerate(texture_values):
+            if value & 0xFF not in indices:
+                continue
+            flags = looks.with_mode(geometry.to_unsigned32(flag_values[face]),
+                                    texture.transparency)
+            flag_values[face] = geometry.to_signed32(flags)
+            opaque_values[face] = looks.draws_in_opaque_pass(
+                flags, texture.translucent)
+            changed += 1
+        flags_attr.data.foreach_set("value", flag_values)
+        opaque_attr.data.foreach_set("value", opaque_values)
+        for material in mesh.materials:
+            if (material is not None
+                    and material.get(geometry.PROP_TEXTURE_INDEX) in indices):
+                geometry.show_look(material, texture.transparency)
+        mesh.update()
+    return changed
 
 
 def _with_animation(flags: int, animated: bool) -> int:
@@ -403,7 +553,7 @@ def _overflow_message(faces, mapping, scale) -> str:
     )
 
 
-def _slot_for(obj, stem, category, index, texture, surface) -> int:
+def _slot_for(obj, stem, category, index, texture, surface, look=None) -> int:
     """The material slot for one (kind, table entry), creating it if needed."""
     for slot, material in enumerate(obj.data.materials):
         if material is None:
@@ -411,12 +561,14 @@ def _slot_for(obj, stem, category, index, texture, surface) -> int:
         if (material.get(geometry.PROP_CATEGORY) == category
                 and material.get(geometry.PROP_TEXTURE_INDEX) == index):
             material[geometry.PROP_SURFACE] = int(surface) & 0xFF
+            if look is not None:
+                geometry.show_look(material, look)
             return slot
 
     # A wall is not drawn, so it gets the flat tint the importer gives one
     # rather than whatever picture it happens to name - same rule as the import.
     png = None if category == geometry.INVISIBLE_WALLS else texture.png
-    material = geometry.material_for(stem, category, index, png, surface)
+    material = geometry.material_for(stem, category, index, png, surface, look)
     obj.data.materials.append(material)
     return len(obj.data.materials) - 1
 
@@ -536,16 +688,19 @@ class DKR_OT_apply_texture(_FaceOperator, bpy.types.Operator):
         surface = int(settings.texture_surface)
         mapping = settings.texture_mapping
         scale = float(settings.texture_scale)
+        look = settings.texture_transparency
 
         def work(obj, faces):
-            result = apply_texture(obj, faces, texture, surface, mapping, scale)
+            result = apply_texture(obj, faces, texture, surface, mapping, scale,
+                                   look)
             for message in _notes(result, texture):
                 self.report({"WARNING"}, message)
             self.report(
                 {"INFO"},
-                "%d face(s) now draw %s as texture %d (%s)"
+                "%d face(s) now draw %s as texture %d (%s, %s)"
                 % (result.faces, texture.name, result.index,
-                   geometry.surface_name(surface)),
+                   geometry.surface_name(surface),
+                   LOOK_WORDS.get(result.look, result.look)),
             )
             return {"FINISHED"}
 
@@ -573,7 +728,79 @@ def _notes(result, texture) -> list:
             "which is what retail does for every animated texture and only for "
             "those" % (texture.name, texture.frames)
         )
+    if result.settled:
+        messages.append(
+            "%s is drawn %s by the game, so the faces were made %s instead. %s"
+            % (texture.name,
+               "see-through" if texture.translucent else "solid",
+               LOOK_WORDS.get(result.look, result.look),
+               "Change the texture's own transparency under This track's own "
+               "artwork to blend it" if getattr(texture, "own", False)
+               else "One of the ROM's textures keeps the render mode it was "
+                    "made with")
+        )
     return messages
+
+
+#: How a report names each look.
+LOOK_WORDS = {looks.OPAQUE: "opaque", looks.CUTOUT: "cut out",
+              looks.BLEND: "blended"}
+
+
+def _face_look_items(self, context):
+    from .. import props  # noqa: PLC0415 - registered after this module loads
+
+    return _keep("face_look", props.transparency_items(auto=False))
+
+
+_ITEMS = {}
+
+
+def _keep(key, items):
+    _ITEMS[key] = items
+    return items
+
+
+class DKR_OT_set_face_transparency(_FaceOperator, bpy.types.Operator):
+    """Make the selected faces solid, cut out or blended by their texture's alpha"""
+
+    bl_idname = "dkr.set_face_transparency"
+    bl_label = "Set Transparency"
+    bl_options = {"REGISTER", "UNDO"}
+
+    look: EnumProperty(name="Transparency", items=_face_look_items)
+
+    def execute(self, context):
+        def work(obj, faces):
+            result = set_face_look(context, obj, faces, self.look)
+            if result.untextured:
+                self.report({"WARNING"},
+                            "%d face(s) have no texture, so there is no alpha "
+                            "to use; they were left alone" % result.untextured)
+            if result.unknown:
+                self.report({"WARNING"},
+                            "%d face(s) draw a texture the addon cannot see "
+                            "(no asset tree, or a missing image); they were "
+                            "left alone" % result.unknown)
+            reasons = [
+                "%s can only be %s: the game decides whether a texture blends "
+                "from how the texture was made, and only the cut-out is up to "
+                "the faces"
+                % (name, " or ".join(LOOK_WORDS.get(a, a) for a in allowed))
+                for name, allowed in sorted(result.refused.items())
+            ]
+            if not result.changed:
+                self.report({"ERROR"}, "no face could be made %s%s"
+                            % (LOOK_WORDS.get(self.look, self.look),
+                               ". " + reasons[0] if reasons else ""))
+                return {"CANCELLED"}
+            for reason in reasons[:3]:
+                self.report({"WARNING"}, reason)
+            self.report({"INFO"}, "%d face(s) are now %s"
+                        % (result.changed, LOOK_WORDS.get(self.look, self.look)))
+            return {"FINISHED"}
+
+        return self._run(context, work)
 
 
 class DKR_OT_clear_texture(_FaceOperator, bpy.types.Operator):
@@ -594,17 +821,25 @@ class DKR_OT_clear_texture(_FaceOperator, bpy.types.Operator):
                     "the track geometry again" % mesh.name
                 )
 
+            opaque_attr, opaque_values = _attribute(mesh, geometry.ATTR_OPAQUE)
             stem = str(obj.get(geometry.PROP_STEM) or obj.name)
             for face in faces:
                 texture_values[face] = level_model.NO_TEXTURE
-                flag_values[face] = _with_animation(flag_values[face], False)
-                category = geometry.category_of(
-                    geometry.to_unsigned32(flag_values[face])
-                )
+                value = geometry.to_unsigned32(
+                    _with_animation(flag_values[face], False))
+                # No texture, no alpha: nothing to cut out, and the face is
+                # drawn with the solid track.
+                value = looks.with_mode(value, looks.OPAQUE)
+                flag_values[face] = geometry.to_signed32(value)
+                if opaque_values is not None:
+                    opaque_values[face] = looks.draws_in_opaque_pass(value, False)
+                category = geometry.category_of(value)
                 material = geometry.material_for(stem, category, -1, None, 0)
                 mesh.polygons[face].material_index = _append_slot(obj, material)
             texture_attr.data.foreach_set("value", texture_values)
             flags_attr.data.foreach_set("value", flag_values)
+            if opaque_attr is not None:
+                opaque_attr.data.foreach_set("value", opaque_values)
             mesh.update()
             self.report({"INFO"}, "%d face(s) now draw untextured" % len(faces))
             return {"FINISHED"}
@@ -756,4 +991,5 @@ CLASSES = (
     DKR_OT_clear_texture,
     DKR_OT_sync_uvs,
     DKR_OT_select_by_texture,
+    DKR_OT_set_face_transparency,
 )

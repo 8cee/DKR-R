@@ -120,6 +120,13 @@ the export says so rather than putting it somewhere arbitrary. Extrude makes
 quads, which the file cannot store, so they are fanned into triangles on the way
 out.
 
+**Merge by Distance** preserves each face's segment and averages vertex colours
+channel by channel. Imported meshes carry `dkr_face_segment` on faces and
+`dkr_colour_r/g/b/a` on vertices, so welding a boundary cannot invent a distant
+segment ID or mix bits between colour channels. Older saved meshes still export
+with their original attributes; reimport their geometry before welding to get
+these additional attributes.
+
 Two ceilings are worth knowing about, both shown in the Geometry panel:
 
 - **Load budget.** The game reserves a fixed arena for a level model and the
@@ -167,7 +174,7 @@ A track is not limited to the textures it was built from. A level model's
 texture table stores indices into the ROM's global texture list, so it can name
 any of them; the addon appends an entry to the table and points the faces at it.
 
-Three things come with the texture rather than being asked about:
+Four things come with the texture rather than being asked about:
 
 - **Surface type.** Chosen in the panel, because it lives on the table entry
   rather than on the face. The same picture applied twice with different surface
@@ -176,6 +183,11 @@ Three things come with the texture rather than being asked about:
 - **Animation.** A texture with more than one frame flags the batches drawing it
   for animation, and a still one clears the flag. That is what retail does for
   every animated texture and only for those, so a picked waterfall moves.
+- **Which pass draws it.** The game draws see-through textures in a second pass,
+  after the solid track, and a face left in the wrong pass is never drawn at
+  all. Applying a texture moves the faces to the pass it belongs in, and the
+  export checks every face again, so a road retextured with the ROM's water
+  shows up.
 - **Mapping.** *Keep The Mapping* leaves the picture covering the same ground as
   the one it replaced, rescaled for the new texture's size. *Project Flat*
   plants the texture on the world along whichever axis each face most faces, at
@@ -187,6 +199,32 @@ Three things come with the texture rather than being asked about:
 *Select* picks out every face already drawn with the chosen texture, *Remove*
 puts faces back on their baked colours alone, and *Apply UV Editing* writes the
 mapping you made in Blender's UV editor into the track.
+
+**Transparency.** A picture's alpha can be used three ways, and the panel's
+*Transparency* picks one for the faces you apply it to:
+
+- *Opaque* - alpha is ignored.
+- *Cut-Out* - alpha cuts holes, for fences, leaves and grates. The rest is solid
+  and hides what is behind it.
+- *Blended* - alpha blends, for glass, water and smoke. Drawn after the solid
+  track.
+
+*As Made* (the default) takes the texture's own look. Whether a texture blends
+at all is decided by how it was made - one of the ROM's keeps its render mode -
+so a solid texture can be cut out but not blended, and the panel says so rather
+than doing something else. *Transparency Of Selected* changes only the look of
+faces that already have a texture. Materials show the alpha in Material
+Preview, cut at half as the game cuts it.
+
+For a picture of your own the look belongs to the texture: the import reads it
+off the image - no alpha is *Opaque*, clean holes are *Cut-Out*, anything softer
+is *Blended* - and *Change*, beside the chosen texture, sets it afterwards; every
+face drawing it follows. RGBA16 keeps one bit of alpha, so a blend in it is all
+or nothing; RGBA32 keeps soft edges at 32x32. A cut-out is hardened at half and
+its edge colours are spread into the holes, so no dark fringe appears when the
+texture is filtered, and the HD pack's copy of a cut-out is hardened the same
+way, so DKR-R cuts the HD picture where it cuts the 64x32. A mesh converted with
+*Track From Mesh* keeps what its pictures' alpha asks for.
 
 **Or with a picture of your own.** The top of the Textures panel is *This
 track's own artwork*: press **+**, pick any image Blender can read, and the
@@ -228,6 +266,40 @@ The **order** of the list is the texture's identity - the runtime hands out ids
 by position - so removing one moves the rest, and removing one the geometry has
 already given a table entry is refused with the mesh named. Point those faces at
 something else first.
+
+**Water that moves.** Waves in DKR are not a material: the game simulates them
+over a grid of equal squares, and draws the water it finds on each. The *Water*
+panel lays that water:
+
+1. Select the lake bed in Edit Mode, or nothing to cover the whole track.
+2. Put the 3D cursor at the water line.
+3. *Add Water*, choosing *Waves* or *Calm*.
+
+It lays one flat square of water per tile at that height, skips squares where
+the ground stands above it everywhere, and flags them the way retail flags its
+own. For waves it then cuts the **whole track** into squares of that size, one
+segment each, because the game places every segment on the wave grid and a
+segment of dry land on a wave square would draw waves over it. The track
+becomes its own base file, as *Re-segment Track* makes it. *Tile Size* on Auto
+picks the smallest square - 1024 upwards - that keeps the track under the 127
+segments a model holds and the water inside the 32 columns the game can mark;
+a track that still has too many squares has its dry ones joined into blocks.
+Retail's water texture is used unless *Use The Chosen Texture* is on; waves
+need a 16x16 or 32x32 RGBA texture.
+
+*How the waves move* sets the header bytes the simulation reads: height, detail,
+how fast the texture flows, how often it repeats, whether the waves blend, and
+the shape of the two sine waves under *Wave Shape*. *Preset* copies a retail
+track's - Whale Bay's rolling sea, Pirate Lagoon's chop, Hot Top Volcano's lava.
+A remix starts with its base track's settings. Waves run in single player; split
+screen draws the water flat, as retail does. Calm water works everywhere, and a
+car sinks into it as on Ancient Lake.
+
+The grid keeps itself honest. *Re-segment Track* cuts along the grid when the
+track has waves, an export cuts the track again if an edit knocked a segment off
+its square or deleted the reference water, and *Remove Water* switches the
+waves off where the water went. A retail wave track that you only reshape
+exports byte for byte.
 
 For a one-command example, `tools/blender/make_texture_demo_track.py` builds a
 flat track surfaced with an image you pass it, through the same operators:
@@ -303,8 +375,27 @@ radius and facing, and whether each position is dropped onto the road. A
 missing index is not cosmetic - the game starts that racer at the map origin,
 facing nowhere in particular - so validation reports it as an error.
 
+**See what the bots drive.** A race or boss track shows the *AI Racers* panel.
+*Show Bot Lines* draws the four lanes the computer racers drive, as the game
+computes them: the checkpoints of one vehicle's set, sorted and paired the way
+`checkpoint_update_all` does it, each moved by that lane's lateral and vertical
+offsets, and joined with the same Catmull-Rom spline `func_80045C48` steers
+along. The line follows a checkpoint while you drag it, and the faint lines are
+the alternate route. The panel says when the vehicle shown loads a set with no
+checkpoints, when an index sits on two checkpoints, and when a set passes the 60
+the game loads.
+
+*Difficulty* sets the header's behaviour levels, 0 to 9, one for each point a
+save can be at (not won yet, race won, silver coins, Tracks mode, trophy race)
+in each adventure; *Copy Difficulty From Retail* takes a retail race's. The
+asset tool's JSON calls byte 1 of that block `silver-coins` and byte 2
+`completed`, but the game uses them the other way round, so the panel labels
+them by what the game does. *Start Skill* is each character's reaction at the
+start and nothing else. *Checkpoint Sets* picks which checkpoints each vehicle's
+racers load. A remix starts with its base track's values.
+
 **Draw the AI node graph.** The panel is greyed out and marked *in
-development* while how the racers use the checkpoints is studied; the
+development* while the arena AI is studied; the
 operators below are still there, in F3 search. This is *not* the racing line, which the game
 interpolates from the checkpoints and which no node is read for. The graph
 drives the Battle and Bananas challenges, hub NPCs and loop-de-loops, so it is
@@ -332,8 +423,8 @@ gallery of all 18 domes. Each thumbnail is a panorama of the dome as seen from
 its centre - the game moves the dome onto the camera every frame, so that is the
 only way a racer ever sees it - and *Show In Viewport* puts the chosen dome
 around the track, as a preview that is never exported. An imported track brings
-its music and sky, and a remix that changes either ships the change over the
-header it inherits. Listening to the music is not there yet, and the *Minimap*
+its music, sky and AI difficulty, and a remix that changes any of them ships
+the change over the header it inherits. Listening to the music is not there yet, and the *Minimap*
 panel is marked *in development*. The next section covers what lands in the package and
 the one rule about sharing it.
 
@@ -407,6 +498,9 @@ tools/blender/
     assets.py               resolve an asset name to a file in the decomp tree
     preview.py              build the artwork an object is drawn with
     ai_graph.py             sampling, adjacency and the format's limits
+    race_ai.py              the race bots' lanes and the header's AI bytes
+    transparency.py         which pass draws a face, and a picture's alpha
+    water.py                the wave grid, as the game builds it
     validate.py             pre-export checks
     dkrmap.py               the .dkrmap container
     textures.py             the ROM's 3D textures, and encoding your own
@@ -417,6 +511,8 @@ tools/blender/
     operators/geometry_export.py   the mesh's edits -> a level model
     operators/textures.py          pick, apply and map a texture
     operators/custom_textures.py   an image -> a texture the track ships
+    operators/race_ai.py           the bot lines overlay, Copy Difficulty
+    operators/water.py             Add Water, Select/Remove Water, presets
     ui/panels.py            the sidebar
     data/catalog.json       generated; do not edit by hand
   tests/
@@ -429,6 +525,9 @@ tools/blender/
     test_header.py              all 65 retail headers rebuild exactly
     test_textures.py            the ROM's table, vs what retail wrote
     test_custom_textures.py     an image -> the bytes the asset tool would write
+    test_race_ai.py             the bots' lanes and AI bytes, vs the game's rules
+    test_transparency.py        the pass rule, vs every retail batch
+    test_water.py               the wave grid, vs every retail wave track
     test_blender_roundtrip.py   byte-exact through a real Blender scene
     test_blender_operators.py   the operators actually work
 ```

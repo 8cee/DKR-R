@@ -221,6 +221,23 @@ def _set(document: Dict[str, Any], pointer: str, value) -> None:
         current[last] = value
 
 
+def lookup(document: Any, pointer: str) -> Any:
+    """Read a value at a pointer, the inverse of :func:`_set`: an integer
+    component indexes a list. ``None`` when the path is not there."""
+    node = document
+    for step in [p for p in str(pointer).strip("/").split("/") if p]:
+        if isinstance(node, list) and step.lstrip("-").isdigit():
+            slot = int(step)
+            if not -len(node) <= slot < len(node):
+                return None
+            node = node[slot]
+        elif isinstance(node, dict) and step in node:
+            node = node[step]
+        else:
+            return None
+    return node
+
+
 def document(overrides: Optional[Dict[str, Any]] = None,
              path: str = DATA) -> Dict[str, Any]:
     """A header document for a track with no ancestor.

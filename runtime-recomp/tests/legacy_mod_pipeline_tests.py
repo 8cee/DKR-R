@@ -209,9 +209,16 @@ class PipelineTests(unittest.TestCase):
             after = compose.compose(policy, fragment, sections)
             self.assertEqual(before, policy)
             self.assertEqual(after["instructionPatches"][:-2], before["instructionPatches"])
-            self.assertEqual(after["functionHooks"][:-8], before["functionHooks"])
+            self.assertEqual(len(after["functionHooks"]), len(before["functionHooks"]) + 6)
+            for old, new in zip(before["functionHooks"], after["functionHooks"]):
+                if old["function"] in ("asset_table_load", "asset_load") and old["text"].endswith("_load_begin(rdram, ctx);"):
+                    self.assertTrue(new["text"].endswith(old["text"]))
+                    self.assertIn("if (dkr_legacy_asset_api(rdram, ctx,", new["text"])
+                    self.assertLess(new["text"].index("return;"), new["text"].index(old["text"]))
+                else:
+                    self.assertEqual(old, new)
             self.assertTrue(all(p["value"] == "0x00000000" for p in after["instructionPatches"][-2:]))
-            for site, hook in zip(fragment["sites"], after["functionHooks"][-8:-6]):
+            for site, hook in zip(fragment["sites"], after["functionHooks"][-6:-4]):
                 self.assertEqual(int(hook["beforeVram"], 0), int(site["vram"], 0) + 8)
 
     def test_every_instruction_signature_is_required(self):

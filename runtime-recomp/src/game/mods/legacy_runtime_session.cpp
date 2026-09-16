@@ -2,8 +2,10 @@
 #include <limits>
 
 namespace dkr::mods {
-RuntimeSession::RuntimeSession(std::shared_ptr<const AssetBank> stock,std::shared_ptr<const CharacterNamespace> characters)
-    :stock_(std::move(stock)),characters_(std::move(characters)),boot_(characters_?characters_->apply(stock_):stock_),
+RuntimeSession::RuntimeSession(std::shared_ptr<const AssetBank> stock,std::shared_ptr<const CharacterNamespace> characters,
+    std::vector<Bytes> shared_textures)
+    :stock_(std::move(stock)),characters_(std::move(characters)),shared_textures_(std::move(shared_textures)),
+     boot_(AssetBank::append_textures(characters_?characters_->apply(stock_):stock_,shared_textures_)),
      original_(ResidentBank::prepare(boot_,boot_,bus_)),resident_(original_) {
     if(characters_)for(const auto& character:characters_->characters) {
         // A private sample mount is never published as the active asset bank.
@@ -39,7 +41,8 @@ void RuntimeSession::admit(PreparedTrack track) {
             throw Error("Two different course banks claim the same content identity.");
         return;
     }
-    auto resident=ResidentBank::prepare(boot_,characters_?characters_->apply(track.bank):track.bank,bus_);
+    auto resident=ResidentBank::prepare(boot_,AssetBank::append_textures(
+        characters_?characters_->apply(track.bank):track.bank,shared_textures_),bus_);
     admitted_.emplace(id,Entry{std::move(track),std::move(resident)});
 }
 void RuntimeSession::request(std::string id,unsigned carrier) {
@@ -52,13 +55,13 @@ void RuntimeSession::request(std::string id,unsigned carrier) {
     }
     requested_=Request{std::move(id),carrier};
 }
-void RuntimeSession::begin_scene(std::span<std::uint8_t> guest,unsigned carrier) {
+void RuntimeSession::begin_scene(std::span<std::uint8_t> guest,unsigned carrier,bool external_course) {
     std::lock_guard lock(mutex_);
     if(scenes_==std::numeric_limits<std::uint64_t>::max())throw Error("Scene generation exhausted.");
     // A request only belongs to its exact load; unrelated menus/cutscenes are
     // always original. New custom loads need a fresh explicit request.
     std::string next;
-    if(requested_) {
+    if(requested_ && !external_course) {
         if(requested_->carrier==carrier)next=requested_->id;
         else if(!requested_->id.empty())throw Error("Pending custom scene does not match the actual scene load.");
     }

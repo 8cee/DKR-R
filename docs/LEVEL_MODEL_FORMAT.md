@@ -83,6 +83,35 @@ Two things follow, both verified across every extracted model:
   axis** — 1854 of 2192 reachable nodes — but not always, so it is a
   construction habit rather than an invariant an encoder must reproduce.
 
+### How the game walks it, and the one rule a builder must keep
+
+`traverse_segments_bsp_tree` (`tracks.c`) never draws a node's own segment. It
+is called on the root with the index run `[0, numberOfSegments - 1]`, and each
+node splits the run it was handed at its `segmentIndex`: `[lo, seg - 1]` goes to
+the left child, `[seg, hi]` to the right, and a side with no child adds `lo` or
+`hi` - the one segment its run holds. The camera only decides which side is
+walked first; both always are, so the set of segments drawn is the same from
+every viewpoint.
+
+So the tree has to cover **contiguous runs of segment indices**: every subtree
+owns a run, and a run of one segment is a side with no child. `n` segments take
+`n - 1` nodes, which is why 100 of the 110 retail models leave one slot
+unreachable. Walked this way, every retail tree draws each of its segments
+exactly once.
+
+A tree that merely looks like retail - one node per segment, each naming itself
+- does not survive the walk. It draws some segments twice and others never, and
+a run that goes below zero adds `-1`: `add_segment_to_order` guards with a
+signed `index < numberOfSegments`, the `u8 segmentIds[]` array stores 255, and
+`render_level_segment` reads segment 255's struct out of the vertex data. That
+is the crash a re-segmented track made before the addon's `build_bsp` was
+rewritten; `level_model_layout.draw_order` is the walk, and the export rebuilds
+any tree that fails it.
+
+The same function bounds the segment count: it keeps the segments it draws in
+`u8 segmentIds[128]` and clears `objectsVisible[1..numberOfSegments]` in an array
+of 128, so a model holds at most **127** segments.
+
 ### The BSP does not contain its segments
 
 It reads like a containment tree and it is not one. Walking every model and
@@ -348,18 +377,50 @@ model:
   between batches, and a re-batcher must duplicate rather than share — which the
   `u8` batch-local index makes mandatory anyway.
 
-## Opacity is authored, not derivable
+## Opacity follows the texture's render mode
 
 `numberofOpaqueBatches` is a split point: `render_level_segment` draws `[0, k)`
-then `[k, n)`. Nothing in the data says which side a batch belongs on.
+then `[k, n)`, and in each run it draws a batch only if the batch belongs to
+that pass:
 
-- No flag bit separates them. Intersecting the flags of every non-opaque batch
-  gives zero, so there is no bit they all share.
-- Neither does the texture format. Eight of the fourteen formats in use appear
-  on both sides; only the rare ones happen to fall on one.
+```text
+first pass  <=>  (texture not RENDER_SEMI_TRANSPARENT and batch not RENDER_WATER)
+                 or batch is RENDER_DECAL
+```
 
-An encoder therefore has to carry a batch's side along with it and must never
-infer it.
+The texture's `RENDER_SEMI_TRANSPARENT` comes from `material_init`: RGBA32,
+RGBA16 and CI4 get it when the high nibble of `TextureHeader.format` - the render
+mode - is `TRANSPARENT` or `TRANSPARENT_2`; IA16, IA8 and IA4 always get it; I8,
+I4 and CI8 never do. So a batch on the wrong side is **never drawn**: its own
+pass skips it and the other pass never reaches it.
+
+Neither a flag bit nor the texture's *format* separates the two sides - that is
+what an earlier version of this note measured, and why it called the side
+authored. The *render mode* does. Held to every textured batch in both
+extracted revisions (10,388 in US v1.0, hidden ones included), the rule puts
+each on the side retail wrote. The one batch it disagrees with is untextured
+and unflagged, in `volcano_track`, which the game never draws either, so an
+encoder derives the side for textured batches and carries it for untextured
+ones. `RENDER_CUTOUT` (bit 4) is independent of the side: it makes the batch
+alpha-tested (`G_RM_AA_ZB_TEX_EDGE`), and retail sets it on 302 batches, all
+over see-through textures.
+
+## Waves
+
+A segment with `hasWaves` non-zero (retail writes -1) is a wave tile, and the
+simulation in `waves.c` runs only if one exists and only in single player. A
+batch flagged `RENDER_WATER | 0x400000` is the tile's water, and the Y of its
+first vertex is the tile's water height. The first batch flagged
+`0x1000000 | RENDER_WATER` and not hidden is the reference: its segment's
+bounding box is the size of every tile and its texture is what the waves are
+drawn with. `func_800BBF78` places **every** segment on that grid by
+`((x1 - posX + 8) / w, (z1 - posZ + 8) / d)`, and a segment placed on a visible
+wave tile draws a wave mesh there whether it has water or not - so retail cuts
+its wave tracks into equal squares, one segment each, with the wave segment
+first. That holds in 21 of the 22 retail models that have waves;
+`ocean_track`, which no header loads, is the exception. The tile mask is
+`s32 D_8012A0E8[64]`, so wave tiles sit in columns 0-31 and rows 0-63.
+`tools/blender/dkr_track_editor/water.py` transcribes all of it.
 
 ## Two shapes Blender cannot round trip
 

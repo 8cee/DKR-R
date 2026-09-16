@@ -30,7 +30,7 @@ import bpy
 from bpy.props import EnumProperty, IntProperty, StringProperty
 
 from .. import catalog as catalog_module, level_header_template as template
-from .. import level_types, prefs
+from .. import level_types, prefs, race_ai, water
 
 #: Prefix for the scene properties holding an author's answers.
 PREFIX = "dkr_hdr_"
@@ -43,10 +43,32 @@ LEVEL_OWNED = ("/race-type", "/lap-count", "/avaliable-vehicles",
 MUSIC = "/music"
 SKYBOX = "/background/skybox/id"
 
+#: The header's wave bytes, described the way the header form describes its
+#: own, so the scene answers, the inherited-header overlay and the encoder
+#: treat them like any other field. The Water panel draws them.
+WATER_CHOICES = tuple(
+    template.Choice(field.pointer, field.label, field.help,
+                    minimum=field.minimum, maximum=field.maximum)
+    for field in water.HEADER_FIELDS
+) + (
+    template.Choice(water.DETAIL_POINTER, "Wave Detail Texture",
+                    "The 2D texture translucent waves are overlaid with. "
+                    "Every retail header but the trophy race's names "
+                    "ASSET_TEX2D_WATER_DETAIL"),
+)
+
 #: Answers a remix keeps from the header it inherits, and can change. The
 #: import fills them from that header and the export lays them back over it, so
 #: an untouched remix writes what it came with and a new sky actually ships.
-INHERITED = (MUSIC, SKYBOX)
+#: The race AI's bytes are among them: a remix starts with its base track's
+#: difficulty and the AI Racers panel edits it. So are the waves'.
+INHERITED = ((MUSIC, SKYBOX) + race_ai.HEADER_POINTERS
+             + tuple(choice.pointer for choice in WATER_CHOICES))
+
+#: Every field an answer can be kept for. The header form draws only
+#: ``template.CHOICES``; the AI's own live in the AI Racers panel and the
+#: waves' in the Water panel.
+ALL_CHOICES = tuple(template.CHOICES) + race_ai.HEADER_CHOICES + WATER_CHOICES
 
 
 def key_for(pointer: str) -> str:
@@ -55,7 +77,7 @@ def key_for(pointer: str) -> str:
 
 
 def choice_for(pointer: str):
-    for choice in template.CHOICES:
+    for choice in ALL_CHOICES:
         if choice.pointer == pointer:
             return choice
     return None
@@ -65,7 +87,7 @@ def overrides(context) -> dict:
     """Every answer the author has given, keyed the way the template wants."""
     scene = context.scene
     found = {}
-    for choice in template.CHOICES:
+    for choice in ALL_CHOICES:
         key = key_for(choice.pointer)
         if key not in scene:
             continue
@@ -80,13 +102,7 @@ def overrides(context) -> dict:
 
 def surveyed(pointer: str):
     """What the template would use for ``pointer`` if the author says nothing."""
-    document = template.document({})
-    node = document
-    for step in pointer.strip("/").split("/"):
-        if not isinstance(node, dict) or step not in node:
-            return None
-        node = node[step]
-    return node
+    return template.lookup(template.document({}), pointer)
 
 
 def effective_overrides(context) -> dict:
@@ -102,12 +118,9 @@ def unanswered(context) -> list:
 
 
 def _lookup(document, pointer):
-    node = document
-    for step in pointer.strip("/").split("/"):
-        if not isinstance(node, dict) or step not in node:
-            return None
-        node = node[step]
-    return node
+    # List-aware: the AI bytes are array elements (``/unknown/unkC/3``), and a
+    # dict-only walk read every one of them as absent.
+    return template.lookup(document, pointer)
 
 
 def adopt_answers(context, header) -> None:

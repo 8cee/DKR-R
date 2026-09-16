@@ -455,6 +455,9 @@ if(DKR_RUNTIME_BUILD_GENERATED)
     endif()
     set(DKR_GAME_SOURCES
         src/game/audio_equalizer.cpp
+        # The policy's asset hooks call into these with or without RT64; the
+        # table logic itself is DKRCustomTracksCore, via DKRLegacyModLaunch.
+        src/game/custom_tracks_hooks.cpp
         src/game/dkr_save_codec.cpp
         src/game/game_payload.cpp
         src/game/game_main.cpp
@@ -491,8 +494,6 @@ if(DKR_RUNTIME_BUILD_GENERATED)
     endif()
     if(DKR_RUNTIME_BUILD_RT64)
         list(APPEND DKR_GAME_SOURCES
-            src/game/custom_tracks.cpp
-            src/game/custom_tracks_hooks.cpp
             src/game/hud_basic_settings.cpp
             src/game/f3ddkr_rt64.cpp
             src/game/generated/jumpman_font.c

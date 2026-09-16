@@ -49,7 +49,8 @@ from bpy.props import BoolProperty, StringProperty
 from bpy_extras.io_utils import ImportHelper
 
 from .. import (assets, level_model, level_model_encoder, level_model_layout,
-                prefs, rice_identity, scene, textures as texture_module)
+                prefs, rice_identity, scene, textures as texture_module,
+                transparency as looks)
 from . import custom_textures, geometry
 
 #: Where the marker lives, so both this module and the export's "meshes I cannot
@@ -184,7 +185,8 @@ def _polygon_uvs(mesh, polygon, stats):
     return uvs
 
 
-def read_source_mesh(obj, textures, own=None, borrowed=None, stats=None):
+def read_source_mesh(obj, textures, own=None, borrowed=None, stats=None,
+                     table_looks=None):
     """``(faces, positions, colours)`` for :func:`rebatch_segment`.
 
     Quads are fanned into triangles rather than refused, for the same reason the
@@ -198,7 +200,12 @@ def read_source_mesh(obj, textures, own=None, borrowed=None, stats=None):
     is filled with what the UVs needed: ``uv_rescued`` faces whose mapping was
     in a map other than the active one, ``uv_unmapped`` textured faces with no
     mapping anywhere, and ``uv_clamped`` faces too wide for the s16 a UV is.
+
+    ``table_looks`` is :func:`table_looks`: for each entry whose texture is
+    known, the look its faces take and whether the game draws it see-through,
+    which together decide the cut-out bit and the pass each face is drawn in.
     """
+    table_looks = table_looks or {}
     mesh = obj.data
     matrix = obj.matrix_world
     borrowed = len(textures) if borrowed is None else int(borrowed)
@@ -227,8 +234,14 @@ def read_source_mesh(obj, textures, own=None, borrowed=None, stats=None):
                     if polygon.material_index < len(mesh.materials) else None)
         index = _texture_for(material, polygon.material_index, borrowed, own)
         texture = textures[index] if 0 <= index < len(textures) else None
+        flags = _flags_for(material)
+        opaque = True
+        if index in table_looks:
+            look, translucent = table_looks[index]
+            flags = looks.with_mode(flags, look)
+            opaque = looks.draws_in_opaque_pass(flags, translucent)
         key = level_model_layout.BatchKey(
-            index, _flags_for(material), 0, 0, 0, True, None,
+            index, flags, 0, 0, 0, opaque, None,
         )
         mapping = _polygon_uvs(mesh, polygon, stats)
         if texture is not None and (mapping is None or _flat(mapping)):
@@ -250,6 +263,20 @@ def read_source_mesh(obj, textures, own=None, borrowed=None, stats=None):
         if clamped:
             stats["uv_clamped"] += 1
     return faces, positions, colours
+
+
+def table_looks(textures, tree=None, own=()) -> dict:
+    """``{table index: (look, see-through)}`` for the entries whose texture is known.
+
+    A picture the mesh brought takes the look its alpha asked for; one of the
+    ROM's takes the one it was made with.
+    """
+    found = {}
+    for index, reference in enumerate(textures):
+        texture = geometry.texture_object(reference.texture_id, tree, own)
+        if texture is not None:
+            found[index] = (texture.transparency, bool(texture.translucent))
+    return found
 
 
 def _read_colours(mesh) -> list:
@@ -642,10 +669,13 @@ def build_track(operator, context, obj, textures, keep_source, donor=None,
         return {"CANCELLED"}
 
     stats = {}
+    tree = (assets.AssetTree.find(donor) if donor else None) or prefs.resolve(context)
     try:
         faces, positions, colours = read_source_mesh(
             obj, textures, own=adopted.own if adopted else None,
             borrowed=borrowed, stats=stats,
+            table_looks=table_looks(textures, tree,
+                                    custom_textures.entries(context)),
         )
     except ValueError as error:
         return refuse(str(error))
@@ -689,7 +719,6 @@ def build_track(operator, context, obj, textures, keep_source, donor=None,
         if geometry.PROP_GEOMETRY in existing:
             bpy.data.objects.remove(existing, do_unlink=True)
     collection = geometry._geometry_collection(context)
-    tree = (assets.AssetTree.find(donor) if donor else None) or prefs.resolve(context)
     built, _stats = geometry._build_geometry(
         stem, model, collection, tree, include_hidden=True,
         own=custom_textures.entries(context),

@@ -190,7 +190,21 @@ class TrackPackage:
         The bytes are what the game loads, not what the asset tool takes as
         input - see :mod:`level_model_encoder`, held to byte equality against
         every extracted retail model.
+
+        A BSP the game cannot walk is rebuilt here, on the way out, whatever
+        made it - a model re-segmented by an earlier version of the addon
+        carries one that draws segment 255 and crashes. Rebuilding keeps the
+        segment order and the node count, so the layout does not move, and a
+        retail tree, which always walks, is never touched.
         """
+        from . import level_model_layout  # noqa: PLC0415
+
+        problems = level_model_layout.bsp_problems(model)
+        if problems:
+            model.bsp = level_model_layout.build_bsp(model.bounding_boxes)
+            self.notes.append(
+                "rebuilt the segment BSP: the game could not walk the old one "
+                "(%s)" % "; ".join(problems))
         try:
             payload = level_model_encoder.pack(model)
         except level_model_encoder.LevelModelEncodeError as error:

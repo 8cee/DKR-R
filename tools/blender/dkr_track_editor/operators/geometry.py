@@ -59,7 +59,7 @@ from bpy_extras.io_utils import ImportHelper
 from mathutils import Vector
 
 from .. import (assets, level_model, level_model_layout, prefs, scene,
-                textures as texture_module)
+                textures as texture_module, transparency as looks)
 from ..preview import _image, _srgb_to_linear, reset_node_tree
 
 #: Marks a mesh as decoded track geometry. Its value used to name which of the
@@ -97,6 +97,8 @@ COLOUR_ATTRIBUTE = "baked"
 #: Vertex identity, on the POINT domain. The export contract.
 ATTR_SEGMENT = "dkr_segment"
 ATTR_VERTEX = "dkr_vertex"
+# Faces keep their source segment when Blender welds boundary vertices.
+ATTR_FACE_SEGMENT = "dkr_face_segment"
 
 #: The batch's render flags, on the FACE domain, stored as a signed 32-bit int
 #: because Blender has no unsigned attribute and retail uses values as high as
@@ -149,9 +151,11 @@ ATTR_SERIAL = "dkr_serial"
 ATTR_TRI_FLAGS = "dkr_tri_flags"
 
 #: The batch's texture table index and which side of numberofOpaqueBatches it
-#: sat on. Opacity is authored and cannot be derived from anything - no flag bit
-#: separates the two sides and neither does the texture format - so it travels
-#: with the face.
+#: sat on. The side is the game's to decide - ``render_level_segment`` draws a
+#: batch only in the pass its texture's render mode and its flags put it in,
+#: see :mod:`..transparency` - so for a textured face the export derives it
+#: afresh, and this attribute is what it falls back on for a face whose texture
+#: it cannot see, and for an untextured one.
 ATTR_TEXTURE = "dkr_texture"
 ATTR_OPAQUE = "dkr_opaque"
 
@@ -166,6 +170,9 @@ ATTR_UV = "dkr_uv"
 #: The ``baked`` colour attribute is sRGB-converted for display and cannot come
 #: back exactly; this can, and a rebuilt segment needs every colour it writes.
 ATTR_COLOUR = "dkr_colour"
+# Separate channels can be averaged by Merge by Distance without carrying
+# bits between channels. The packed attribute remains for older saved scenes.
+ATTR_COLOUR_CHANNELS = tuple("dkr_colour_" + channel for channel in "rgba")
 
 #: The track's name, as the materials are named after it. Recorded rather than
 #: recovered from the mesh's name, because an author is free to rename a mesh
@@ -199,6 +206,11 @@ PROP_CATEGORY = "dkr_category"
 #: Measured, the split costs 8 extra slots across all 55 retail models.
 PROP_TEXTURE_INDEX = "dkr_texture_index"
 PROP_SURFACE = "dkr_surface"
+
+#: The look a material shows its picture with: one of
+#: :data:`..transparency.MODES`. Appearance only; the file's truth is the
+#: texture's render mode and the faces' flags.
+PROP_LOOK = "dkr_look"
 
 #: What each surface *does*, for the picker's tooltips. The names and values
 #: come from the catalogue, which generates them from the decomp's
@@ -320,7 +332,7 @@ def unpack_colour(value: int):
 # ---------------------------------------------------------------------------
 
 def _track_material(stem: str, category: str, png, texture_index: int,
-                    surface: int):
+                    surface: int, look=None):
     """One material per (kind, texture table entry) of one track.
 
     Named for the track as well, because a material now carries data that
@@ -350,6 +362,10 @@ def _track_material(stem: str, category: str, png, texture_index: int,
         # same entry. Reused as it stood, the viewport would show the old one
         # over a file that holds the new.
         try:
+            if look is not None and existing.get(PROP_LOOK) != look:
+                existing[PROP_LOOK] = look
+                if image is not None and category != INVISIBLE_WALLS:
+                    _build_material_nodes(existing, category, image, look)
             _show_image(existing, category, image)
         except Exception:  # noqa: BLE001 - appearance only
             traceback.print_exc()
@@ -359,22 +375,45 @@ def _track_material(stem: str, category: str, png, texture_index: int,
     material[PROP_CATEGORY] = category
     material[PROP_TEXTURE_INDEX] = texture_index
     material[PROP_SURFACE] = surface
+    material[PROP_LOOK] = look or looks.OPAQUE
     material.diffuse_color = CATEGORY_TINT[category]
     try:
-        _build_material_nodes(material, category, image)
+        _build_material_nodes(material, category, image, look)
     except Exception:  # noqa: BLE001 - appearance only
         traceback.print_exc()
     return material
 
 
-def material_for(stem: str, category: str, texture_index: int, png, surface: int):
+def material_for(stem: str, category: str, texture_index: int, png, surface: int,
+                 look=None):
     """The material one (kind, texture table entry) is drawn with.
 
     The public form of the importer's own material rule, so that a texture
     applied by hand later lands in exactly the same slot scheme as one that came
-    off the file - same naming, same properties, same node tree.
+    off the file - same naming, same properties, same node tree. ``look`` is how
+    the picture's alpha is shown; ``None`` keeps whatever the material had.
     """
-    return _track_material(stem, category, png, texture_index, surface)
+    return _track_material(stem, category, png, texture_index, surface, look)
+
+
+def show_look(material, look) -> None:
+    """Redraw a material's picture with another look. Appearance only."""
+    if material is None or material.get(PROP_LOOK) == look:
+        return
+    material[PROP_LOOK] = look
+    category = material.get(PROP_CATEGORY)
+    if category == INVISIBLE_WALLS:
+        return
+    tree = getattr(material, "node_tree", None)
+    image = next((node.image for node in tree.nodes
+                  if node.type == "TEX_IMAGE" and node.image is not None),
+                 None) if tree else None
+    if image is None:
+        return
+    try:
+        _build_material_nodes(material, category, image, look)
+    except Exception:  # noqa: BLE001 - appearance only
+        traceback.print_exc()
 
 
 def _show_image(material, category, image):
@@ -384,14 +423,14 @@ def _show_image(material, category, image):
     tree = getattr(material, "node_tree", None)
     nodes = [node for node in tree.nodes if node.type == "TEX_IMAGE"] if tree else []
     if not nodes:
-        _build_material_nodes(material, category, image)
+        _build_material_nodes(material, category, image, material.get(PROP_LOOK))
         return
     for node in nodes:
         if node.image is not image:
             node.image = image
 
 
-def _build_material_nodes(material, category, image):
+def _build_material_nodes(material, category, image, look=None):
     tree, surface = reset_node_tree(material)
     if tree is None:
         return
@@ -402,11 +441,15 @@ def _build_material_nodes(material, category, image):
         texture = tree.nodes.new("ShaderNodeTexImage")
         texture.image = image
         texture.interpolation = "Closest"
-        texture.location = (-500, 0)
+        texture.location = (-700, 0)
         shader = tree.nodes.new("ShaderNodeEmission")
-        shader.location = (-220, 0)
+        shader.location = (-320, 60)
         tree.links.new(texture.outputs["Color"], shader.inputs["Color"])
-        tree.links.new(shader.outputs[0], surface)
+        if look in (looks.CUTOUT, looks.BLEND):
+            _see_through(material, tree, texture, shader, surface, look)
+        else:
+            _set_render_method(material, None)
+            tree.links.new(shader.outputs[0], surface)
         return
 
     shader = tree.nodes.new("ShaderNodeBsdfDiffuse")
@@ -425,6 +468,51 @@ def _build_material_nodes(material, category, image):
     attribute.layer_name = COLOUR_ATTRIBUTE
     attribute.location = (-400, 0)
     tree.links.new(attribute.outputs["Color"], colour_input)
+
+
+def _see_through(material, tree, texture, shader, surface, look):
+    """Mix the picture with nothing by its alpha, as the game draws it.
+
+    A cut-out is hard-edged at half, which is where the export hardens the
+    texture it writes; a blend uses the alpha as it is.
+    """
+    transparent = tree.nodes.new("ShaderNodeBsdfTransparent")
+    transparent.location = (-320, -120)
+    mix = tree.nodes.new("ShaderNodeMixShader")
+    mix.location = (-120, 0)
+    factor = texture.outputs["Alpha"]
+    if look == looks.CUTOUT:
+        cut = tree.nodes.new("ShaderNodeMath")
+        cut.operation = "GREATER_THAN"
+        cut.inputs[1].default_value = (looks.HARD_THRESHOLD - 0.5) / 255.0
+        cut.location = (-460, -140)
+        tree.links.new(factor, cut.inputs[0])
+        factor = cut.outputs[0]
+    tree.links.new(factor, mix.inputs["Fac"])
+    tree.links.new(transparent.outputs["BSDF"], mix.inputs[1])
+    tree.links.new(shader.outputs[0], mix.inputs[2])
+    tree.links.new(mix.outputs["Shader"], surface)
+    _set_render_method(material, look)
+
+
+def _set_render_method(material, look):
+    """Tell EEVEE how to sort a see-through material, in whichever words it knows.
+
+    Blender 4.2 replaced ``blend_method`` with ``surface_render_method``; both
+    are tried so the addon draws the same on either side of that change.
+    """
+    blended = look == looks.BLEND
+    see_through = look in (looks.CUTOUT, looks.BLEND)
+    for attribute, value in (
+            ("surface_render_method", "BLENDED" if blended else "DITHERED"),
+            ("blend_method", "BLEND" if blended
+             else ("HASHED" if see_through else "OPAQUE")),
+            ("use_transparency_overlap", True)):
+        if hasattr(material, attribute):
+            try:
+                setattr(material, attribute, value)
+            except (TypeError, ValueError, AttributeError):
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -483,8 +571,38 @@ def texture_png(texture_id, tree=None, own=()):
     return tree.texture_3d_png(texture_id) if tree is not None else None
 
 
+def texture_object(texture_id, tree=None, own=()):
+    """The texture an id names - one of the track's own, or the ROM's - or ``None``.
+
+    What it returns answers ``format``, ``render_mode``, ``translucent`` and
+    ``transparency`` either way, which is all the transparency rules need.
+    """
+    ordinal = texture_module.custom_ordinal(texture_id)
+    if ordinal is not None:
+        own = list(own or ())
+        return own[ordinal] if 0 <= ordinal < len(own) else None
+    if tree is None:
+        return None
+    return texture_module.by_index(tree, texture_id)
+
+
+def table_translucency(texture_ids, tree=None, own=()) -> dict:
+    """``{table index: see-through}`` for the entries whose texture is known.
+
+    An entry whose texture cannot be found - no asset tree, or an image missing
+    from the scene - is left out, and a caller falls back on what the file
+    said rather than guess.
+    """
+    found = {}
+    for index, texture_id in enumerate(texture_ids):
+        texture = texture_object(texture_id, tree, own)
+        if texture is not None:
+            found[index] = bool(texture.translucent)
+    return found
+
+
 def _build_geometry(stem, model, collection, tree=None, include_hidden=True,
-                    own=()):
+                    own=(), translucency=None):
     """Build the one mesh, and return ``(object, stats)``.
 
     ``tree`` draws the ROM's textures and ``own`` - the scene's
@@ -527,6 +645,9 @@ def _build_geometry(stem, model, collection, tree=None, include_hidden=True,
     stats.vertices = len(positions)
 
     owners = batch_of_vertex(model)
+    if translucency is None:
+        translucency = table_translucency(
+            [texture.texture_id for texture in model.textures], tree, own)
 
     faces = []
     face_uvs = []
@@ -534,20 +655,22 @@ def _build_geometry(stem, model, collection, tree=None, include_hidden=True,
     face_slots = []
     face_flags = []
     face_serials = []
+    face_segments = []
     face_tri_flags = []
     face_textures = []
     face_opaque = []
     slots = {}
     materials = []
 
-    def slot_for(category, texture_index, png, surface):
+    def slot_for(category, texture_index, png, surface, look):
         # Keyed by table entry, not by image: the surface type lives on the
         # entry, so two entries showing one picture are two materials.
         key = (category, texture_index)
         if key not in slots:
             slots[key] = len(materials)
             materials.append(
-                _track_material(stem, category, png, texture_index, surface)
+                _track_material(stem, category, png, texture_index, surface,
+                                look)
             )
         return slots[key]
 
@@ -578,6 +701,8 @@ def _build_geometry(stem, model, collection, tree=None, include_hidden=True,
             slot = slot_for(
                 category, index_of_texture, png,
                 texture.surface_type if texture is not None else 0,
+                looks.face_mode(batch.flags,
+                                translucency.get(batch.texture_index, False)),
             )
             opaque = batch_index < segment.opaque_batches
 
@@ -605,6 +730,7 @@ def _build_geometry(stem, model, collection, tree=None, include_hidden=True,
                 face_slots.append(slot)
                 face_flags.append(to_signed32(batch.flags))
                 face_serials.append(batch_index + 1)
+                face_segments.append(index + 1)
                 face_tri_flags.append(int(triangle_flags) & 0xFF)
                 face_textures.append(int(batch.texture_index) & 0xFF)
                 face_opaque.append(opaque)
@@ -624,6 +750,9 @@ def _build_geometry(stem, model, collection, tree=None, include_hidden=True,
     _write_attribute(mesh, ATTR_SEGMENT, "INT", "POINT", segment_ids)
     _write_attribute(mesh, ATTR_VERTEX, "INT", "POINT", vertex_ids)
     _write_attribute(mesh, ATTR_COLOUR, "INT", "POINT", raw_colours)
+    for channel, name in enumerate(ATTR_COLOUR_CHANNELS):
+        _write_attribute(mesh, name, "INT", "POINT",
+                         [unpack_colour(value)[channel] for value in raw_colours])
 
     if colours:
         layer = mesh.color_attributes.new(COLOUR_ATTRIBUTE, "FLOAT_COLOR", "POINT")
@@ -646,6 +775,7 @@ def _build_geometry(stem, model, collection, tree=None, include_hidden=True,
             polygon.material_index = slot
         _write_attribute(mesh, ATTR_FLAGS, "INT", "FACE", face_flags)
         _write_attribute(mesh, ATTR_SERIAL, "INT", "FACE", face_serials)
+        _write_attribute(mesh, ATTR_FACE_SEGMENT, "INT", "FACE", face_segments)
         _write_attribute(mesh, ATTR_TRI_FLAGS, "INT", "FACE", face_tri_flags)
         _write_attribute(mesh, ATTR_TEXTURE, "INT", "FACE", face_textures)
         _write_attribute(mesh, ATTR_OPAQUE, "BOOLEAN", "FACE", face_opaque)
@@ -759,6 +889,91 @@ def record_budget(obj, model) -> None:
     obj[PROP_RUNTIME_SIZE] = level_model_layout.runtime_size(model)
     obj[PROP_HEADROOM] = level_model_layout.headroom_triangles(model)
     obj[PROP_OVERSIZED] = len(level_model_layout.oversized_segments(model))
+    record_water(obj, model)
+
+
+#: What the Water panel shows, as JSON: the wave grid and anything wrong.
+PROP_WATER = "dkr_water"
+
+
+def record_water(obj, model) -> None:
+    """Stash the water the model holds, for the Water panel to read."""
+    from .. import water  # noqa: PLC0415
+
+    summary = {"calm": 0, "wavy": 0, "tiles": 0, "tile": [0, 0],
+               "reference": -1, "problems": [], "notes": []}
+    for segment in model.segments:
+        for batch in segment.batches:
+            if water.is_wavy(batch.flags):
+                summary["wavy"] += batch.face_count
+            elif water.is_water(batch.flags):
+                summary["calm"] += batch.face_count
+    if water.has_waves(model):
+        grid = water.simulate(model)
+        if grid is not None:
+            summary["tiles"] = sum(1 for wavy in grid.wavy if wavy)
+            summary["tile"] = [grid.tile_w, grid.tile_h]
+            summary["reference"] = -1 if grid.reference is None else grid.reference
+        summary["problems"] = water.problems(model)
+        texture = None
+        if grid is not None and grid.reference is not None:
+            for batch in model.segments[grid.reference].batches:
+                if water.is_reference(batch.flags):
+                    reference = model.texture_for(batch)
+                    if reference is not None:
+                        texture = (reference.width, reference.height,
+                                   reference.format & 0xF)
+                    break
+        summary["notes"] = water.notes(model, texture)
+    obj[PROP_WATER] = json.dumps(summary)
+
+
+def water_summary(obj) -> dict:
+    """What :func:`record_water` stashed, or ``{}``."""
+    try:
+        return json.loads(obj.get(PROP_WATER) or "{}")
+    except (TypeError, ValueError):
+        return {}
+
+
+def replace_base(context, obj, model, include_hidden=None):
+    """Write ``model`` as the track's own base file and rebuild the mesh from it.
+
+    What re-segmenting does, and anything else that renumbers every vertex:
+    the shipped ``.bin`` stops describing the mesh the moment segments change,
+    so the model is written beside the ``.blend`` and imported back, and every
+    later export is applied to that file. Returns ``(object, path, stats)``.
+    Raises :class:`OSError` if the file cannot be written.
+    """
+    from .. import level_model_encoder  # noqa: PLC0415
+    from . import custom_textures  # noqa: PLC0415 - it imports this module
+
+    payload = level_model_encoder.pack(model)
+    stem = os.path.splitext(os.path.basename(bpy.data.filepath))[0]
+    target = os.path.join(os.path.dirname(bpy.data.filepath),
+                          "%s-geometry.bin" % stem)
+    with open(target, "wb") as handle:
+        handle.write(payload)
+
+    if include_hidden is None:
+        include_hidden = bool(obj.get(PROP_INCLUDE_HIDDEN, True))
+    locked = bool(obj.hide_select)
+    collection = _geometry_collection(context)
+    for existing in list(context.scene.objects):
+        if PROP_GEOMETRY in existing:
+            bpy.data.objects.remove(existing, do_unlink=True)
+
+    tree = assets.AssetTree.find(target) or prefs.resolve(context)
+    rebuilt, stats = _build_geometry(
+        stem, model, collection, tree, include_hidden=include_hidden,
+        own=custom_textures.entries(context),
+    )
+    rebuilt[PROP_MODEL_PATH] = target
+    rebuilt[PROP_AUTHORED_BASE] = True
+    rebuilt.hide_select = locked
+    record_budget(rebuilt, model)
+    context.scene.dkr.geometry_path = target
+    return rebuilt, target, stats
 
 
 def budget_of(obj):
@@ -1342,7 +1557,7 @@ class DKR_OT_resegment(bpy.types.Operator):
         return bool(geometry_objects(context))
 
     def execute(self, context):
-        from .. import level_model_encoder, level_model_layout
+        from .. import level_model_encoder, level_model_layout, water
         from . import geometry_export
 
         targets = geometry_objects(context)
@@ -1370,9 +1585,10 @@ class DKR_OT_resegment(bpy.types.Operator):
             return {"CANCELLED"}
 
         before = len(edit.model.segments)
+        waves = water.has_waves(edit.model)
         try:
             after = level_model_layout.resegment(edit.model)
-            payload = level_model_encoder.pack(edit.model)
+            level_model_encoder.pack(edit.model)
         except (level_model_layout.LayoutError,
                 level_model_encoder.LevelModelEncodeError) as error:
             self.report({"ERROR"}, "could not re-segment: %s" % error)
@@ -1384,36 +1600,11 @@ class DKR_OT_resegment(bpy.types.Operator):
         # indices that mean something else. Writing it out makes re-segmenting a
         # checkpoint rather than a one-way door - reshaping afterwards is back on
         # the in-place path and byte-exact against this file.
-        stem = os.path.splitext(os.path.basename(bpy.data.filepath))[0]
-        target = os.path.join(
-            os.path.dirname(bpy.data.filepath), "%s-geometry.bin" % stem
-        )
         try:
-            with open(target, "wb") as handle:
-                handle.write(payload)
+            _rebuilt, target, _stats = replace_base(context, obj, edit.model)
         except OSError as error:
-            self.report({"ERROR"}, "could not write %s: %s" % (target, error))
+            self.report({"ERROR"}, "could not write the model: %s" % error)
             return {"CANCELLED"}
-
-        include_hidden = bool(obj.get(PROP_INCLUDE_HIDDEN, True))
-        locked = bool(obj.hide_select)
-        collection = _geometry_collection(context)
-        for existing in list(context.scene.objects):
-            if PROP_GEOMETRY in existing:
-                bpy.data.objects.remove(existing, do_unlink=True)
-
-        from . import custom_textures  # noqa: PLC0415 - it imports this module
-
-        tree = assets.AssetTree.find(target) or prefs.resolve(context)
-        rebuilt, stats = _build_geometry(
-            stem, edit.model, collection, tree, include_hidden=include_hidden,
-            own=custom_textures.entries(context),
-        )
-        rebuilt[PROP_MODEL_PATH] = target
-        rebuilt[PROP_AUTHORED_BASE] = True
-        rebuilt.hide_select = locked
-        record_budget(rebuilt, edit.model)
-        context.scene.dkr.geometry_path = target
 
         problems = level_model_layout.check_windows(edit.model)
         if problems:
@@ -1421,9 +1612,11 @@ class DKR_OT_resegment(bpy.types.Operator):
 
         self.report(
             {"INFO"},
-            "re-segmented %d into %d, and rebuilt the mesh from it - every "
+            "re-segmented %d into %d%s, and rebuilt the mesh from it - every "
             "vertex was renumbered, so the track is now its own base at %s"
-            % (before, after, os.path.basename(target)),
+            % (before, after,
+               " along the wave grid, so the waves keep working" if waves else "",
+               os.path.basename(target)),
         )
         return {"FINISHED"}
 

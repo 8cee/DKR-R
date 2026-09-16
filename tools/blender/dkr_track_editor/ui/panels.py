@@ -17,11 +17,12 @@ import textwrap
 
 import bpy
 
-from .. import catalog as catalog_module, level_types, prefs, scene, skyboxes
+from .. import catalog as catalog_module, level_types, prefs, race_ai, scene, skyboxes
 from ..operators import geometry as geometry_ops
 from ..operators import header as header_ops
 from ..operators import level_type as level_type_ops
 from ..operators import new_track as new_track_ops
+from ..operators import race_ai as race_ai_ops
 from ..operators import skybox as skybox_ops
 from ..operators import start_grid
 from ..operators.edit import object_type_items  # noqa: F401 - kept for callers
@@ -587,10 +588,13 @@ def _draw_own_textures(layout, context, settings, texture_ops):
     column = layout.column(align=True)
     for position, entry in enumerate(own):
         chosen = int(settings.texture_id) == entry.index
+        look = texture_ops.LOOK_WORDS.get(entry.transparency, "")
         column.operator(
             "dkr.pick_texture",
-            text="%d. %s  %dx%d" % (position + 1, entry.name,
-                                    entry.width, entry.height),
+            text="%d. %s  %dx%d%s" % (position + 1, entry.name,
+                                      entry.width, entry.height,
+                                      ", " + look if entry.translucent
+                                      or entry.transparency != "OPAQUE" else ""),
             icon="RADIOBUT_ON" if chosen else "RADIOBUT_OFF",
             emboss=chosen,
         ).index = entry.index
@@ -612,7 +616,20 @@ def _draw_chosen_texture(layout, context, settings, texture_ops):
     box.label(text="%dx%d, %s%s" % (chosen.width, chosen.height, chosen.group,
                                     ", animated" if chosen.animated else ""))
 
+    # What the game will do with the picture's alpha. For one of the track's
+    # own it is the texture's to change; for one of the ROM's it was decided
+    # when the ROM was made.
+    row = box.row(align=True)
+    row.label(text="Made %s" % texture_ops.LOOK_WORDS.get(chosen.transparency,
+                                                          chosen.transparency),
+              icon="IMAGE_ALPHA" if chosen.translucent
+              or chosen.transparency != "OPAQUE" else "IMAGE_RGB")
+    if getattr(chosen, "own", False):
+        row.operator_menu_enum("dkr.set_texture_transparency", "look",
+                               text="Change")
+
     box.prop(settings, "texture_surface")
+    box.prop(settings, "texture_transparency")
     box.prop(settings, "texture_mapping", text="")
     if settings.texture_mapping == "PROJECT":
         box.prop(settings, "texture_scale")
@@ -623,6 +640,9 @@ def _draw_chosen_texture(layout, context, settings, texture_ops):
     row.operator("dkr.select_by_texture", text="Select", icon="RESTRICT_SELECT_OFF")
     row.operator("dkr.clear_texture", text="Remove", icon="X")
     column.operator("dkr.sync_uvs", icon="UV")
+    column.operator_menu_enum("dkr.set_face_transparency", "look",
+                              text="Transparency Of Selected",
+                              icon="IMAGE_ALPHA")
 
     obj = texture_ops.target(context)
     if obj is not None:
@@ -659,6 +679,90 @@ def _draw_surface(layout, context, objects):
         text=geometry_ops.surface_name(surface) if surface is not None else "set",
         icon="DOWNARROW_HLT",
     )
+
+
+class DKR_PT_water(DkrPanel, bpy.types.Panel):
+    """Water the track holds, and how its waves move.
+
+    Waves are a simulation the game runs over a grid of equal squares, not a
+    material, so this is where an author asks for them: *Add Water* lays the
+    squares and cuts the track to fit, and the settings below are the header
+    bytes that shape the simulation.
+    """
+
+    bl_label = "Water"
+    bl_idname = "DKR_PT_water"
+    bl_parent_id = "DKR_PT_track"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(geometry_ops.geometry_objects(context))
+
+    def draw(self, context):
+        layout = self.layout
+        obj = geometry_ops.geometry_objects(context)[0]
+        summary = geometry_ops.water_summary(obj)
+
+        box = layout.box()
+        wavy = int(summary.get("wavy", 0))
+        calm = int(summary.get("calm", 0))
+        if not wavy and not calm:
+            box.label(text="No water yet", icon="MOD_OCEAN")
+        if wavy:
+            tile = summary.get("tile") or [0, 0]
+            box.label(text="Waves: %d tile(s), %dx%d"
+                      % (int(summary.get("tiles", 0)), tile[0], tile[1]),
+                      icon="MOD_OCEAN")
+        if calm:
+            box.label(text="Calm water: %d face(s)" % calm, icon="MOD_FLUIDSIM")
+        for problem in summary.get("problems", [])[:2]:
+            info_box(layout, context, problem, icon="ERROR", alert=True)
+        for note in summary.get("notes", [])[:2]:
+            info_box(layout, context, note, icon="INFO")
+
+        column = layout.column(align=True)
+        column.operator("dkr.add_water", icon="ADD")
+        row = column.row(align=True)
+        row.operator("dkr.select_water", text="Select", icon="RESTRICT_SELECT_OFF")
+        row.operator("dkr.remove_water", text="Remove", icon="X")
+
+        if not wavy:
+            info_box(layout, context,
+                     "Select the lake bed in Edit Mode, put the 3D cursor at the "
+                     "water line, and Add Water. Waves cut the whole track into "
+                     "equal squares, which is how every retail wave track is "
+                     "built.")
+            return
+
+        layout.separator()
+        header = layout.row(align=True)
+        header.label(text="How the waves move", icon="FORCE_HARMONIC")
+        header.operator_menu_enum("dkr.wave_preset", "preset", text="Preset")
+        waves = context.scene.dkr_water
+        column = layout.column(align=True)
+        for name in ("power", "subdivisions"):
+            column.prop(waves, name)
+        row = layout.row(align=True)
+        row.prop(waves, "scroll_x")
+        row.prop(waves, "scroll_y")
+        row = layout.row(align=True)
+        row.prop(waves, "scale_x")
+        row.prop(waves, "scale_y")
+        row = layout.row(align=True)
+        row.prop(waves, "translucent")
+        row.prop(waves, "double")
+        layout.prop(waves, "view")
+
+        settings = context.scene.dkr
+        layout.prop(settings, "show_wave_details", icon="PREFERENCES")
+        if settings.show_wave_details:
+            column = layout.column(align=True)
+            for name in ("height0", "step0", "height1", "step1", "seed",
+                         "pattern", "shore", "crest"):
+                column.prop(waves, name)
+        _dim_label(layout, "Waves run in single player; split screen draws "
+                           "the water flat.", icon="INFO")
 
 
 def _counts(context):
@@ -946,6 +1050,183 @@ class DKR_PT_grid_root(LevelPanel, bpy.types.Panel):
 # AI, Validate, Package
 # ---------------------------------------------------------------------------
 
+#: Split factor between a row's label and its widgets in the AI Racers grids.
+_AI_LABEL = 0.46
+
+
+def _ai_columns(layout, *titles):
+    split = layout.split(factor=_AI_LABEL, align=True)
+    split.label(text="")
+    row = split.row(align=True)
+    for title in titles:
+        _dim_label(row, title)
+    return split
+
+
+def _ai_row(layout, label):
+    split = layout.split(factor=_AI_LABEL, align=True)
+    split.label(text=label)
+    return split.row(align=True)
+
+
+class DKR_PT_race_ai(LevelPanel, bpy.types.Panel):
+    """What the computer racers drive, and how hard they race."""
+
+    bl_label = "AI Racers"
+    bl_idname = "DKR_PT_race_ai"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    @classmethod
+    def poll(cls, context):
+        return super().poll(context) and level_types.needs_checkpoints(_key(context))
+
+    def draw(self, context):
+        layout = self.layout
+        settings = context.scene.dkr
+
+        row = layout.row(align=True)
+        row.prop(settings, "show_ai_lines", toggle=True,
+                 icon="HIDE_OFF" if settings.show_ai_lines else "HIDE_ON")
+        row.prop(settings, "ai_lines_on_top", text="", toggle=True, icon="XRAY")
+        layout.row(align=True).prop(settings, "ai_line_vehicle", expand=True)
+
+        try:
+            route, _objects = race_ai_ops.read_route(context)
+        except Exception:  # noqa: BLE001 - the panel must still draw
+            info_box(layout, context, "The checkpoints could not be read.",
+                     icon="ERROR", alert=True)
+            return
+
+        chosen = race_ai_ops.vehicle_set(context)
+        vehicle = level_types.vehicle_name(settings.ai_line_vehicle).lower()
+        if not route.main:
+            counts = race_ai_ops.set_counts(context)
+            text = ("No checkpoint is in set %d, the one %s racers load, so "
+                    "their bots drive in circles and nobody's laps count."
+                    % (chosen, vehicle))
+            if counts:
+                text += " This scene's checkpoints are in set %s." % ", ".join(
+                    str(s) for s in sorted(counts))
+            info_box(layout, context, text, icon="ERROR", alert=True)
+        else:
+            detour = (" · %d on the alternate route" % len(route.alternate_of)
+                      if route.alternate_of else "")
+            _dim_label(layout, "Set %d: %d checkpoints%s"
+                       % (chosen, len(route.main), detour), icon="CHECKMARK")
+            if len(route.main) < 3:
+                info_box(layout, context, "With fewer than three checkpoints "
+                         "the line folds back on itself.", icon="ERROR")
+
+        if route.duplicates:
+            info_box(layout, context,
+                     "Index %s is on more than one checkpoint. The game prints "
+                     "an error over the race, and which one the bots take is "
+                     "down to spawn order." % ", ".join(
+                         str(i if i < race_ai.ALTERNATE_OFFSET
+                             else "%d (alternate)" % (i - race_ai.ALTERNATE_OFFSET))
+                         for i in route.duplicates[:6]),
+                     icon="ERROR", alert=True)
+        if route.dropped:
+            info_box(layout, context,
+                     "%d checkpoint(s) past the first %d in this set are never "
+                     "loaded: the game stops counting there."
+                     % (route.dropped, race_ai.MAX_CHECKPOINTS),
+                     icon="ERROR", alert=True)
+        if route.unpaired:
+            info_box(layout, context,
+                     "%d alternate checkpoint(s) name an index no main "
+                     "checkpoint has, so no racer ever takes them. Retail "
+                     "ships ten of these." % len(route.unpaired))
+
+        if settings.show_ai_lines:
+            _dim_label(layout, "Lanes 1-4: %s" % ", ".join(race_ai_ops.LANE_NAMES))
+        lines(layout, context,
+              "Each bot drives one of the four lanes and changes lane to "
+              "overtake. A lane is the game's own spline through the "
+              "checkpoints, moved by that lane's offsets on each one; the faint "
+              "lines are the alternate route.", dim=True)
+
+
+class DKR_PT_race_ai_difficulty(DkrPanel, bpy.types.Panel):
+    bl_label = "Difficulty"
+    bl_idname = "DKR_PT_race_ai_difficulty"
+    bl_parent_id = "DKR_PT_race_ai"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw(self, context):
+        layout = self.layout
+        ai = context.scene.dkr_ai
+        lines(layout, context,
+              "Behaviour level 0 (easiest) to 9 (the Ultimate AI cheat's): how "
+              "fast the bots aim to go and how often they boost, attack and "
+              "cheat. The game picks the row from where the save stands.",
+              dim=True)
+        column = layout.column(align=True)
+        _ai_columns(column, "Adventure", "Adv. 2")
+        for number, (_slot, label, _help) in enumerate(race_ai.AI_LEVEL_SLOTS):
+            row = _ai_row(column, label)
+            row.prop(ai, "adv1_%d" % number, text="")
+            row.prop(ai, "adv2_%d" % number, text="")
+        layout.operator("dkr.ai_copy_difficulty", icon="DUPLICATE")
+
+
+class DKR_PT_race_ai_skill(DkrPanel, bpy.types.Panel):
+    bl_label = "Start Skill"
+    bl_idname = "DKR_PT_race_ai_skill"
+    bl_parent_id = "DKR_PT_race_ai"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw(self, context):
+        layout = self.layout
+        ai = context.scene.dkr_ai
+        lines(layout, context,
+              "Only the start: Master always gets the start boost, Expert gets "
+              "it when the player does, Hard goes on the beep, Medium and Easy "
+              "are 4 and 8 frames late. Used in single-player races, boss races "
+              "and Taj's challenges; with two or more players each bot draws "
+              "Master to Hard instead.", dim=True)
+        column = layout.column(align=True)
+        _ai_columns(column, "Race", "Trophy")
+        for index, character in enumerate(race_ai.CHARACTERS):
+            row = _ai_row(column, character)
+            row.prop(ai, "skill_%d" % index, text="")
+            row.prop(ai, "trophy_%d" % index, text="")
+        _dim_label(layout, "0 Master · 1 Expert · 2 Hard · 3 Medium · 4 Easy")
+
+
+class DKR_PT_race_ai_sets(DkrPanel, bpy.types.Panel):
+    bl_label = "Checkpoint Sets"
+    bl_idname = "DKR_PT_race_ai_sets"
+    bl_parent_id = "DKR_PT_race_ai"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw(self, context):
+        layout = self.layout
+        settings = context.scene.dkr
+        ai = context.scene.dkr_ai
+        lines(layout, context,
+              "Each vehicle's racers load only the checkpoints whose "
+              "vehicleType is its set, which is how a track gives the plane a "
+              "route of its own.", dim=True)
+        counts = race_ai_ops.set_counts(context)
+        allowed = level_types.scene_allowed_vehicles(settings)
+        stranded = []
+        column = layout.column(align=True)
+        for index, (vehicle, label) in enumerate(level_types.PLAYER_VEHICLES):
+            value = getattr(ai, "set_%d" % index)
+            row = _ai_row(column, label)
+            row.active = vehicle in allowed
+            row.prop(ai, "set_%d" % index, text="")
+            _dim_label(row, "%d checkpoints" % counts.get(value, 0))
+            if vehicle in allowed and counts and not counts.get(value):
+                stranded.append(label)
+        if stranded:
+            info_box(layout, context,
+                     "%s racers load a set with no checkpoints: their bots "
+                     "drive in circles and nobody's laps count."
+                     % " and ".join(stranded), icon="ERROR", alert=True)
+
+
 class DKR_PT_ai(LevelPanel, bpy.types.Panel):
     bl_label = "AI Node Graph"
     bl_idname = "DKR_PT_ai"
@@ -957,8 +1238,9 @@ class DKR_PT_ai(LevelPanel, bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         lines(layout, context,
-              "The AI racers are steered by the checkpoints; how they use them "
-              "is still being studied, so these tools stay off until then.",
+              "Battle and banana arenas steer their bots along this graph. Race "
+              "bots follow the checkpoints instead - see AI Racers. The arena "
+              "tools stay off until the arena AI has been studied.",
               icon="INFO")
         column = layout.column(align=True)
         column.enabled = False
@@ -1073,8 +1355,8 @@ class DKR_PT_header(DkrPanel, bpy.types.Panel):
             info_box(layout, context,
                      "This track inherits its header from %s, so the fields "
                      "below are unused - except the ones set by Level Type, "
-                     "the music and the skybox, which the export lays over "
-                     "it." % level.label)
+                     "the music, the skybox and the AI Racers settings, which "
+                     "the export lays over it." % level.label)
 
         layout.operator("dkr.header_defaults", icon="LOOP_BACK")
 
@@ -1269,10 +1551,15 @@ CLASSES = (
     DKR_PT_track,
     DKR_PT_geometry,
     DKR_PT_textures,
+    DKR_PT_water,
     DKR_PT_place,
     DKR_PT_minimap,
     DKR_PT_object,
     DKR_PT_grid_root,
+    DKR_PT_race_ai,
+    DKR_PT_race_ai_difficulty,
+    DKR_PT_race_ai_skill,
+    DKR_PT_race_ai_sets,
     DKR_PT_ai,
     DKR_PT_validate,
     DKR_PT_export,

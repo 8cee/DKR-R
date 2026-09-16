@@ -168,13 +168,25 @@ def compose(policy: dict, fragment: dict, sections: list) -> dict:
         expected = [int(word, 0) for word in site["expected"]]
         if len(expected) != 3 or [words.get(address + i * 4) for i in range(3)] != expected:
             raise ValueError(f"Asset API entry signature changed: {name}")
-        if any(int(entry["beforeVram"], 0) == address for entry in hooks) or any(
-                int(entry["vram"], 0) == address for entry in patches):
+        owners = [entry for entry in hooks if int(entry["beforeVram"], 0) == address]
+        if any(int(entry["vram"], 0) == address for entry in patches):
             raise ValueError(f"Asset API entry conflicts with an existing policy: {name}")
-        hooks.append({"function": name, "beforeVram": f"0x{address:08X}",
-                      "text": "extern int dkr_legacy_asset_api(uint8_t*, recomp_context*, unsigned); "
-                              f"if (dkr_legacy_asset_api(rdram, ctx, {operation}U)) return;",
-                      "reason": "Resolve a mounted immutable bank at the original function entry; leave the complete retail path intact without a mount."})
+        text = ("extern int dkr_legacy_asset_api(uint8_t*, recomp_context*, unsigned); "
+                f"if (dkr_legacy_asset_api(rdram, ctx, {operation}U)) return;")
+        if owners:
+            recorder = {"asset_table_load": "table", "asset_load": "asset"}.get(name)
+            symbol = f"dkr_custom_tracks_{recorder}_load_begin"
+            expected = f"extern void {symbol}(uint8_t*, recomp_context*); {symbol}(rdram, ctx);"
+            if not recorder or len(owners) != 1 or owners[0].get("function") != name or owners[0].get("text") != expected:
+                raise ValueError(f"Unreviewed asset API entry owner: {name}")
+            # The mounted branch performs dkrmap extension itself. Only record
+            # the request for the existing epilogue if retail will execute it.
+            owners[0]["text"] = text + " " + expected
+            owners[0]["reason"] = owners[0].get("reason", "") + " Compose mounted legacy/character routing with dkrmap handling before the stock fallback."
+        else:
+            hooks.append({"function": name, "beforeVram": f"0x{address:08X}",
+                          "text": text,
+                          "reason": "Resolve a mounted immutable bank at the original function entry; leave the complete retail path intact without a mount."})
     return result
 
 

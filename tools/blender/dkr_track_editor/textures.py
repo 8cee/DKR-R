@@ -57,6 +57,7 @@ import re
 import struct
 from typing import Dict, List, Optional
 
+from . import transparency
 from .assets import META_TEXTURES_3D, AssetTree
 
 #: ``TextureHeader.format``'s low nibble, from ``include/structs.h``. Level
@@ -90,10 +91,10 @@ class Texture3D:
     """One entry of ``ASSET_TEXTURES_3D``, resolved to something drawable."""
 
     __slots__ = ("index", "asset_id", "name", "group", "png", "width", "height",
-                 "format", "frames")
+                 "format", "frames", "render_mode")
 
     def __init__(self, index, asset_id, name, group, png, width, height,
-                 texture_format, frames):
+                 texture_format, frames, render_mode="OPAQUE"):
         #: What a level model's texture table stores. The whole point.
         self.index = index
         self.asset_id = asset_id
@@ -108,10 +109,28 @@ class Texture3D:
         #: texture, which the batch drawing it has to be flagged for; see
         #: ``RENDER_TEX_ANIM`` in the geometry operators.
         self.frames = frames
+        #: The sidecar's ``render-mode``, the high nibble of the header's
+        #: format byte. It decides whether the game draws the texture
+        #: see-through, and so which pass a batch drawing it belongs to; see
+        #: :mod:`.transparency`. Every one of the 1401 sidecars names one.
+        self.render_mode = render_mode or "OPAQUE"
 
     @property
     def animated(self) -> bool:
         return self.frames > 1
+
+    @property
+    def translucent(self) -> bool:
+        return transparency.translucent(self.format, self.render_mode)
+
+    @property
+    def transparency(self) -> str:
+        """The look the texture has on a face that asks for nothing else."""
+        return transparency.BLEND if self.translucent else transparency.OPAQUE
+
+    @property
+    def own(self) -> bool:
+        return False
 
     @property
     def label(self) -> str:
@@ -214,6 +233,7 @@ def _entry(tree: AssetTree, index: int, asset_id: str) -> Optional[Texture3D]:
         height=size[1],
         texture_format=FORMAT_CODES.get(data.get("format"), DEFAULT_FORMAT),
         frames=max(1, len(images)),
+        render_mode=data.get("render-mode") or "OPAQUE",
     )
 
 
@@ -914,7 +934,8 @@ def texture_header(width, height, texture_format, render_mode="OPAQUE",
 
 
 def encode_texture(png_path, texture_format=None, render_mode="OPAQUE",
-                   clamp_s=False, clamp_t=False, nudge=0) -> bytes:
+                   clamp_s=False, clamp_t=False, nudge=0,
+                   transparency_mode=None) -> bytes:
     """One PNG as the bytes ``ASSET_TEXTURES_3D`` holds for a texture.
 
     The result is padded to sixteen bytes because ``load_texture`` puts the
@@ -923,11 +944,14 @@ def encode_texture(png_path, texture_format=None, render_mode="OPAQUE",
     multiple of sixteen pushes the last one past the end of its own block.
 
     ``nudge`` is :func:`nudge_texels`'s, and is zero for all but a texture that
-    had to be told apart from another.
+    had to be told apart from another. ``transparency_mode`` is
+    :func:`.transparency.prepare`'s: the pixels are made to agree with the look
+    before they are encoded, and ``None`` leaves them as the PNG holds them.
     """
     code = FORMAT_CODES["RGBA16"] if texture_format is None else int(texture_format)
     width, height, rgba = read_png(png_path)
     check_size(width, height, code)
+    rgba = transparency.prepare(rgba, width, height, transparency_mode, code)
     payload = bytearray()
     payload += texture_header(width, height, code, render_mode,
                               clamp_s=clamp_s, clamp_t=clamp_t)
@@ -955,17 +979,25 @@ class CustomTexture:
     """
 
     __slots__ = ("ordinal", "name", "png", "width", "height", "format",
-                 "render_mode", "source", "original", "nudge")
+                 "legacy_render_mode", "mode", "source", "original", "nudge")
 
     def __init__(self, ordinal, name, png, width, height, texture_format,
-                 render_mode="OPAQUE", source="", original="", nudge=0):
+                 render_mode="OPAQUE", source="", original="", nudge=0,
+                 transparency_mode=None):
         self.ordinal = int(ordinal)
         self.name = name
         self.png = png
         self.width = int(width)
         self.height = int(height)
         self.format = int(texture_format)
-        self.render_mode = render_mode
+        #: What a texture added before transparency existed was written with.
+        self.legacy_render_mode = render_mode or "OPAQUE"
+        #: The look, from :data:`.transparency.MODES`, or ``None`` for a texture
+        #: added before there was a choice - encoded exactly as it always was,
+        #: so an old scene's payloads, and the HD pack names hashed from them,
+        #: do not change under an author who did nothing.
+        self.mode = (transparency.own_mode(transparency_mode, self.format)
+                     if transparency_mode else None)
         #: The image the author picked, kept so the panel can say where it came
         #: from. The PNG beside it is what is encoded.
         self.source = source
@@ -979,6 +1011,28 @@ class CustomTexture:
     @property
     def index(self) -> int:
         return custom_id(self.ordinal)
+
+    @property
+    def render_mode(self) -> str:
+        """The header's render mode: the look's, or what an old texture had."""
+        if self.mode is None:
+            return self.legacy_render_mode
+        return transparency.render_mode_for(self.mode)
+
+    @property
+    def translucent(self) -> bool:
+        return transparency.translucent(self.format, self.render_mode)
+
+    @property
+    def transparency(self) -> str:
+        """The look faces drawing this texture take unless told otherwise."""
+        if self.mode is not None:
+            return self.mode
+        return transparency.BLEND if self.translucent else transparency.OPAQUE
+
+    @property
+    def own(self) -> bool:
+        return True
 
     @property
     def group(self) -> str:
@@ -1004,7 +1058,7 @@ class CustomTexture:
 
     def encode(self) -> bytes:
         return encode_texture(self.png, self.format, self.render_mode,
-                              nudge=self.nudge)
+                              nudge=self.nudge, transparency_mode=self.mode)
 
     def texels(self, nudge=None) -> bytes:
         """The image as ``encode`` writes it, without the header.
@@ -1013,6 +1067,7 @@ class CustomTexture:
         """
         width, height, rgba = read_png(self.png)
         check_size(width, height, self.format)
+        rgba = transparency.prepare(rgba, width, height, self.mode, self.format)
         return nudge_texels(encode_texels(rgba, width, height, self.format),
                             width, height, self.format,
                             self.nudge if nudge is None else nudge)

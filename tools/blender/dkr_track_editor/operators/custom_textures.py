@@ -56,7 +56,7 @@ import bpy
 from bpy.props import EnumProperty, StringProperty
 from bpy_extras.io_utils import ImportHelper
 
-from .. import textures as texture_module
+from .. import textures as texture_module, transparency as looks
 from . import geometry
 
 #: Where the resampled PNGs go, beside the ``.blend`` that names them.
@@ -97,6 +97,7 @@ def entries(context) -> list:
             source=record.source,
             original=resolve(record.original),
             nudge=record.nudge,
+            transparency_mode=record.transparency or None,
         ))
     return found
 
@@ -352,7 +353,7 @@ def _parse_size(text: str, texture_format: int, was):
 # ---------------------------------------------------------------------------
 
 def add_image(context, source: str, texture_format, size: str = "",
-              name: str = None, note: str = None):
+              name: str = None, note: str = None, transparency=looks.AUTO):
     """Make ``source`` one of the track's own textures: ``(entry, was)``.
 
     Resamples it, reads the result back through the addon's own encoder, keeps
@@ -363,6 +364,11 @@ def add_image(context, source: str, texture_format, size: str = "",
     ``name`` is what the panel calls it, the file's name by default. ``note`` is
     what :attr:`source` records, the file's path by default - a packed image
     has a better answer than the temporary file it was written out to.
+
+    ``transparency`` is the look, and :data:`..transparency.AUTO` reads it off
+    the picture: no alpha is opaque, clean holes are a cut-out, anything softer
+    is a blend. It is read from the original rather than the reduction,
+    because resampling softens every hard edge a picture has.
     """
     settings = context.scene.dkr
     code = int(texture_format)
@@ -385,14 +391,19 @@ def add_image(context, source: str, texture_format, size: str = "",
     original = os.path.join(directory, ORIGINALS, os.path.basename(destination))
 
     try:
-        was = _probe(source)
+        was, counts = _inspect(source)
+        wanted = (looks.suggest(*counts)
+                  if transparency in (None, "", looks.AUTO) else transparency)
+        mode = looks.own_mode(wanted, code)
         width, height = _parse_size(size, code, was)
         texture_module.check_size(width, height, code)
         was = resample(source, destination, width, height)
         # Read it straight back through the addon's own decoder. Blender
         # writing a PNG the encoder cannot read is the failure that would
         # otherwise wait until export, with a track already built on it.
-        texture_module.encode_texture(destination, code)
+        texture_module.encode_texture(destination, code,
+                                      looks.render_mode_for(mode),
+                                      transparency_mode=mode)
         keep_original(source, original)
     except (CustomTextureError, texture_module.TextureEncodeError) as error:
         _discard(destination)
@@ -413,7 +424,8 @@ def add_image(context, source: str, texture_format, size: str = "",
     record.width = width
     record.height = height
     record.format = code
-    record.render_mode = "OPAQUE"
+    record.transparency = mode
+    record.render_mode = looks.render_mode_for(mode)
     record.nudge = 0
     return entries(context)[-1], was
 
@@ -478,6 +490,31 @@ def _format_items(self, context):
     return props.texture_format_items(self, context)
 
 
+def _transparency_items(self, context):
+    return _keep("add_transparency", _look_items(auto=True))
+
+
+def _look_items(auto):
+    from .. import props  # noqa: PLC0415 - registered after this module loads
+
+    return props.transparency_items(auto=auto)
+
+
+#: What a report calls each look.
+LOOK_NAMES = {looks.OPAQUE: "opaque", looks.CUTOUT: "cut out by its alpha",
+              looks.BLEND: "blended by its alpha"}
+
+#: Blender's enum callbacks hand their strings to C without taking a reference,
+#: so the last list each one returned is held here; see props.py.
+_ITEMS = {}
+
+
+def _keep(key, items):
+    _ITEMS[key] = items
+    return items
+
+
+
 class DKR_OT_add_custom_texture(bpy.types.Operator, ImportHelper):
     """Add an image of your own to this track's artwork"""
 
@@ -507,6 +544,16 @@ class DKR_OT_add_custom_texture(bpy.types.Operator, ImportHelper):
         default="",
     )
 
+    transparency: EnumProperty(
+        name="Transparency",
+        description=(
+            "How the picture's alpha is used. As Made reads it off the image: "
+            "no alpha is opaque, clean holes are a cut-out, anything softer "
+            "is blended"
+        ),
+        items=_transparency_items,
+    )
+
     def invoke(self, context, event):
         settings = context.scene.dkr
         self.texture_format = settings.custom_format
@@ -520,10 +567,15 @@ class DKR_OT_add_custom_texture(bpy.types.Operator, ImportHelper):
 
         try:
             entry, was = add_image(context, self.filepath,
-                                   int(self.texture_format), self.size)
+                                   int(self.texture_format), self.size,
+                                   transparency=self.transparency)
         except CustomTextureError as error:
             self.report({"ERROR"}, str(error))
             return {"CANCELLED"}
+
+        advice = looks.advice(entry.transparency, entry.format)
+        if advice:
+            self.report({"WARNING"}, "%s: %s" % (entry.name, advice))
 
         # Select it in the browser so the next click is Apply rather than a
         # hunt through fourteen hundred thumbnails for the one just added.
@@ -539,19 +591,54 @@ class DKR_OT_add_custom_texture(bpy.types.Operator, ImportHelper):
             )
         self.report(
             {"INFO"},
-            "added %s at %dx%d, down from %dx%d" % (entry.name, entry.width,
-                                                    entry.height, was[0], was[1]),
+            "added %s at %dx%d, down from %dx%d, %s"
+            % (entry.name, entry.width, entry.height, was[0], was[1],
+               LOOK_NAMES.get(entry.transparency, entry.transparency)),
         )
         return {"FINISHED"}
 
 
-def _probe(source: str):
-    """The picture's size before anything is done to it."""
+#: Past this many pixels the alpha is sampled rather than read whole. A
+#: photograph has millions, and the answer is a proportion.
+_CENSUS_PIXELS = 1 << 20
+
+
+def _inspect(source: str):
+    """``(size, (solid, clear, partial))`` of a picture, before anything is done.
+
+    Read through Blender, which decodes every format the file picker offers,
+    and counted with numpy, which Blender ships. A picture with no alpha
+    channel reads as fully solid, which is the right answer for it.
+    """
     image = bpy.data.images.load(source, check_existing=False)
     try:
-        return (image.size[0], image.size[1])
+        size = (image.size[0], image.size[1])
+        counts = (size[0] * size[1], 0, 0)
+        if size[0] > 0 and size[1] > 0 and image.channels >= 4:
+            try:
+                counts = _alpha_census(image, size)
+            except Exception:  # noqa: BLE001 - unreadable alpha reads as solid
+                traceback.print_exc()
+        return size, counts
     finally:
         bpy.data.images.remove(image)
+
+
+def _alpha_census(image, size):
+    import numpy  # noqa: PLC0415 - Blender ships it
+
+    pixels = numpy.empty(size[0] * size[1] * 4, dtype=numpy.float32)
+    image.pixels.foreach_get(pixels)
+    alpha = pixels[3::4]
+    alpha = alpha[::max(1, alpha.size // _CENSUS_PIXELS)]
+    solid = int(numpy.count_nonzero(alpha >= 254.5 / 255.0))
+    clear = int(numpy.count_nonzero(alpha <= 0.5 / 255.0))
+    return solid, clear, int(alpha.size) - solid - clear
+
+
+def _probe(source: str):
+    """The picture's size before anything is done to it."""
+    return _inspect(source)[0]
 
 
 def _stored_path(path: str) -> str:
@@ -651,6 +738,64 @@ class DKR_OT_remove_custom_texture(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def _own_look_items(self, context):
+    return _keep("own_look", _look_items(auto=False))
+
+
+class DKR_OT_set_texture_transparency(bpy.types.Operator):
+    """Change how this track's chosen texture uses its alpha. Every face drawing it follows"""
+
+    bl_idname = "dkr.set_texture_transparency"
+    bl_label = "Texture Transparency"
+    bl_options = {"REGISTER", "UNDO"}
+
+    look: EnumProperty(name="Transparency", items=_own_look_items)
+
+    @classmethod
+    def poll(cls, context):
+        settings = getattr(context.scene, "dkr", None)
+        return bool(settings) and by_id(context, settings.texture_id) is not None
+
+    def execute(self, context):
+        from . import textures as texture_ops  # noqa: PLC0415 - imports this
+
+        settings = context.scene.dkr
+        entry = by_id(context, settings.texture_id)
+        if entry is None:
+            self.report({"ERROR"}, "pick one of this track's own textures first")
+            return {"CANCELLED"}
+        allowed = looks.own_modes(entry.format)
+        if self.look not in allowed:
+            self.report(
+                {"ERROR"},
+                "%s is %s, which can only be %s. Add the picture again in "
+                "another format to change that"
+                % (entry.name, _format_name(entry.format),
+                   " or ".join(LOOK_NAMES.get(a, a) for a in allowed)))
+            return {"CANCELLED"}
+
+        record = settings.custom_textures[entry.ordinal]
+        record.transparency = self.look
+        record.render_mode = looks.render_mode_for(self.look)
+        faces = texture_ops.refresh_texture_faces(context, entry.index)
+
+        advice = looks.advice(self.look, entry.format)
+        if advice:
+            self.report({"WARNING"}, "%s: %s" % (entry.name, advice))
+        self.report({"INFO"}, "%s is now %s; %d face(s) follow it"
+                    % (entry.name, LOOK_NAMES.get(self.look, self.look), faces))
+        for area in (context.screen.areas if context.screen else []):
+            area.tag_redraw()
+        return {"FINISHED"}
+
+
+def _format_name(code) -> str:
+    for name, value in texture_module.FORMAT_CODES.items():
+        if value == int(code):
+            return name
+    return "format %d" % int(code)
+
+
 def _table_users(context, texture_id: int) -> set:
     """The geometry whose texture table - base or added - has this texture."""
     found = set()
@@ -702,4 +847,5 @@ def _renumber(context, going: int) -> int:
 CLASSES = (
     DKR_OT_add_custom_texture,
     DKR_OT_remove_custom_texture,
+    DKR_OT_set_texture_transparency,
 )

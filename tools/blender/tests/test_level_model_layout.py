@@ -318,9 +318,22 @@ def check_collision_pressure(path):
     return None
 
 
+def _has_waves(model):
+    from dkr_track_editor import water
+
+    return water.has_waves(model)
+
+
 def check_resegment(path):
-    """Re-segmenting must keep every triangle and fix the crowding."""
+    """Re-segmenting must keep every triangle and fix the crowding.
+
+    A model with waves is cut into the wave grid instead, which cuts
+    triangles in two by design; ``test_water.py`` holds that path to what it
+    promises.
+    """
     blob, model = None, load(path)
+    if _has_waves(model):
+        return None
     before_triangles = sum(len(s.triangles) for s in model.segments)
     before_positions = {tuple(v) for s in model.segments for v in s.vertices}
     if before_triangles == 0:
@@ -365,7 +378,13 @@ def check_resegment(path):
 
 
 def check_resegment_bsp(path):
-    """The generated tree must satisfy the invariant retail satisfies."""
+    """The generated tree must be one the game can walk.
+
+    Walked the way ``traverse_segments_bsp_tree`` walks it, it has to draw
+    every segment exactly once. Resembling retail node by node is not enough:
+    the first tree this module built named each segment from its own node,
+    passed a structural check, and drew segment 255 of a 127-segment track.
+    """
     model = load(path)
     if sum(len(s.triangles) for s in model.segments) == 0:
         return None
@@ -375,33 +394,46 @@ def check_resegment_bsp(path):
         return "the BSP holds %d nodes for %d segments" % (
             len(model.bsp), len(model.segments)
         )
+    problems = level_model_layout.bsp_problems(model)
+    if problems:
+        return "the game cannot walk the generated BSP: %s" % "; ".join(problems)
 
-    seen, stack = set(), [0]
-    named = []
-    while stack:
-        node = stack.pop()
-        if node in seen or not 0 <= node < len(model.bsp):
-            continue
-        seen.add(node)
-        left, right, split_type, segment_index, _split = model.bsp[node]
-        if split_type > 2:
-            return "node %d has split axis %d" % (node, split_type)
-        if not 0 <= segment_index < len(model.segments):
-            return "node %d names segment %d" % (node, segment_index)
-        named.append(segment_index)
-        stack += [left, right]
-
-    if len(seen) != len(model.bsp):
-        return "%d of %d nodes are unreachable from the root" % (
-            len(model.bsp) - len(seen), len(model.bsp)
-        )
-    if len(set(named)) != len(named):
-        return "a segment is named by two nodes; retail never repeats one"
-    if set(named) != set(range(len(model.segments))):
-        return "%d segments are named by no node" % (
-            len(model.segments) - len(set(named))
-        )
+    # The shape that crashed: every node naming its own segment, segment 0
+    # holding a left subtree, so a run goes below zero.
+    crashing = [(1, -1, 0, 0, 0), (-1, 2, 0, 1, 0), (-1, -1, 0, 2, 0)]
+    if level_model_layout.draw_order(crashing, 3).count(255) != 1:
+        return "draw_order does not reproduce the game's segment 255"
     return None
+
+
+def check_retail_bsp_walks(path):
+    """Retail is the ground truth for the walk: every tree draws every segment
+    once, which is what makes bsp_problems safe to act on at export."""
+    problems = level_model_layout.bsp_problems(load(path))
+    return "; ".join(problems) if problems else None
+
+
+def check_built_bsp_on_retail_boxes(path):
+    """build_bsp over retail's own boxes and order walks too."""
+    model = load(path)
+    model.bsp = level_model_layout.build_bsp(model.bounding_boxes)
+    problems = level_model_layout.bsp_problems(model)
+    return "; ".join(problems) if problems else None
+
+
+def check_segment_ceiling(path):
+    """However fine the split is asked to be, the game's 127 holds."""
+    model = load(path)
+    triangles = sum(len(s.triangles) for s in model.segments)
+    if triangles <= level_model_layout.MAX_SEGMENTS or _has_waves(model):
+        return None
+    count = level_model_layout.resegment(model, target=1)
+    if count > level_model_layout.MAX_SEGMENTS:
+        return "%d segments from %d triangles" % (count, triangles)
+    if sum(len(s.triangles) for s in model.segments) != triangles:
+        return "loosening the split lost triangles"
+    problems = level_model_layout.bsp_problems(model)
+    return "; ".join(problems) if problems else None
 
 
 def check_resegment_relieves_pressure(path):
@@ -441,7 +473,19 @@ def check_resegment_relieves_pressure(path):
         return None  # this model did not end up crowded; nothing to relieve
 
     before = sum(len(s.triangles) for s in model.segments)
+    waves = _has_waves(model)
     level_model_layout.resegment(model)
+    if waves:
+        # Cut into the wave grid: triangles are split, not lost, and a wave
+        # track stretched past 127 squares joins its dry ones instead of
+        # failing. What matters is that the waves still work.
+        from dkr_track_editor import water
+
+        found = water.problems(model)
+        if found:
+            return "the stretched wave track came out broken: %s" % found[0]
+        level_model_encoder.encode(model)
+        return None
     if level_model_layout.check_collision_pressure(model):
         return ("re-segmenting left %d oversized segments on geometry it is "
                 "meant to fix" % len(level_model_layout.oversized_segments(model)))
@@ -513,7 +557,10 @@ CASES = (
     ("out-of-range values are refused", check_range_refusals),
     ("collision pressure is calibrated", check_collision_pressure),
     ("resegment keeps every triangle", check_resegment),
-    ("the generated BSP is well formed", check_resegment_bsp),
+    ("the generated BSP walks", check_resegment_bsp),
+    ("every retail BSP walks", check_retail_bsp_walks),
+    ("build_bsp walks on retail boxes", check_built_bsp_on_retail_boxes),
+    ("resegment stays under 127", check_segment_ceiling),
     ("resegment relieves crowding", check_resegment_relieves_pressure),
 )
 

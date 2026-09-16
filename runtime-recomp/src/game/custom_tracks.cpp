@@ -333,6 +333,128 @@ HdPack hd_pack(const std::string& track_id) {
     return {};
 }
 
+bool inspect_texture_payload(const std::vector<std::uint8_t>& bytes,
+                             TextureInfo& info, std::string& error) {
+    // TextureHeader, from include/structs.h.
+    constexpr std::size_t kHeaderSize = 32U;
+    constexpr std::size_t kFormat = 0x02U;
+    constexpr std::size_t kFrames = 0x12U;
+    constexpr std::size_t kTextureSize = 0x16U;
+    constexpr std::size_t kIsCompressed = 0x1DU;
+    // Bits per texel, by the format's low nibble.
+    constexpr std::array<std::uint32_t, 9> kBits{32U, 16U, 8U, 4U, 16U,
+                                                  8U, 4U, 4U, 8U};
+
+    info = TextureInfo{};
+    // load_texture pulls sizeof(TempTexHeader) bytes to find the frame count
+    // before it knows the size. A payload shorter than that peek is served as
+    // far as it goes and the rest comes from whatever the ROM holds past the
+    // section: a header made of nothing and an allocation sized by it.
+    if (bytes.size() < kMinimumTexturePayload) {
+        error = std::to_string(bytes.size()) +
+                " bytes; a texture is at least " +
+                std::to_string(kMinimumTexturePayload) +
+                ", which is what load_texture reads before it knows the size";
+        return false;
+    }
+    // load_texture puts the display lists it builds at align16(tex +
+    // assetSize) inside an allocation of exactly assetSize plus those lists,
+    // so an unaligned payload pushes the last one past its own block.
+    if ((bytes.size() % 16U) != 0U) {
+        error = std::to_string(bytes.size()) +
+                " bytes, and a texture payload has to be a multiple of 16 or "
+                "load_texture's display list overruns its allocation";
+        return false;
+    }
+
+    info.width = bytes[0];
+    info.height = bytes[1];
+    info.format = static_cast<std::uint8_t>(bytes[kFormat] & 0x0FU);
+    info.render_mode = static_cast<std::uint8_t>(bytes[kFormat] >> 4U);
+    info.frames = static_cast<std::uint16_t>(bytes[kFrames]);
+    info.compressed = bytes[kIsCompressed] != 0U;
+    info.translucent = texture_translucent(info.format, info.render_mode);
+
+    if (info.format >= kBits.size()) {
+        error = "format " + std::to_string(info.format) +
+                " is not one material_init knows";
+        return false;
+    }
+    if (info.format == 7U || info.format == 8U) {
+        error = "a colour-indexed texture needs a palette from ASSET_EMPTY_14, "
+                "which a track cannot add";
+        return false;
+    }
+    if (info.render_mode > 3U) {
+        error = "render mode " + std::to_string(info.render_mode) +
+                " is not one of the four material_init knows";
+        return false;
+    }
+    if (info.frames == 0U) {
+        error = "the header says the texture has no frames";
+        return false;
+    }
+    if (info.compressed) {
+        return true;
+    }
+
+    std::size_t at = 0;
+    for (std::uint32_t frame = 0; frame < info.frames; ++frame) {
+        const std::string which = "frame " + std::to_string(frame + 1U);
+        if (at + kHeaderSize > bytes.size()) {
+            error = which + " of " + std::to_string(info.frames) +
+                    " starts past the end of the payload";
+            return false;
+        }
+        const std::uint32_t width = bytes[at];
+        const std::uint32_t height = bytes[at + 1U];
+        if (width == 0U || height == 0U) {
+            error = which + " is " + std::to_string(width) + "x" +
+                    std::to_string(height);
+            return false;
+        }
+        if ((bytes[at + kFormat] & 0x0FU) != info.format) {
+            error = which + " is in another format than the first";
+            return false;
+        }
+        const std::size_t texels =
+            (static_cast<std::size_t>(width) * height * kBits[info.format] +
+             7U) / 8U;
+        const std::size_t size =
+            (static_cast<std::size_t>(bytes[at + kTextureSize]) << 8U) |
+            bytes[at + kTextureSize + 1U];
+        if (size < kHeaderSize + texels) {
+            error = which + " says it is " + std::to_string(size) +
+                    " bytes, and its header and texels take " +
+                    std::to_string(kHeaderSize + texels);
+            return false;
+        }
+        if (at + kHeaderSize + texels > bytes.size()) {
+            error = which + "'s texels run past the end of the payload";
+            return false;
+        }
+        at += size;
+    }
+    return true;
+}
+
+ArtworkSummary artwork(const std::string& track_id) {
+    std::lock_guard lock(g_mutex);
+    ArtworkSummary summary;
+    for (const Track& track : g_tracks) {
+        if (track.id != track_id) {
+            continue;
+        }
+        for (const TextureInfo& texture : track.textures) {
+            ++summary.textures;
+            summary.translucent += texture.translucent ? 1U : 0U;
+            summary.animated += texture.frames > 1U ? 1U : 0U;
+        }
+        break;
+    }
+    return summary;
+}
+
 bool track_textures_published(const std::string& track_id) {
     std::scoped_lock lock(g_mutex);
     const SectionState& textures =
@@ -408,6 +530,12 @@ std::int32_t track_override() {
     const auto found = g_resolved_level_ids.find(g_armed_track);
     return found == g_resolved_level_ids.end() ? kNoTrackOverride
                                                 : found->second;
+}
+
+bool owns_level_id(std::int32_t level_id) {
+    std::scoped_lock lock(g_mutex);
+    return std::any_of(g_resolved_level_ids.begin(),g_resolved_level_ids.end(),
+        [level_id](const auto& entry){return entry.second==level_id;});
 }
 
 std::vector<std::int32_t> build_extended_table(
@@ -807,35 +935,18 @@ bool parse_track(const std::filesystem::path& root, Track& track,
         }
 
         // A texture payload is the one kind the loader reads before it knows
-        // how big it is: load_texture pulls sizeof(TempTexHeader) bytes to
-        // find the frame count, then allocates from what it read. A payload
-        // shorter than that peek is served as far as it goes and the rest
-        // comes from wherever the ROM's own bytes sit past the section, which
-        // is a TextureHeader made of nothing and an allocation sized by it.
-        // Cheaper to refuse the package.
+        // how big it is, and material_init reads how to draw it - format,
+        // render mode, frame count - out of its own headers. See
+        // inspect_texture_payload.
         if (entry.section == Section::Textures3D) {
-            if (entry.bytes.size() <
-                dkr::runtime::custom_tracks::kMinimumTexturePayload) {
-                error = file + " is " + std::to_string(entry.bytes.size()) +
-                        " bytes; a texture is at least " +
-                        std::to_string(
-                            dkr::runtime::custom_tracks::
-                                kMinimumTexturePayload) +
-                        ", which is what load_texture reads before it knows "
-                        "the size";
+            dkr::runtime::custom_tracks::TextureInfo info;
+            std::string reason;
+            if (!dkr::runtime::custom_tracks::inspect_texture_payload(
+                    entry.bytes, info, reason)) {
+                error = file + ": " + reason;
                 return false;
             }
-            // load_texture puts the display lists it builds at
-            // align16(tex + assetSize) inside an allocation of exactly
-            // assetSize plus those lists, so an unaligned payload pushes the
-            // last one past the end of its own block.
-            if ((entry.bytes.size() % 16U) != 0U) {
-                error = file + " is " + std::to_string(entry.bytes.size()) +
-                        " bytes and a texture payload has to be a multiple of "
-                        "16, or load_texture's display list overruns its "
-                        "allocation";
-                return false;
-            }
+            track.textures.push_back(info);
         }
         track.entries.push_back(std::move(entry));
     }
@@ -977,6 +1088,19 @@ void scan_one(const std::filesystem::path& directory, const char* label) {
                          item.path().filename().string().c_str(),
                          error.c_str());
             continue;
+        }
+        if (!track.textures.empty()) {
+            std::size_t translucent = 0;
+            std::size_t animated = 0;
+            for (const auto& texture : track.textures) {
+                translucent += texture.translucent ? 1U : 0U;
+                animated += texture.frames > 1U ? 1U : 0U;
+            }
+            std::fprintf(stderr,
+                         "[custom-tracks] %s ships %zu texture(s): %zu "
+                         "see-through, %zu animated\n",
+                         track.id.c_str(), track.textures.size(), translucent,
+                         animated);
         }
 
         // Resolve the HD pack sibling against the folder this track was read

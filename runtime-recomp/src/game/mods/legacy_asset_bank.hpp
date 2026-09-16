@@ -22,6 +22,10 @@ public:
     // texture IDs never collide with a stock racer or a different character.
     static std::shared_ptr<const AssetBank> augment(std::shared_ptr<const AssetBank> bank,
         Overrides additions,Bytes animation_ids);
+    // Shared dkrmap artwork follows the character namespace at boot and stays
+    // at those same IDs in every legacy scene, including its cache identities.
+    static std::shared_ptr<const AssetBank> append_textures(
+        std::shared_ptr<const AssetBank> bank,const std::vector<Bytes>& textures);
     bool augmented() const {return augmented_;}
     std::size_t owned_override_bytes() const {
         std::size_t total=0;for(const auto& [key,bytes]:overrides_)total+=bytes.size();return total;

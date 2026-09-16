@@ -135,8 +135,8 @@ table. The hook runs at its epilogue, and when the request was
 `mempool_alloc_safe`, writes `build_extended_table()` into it, and replaces the
 return value in `context->r2`.
 
-The retail allocation is left to the memory pool. Only two call sites exist,
-both once per level load, so the discarded buffer is not a live leak.
+The retail allocation is released through `mempool_free` once the extended
+copy has replaced it, since callers free only the pointer they were given.
 
 ### 2. Route custom offsets away from the ROM
 
@@ -161,6 +161,56 @@ The two `jal asset_load` instruction addresses still have to be read from the
 generated disassembly; every other address above comes from the matching
 decomp symbol file. The v1.1 policy is produced by
 `scripts/generate_revision_policy.py` and is never hand-authored.
+
+## Alongside legacy mods
+
+DKR-R also imports legacy mods from `.xdelta` patches: extra courses and up to
+two custom characters (`src/game/mods/`, `docs/LEGACY-MODS-BETA.md`). They
+answer the same asset calls, so the two systems are composed rather than
+stacked.
+
+**One entry hook, legacy first.** `scripts/compose_legacy_mod_policy.py` puts
+the legacy asset bus at the entry of `asset_table_load` and `asset_load`. The
+`.dkrmap` recorder is already there, so the composer merges the two into one
+hook instead of refusing the address: the legacy call returns early when a
+mounted bank served the request, and otherwise the `.dkrmap` recorder runs and
+the retail path continues to its epilogue as before. A mounted request never
+reaches that epilogue, so `dkr_legacy_asset_api` does the `.dkrmap` work itself:
+
+- a level table (sections 20, 22, 24, 26) is extended after the mount copied it,
+  and the mount's allocation is released like the retail one;
+- a read at a `.dkrmap` offset is served before the mount sees it
+  (`dkr_custom_tracks_asset_load_override`), because a mounted section refuses
+  any read past its end. The header fixups still run.
+
+**One texture namespace.** A mod session appends custom characters' textures to
+the 3D texture table at boot, and the table's allocation is fixed from then on:
+every scene rewrites it in place. `.dkrmap` artwork therefore cannot be added
+by the table hook in a mod session. `prepare_mod_launch` instead builds the
+`.dkrmap` texture table against the character-augmented boot table
+(`publish_dkrmap_artwork`) and appends the textures to the boot bank and to
+every scene bank with `AssetBank::append_textures`. They get the IDs
+`build_extended_table` wrote into the level models: characters first, then
+`.dkrmap` artwork in scan order. Section 3 and section 2 skip the `.dkrmap`
+hooks in a mounted session, since the bank already holds them.
+`legacy_dkrmap_artwork_tests.cpp` checks this against an owned ROM. Without
+legacy mods nothing changes: no session exists and the table hook publishes the
+artwork as before.
+
+The artwork is not part of the mod session's identity. That identity names the
+separate modded save folder, and re-exporting a track must not strand the
+player's modded Adventure progress.
+
+**Scenes and selection.** A legacy course is a scene published at `level_load`
+for the carrier level it borrows. A `.dkrmap` level is never a carrier
+(`custom_tracks::owns_level_id`), so loading one always publishes the original
+scene, even with a legacy request pending. Confirming a course in Track Select
+(`trackmenu_assets(TRACKMENU_TYPE_LOAD_LEVEL)`) disarms Track Lab, with or
+without legacy courses installed, so the player's choice is what loads. Auto
+boot and the L+Z restart never pass through that confirmation and keep
+reloading the armed track.
+
+Track Lab lives on **MODS / HACKS**, under the legacy **CUSTOM TRACKS** list.
 
 ## Verified end to end
 
@@ -252,6 +302,36 @@ A payload is also refused if it is shorter than 40 bytes or not a multiple of
 how large the texture is, and it puts the display list it builds at
 `align16(tex + assetSize)` inside an allocation of exactly that size plus the
 lists.
+
+### What the header decides, and what the installer checks
+
+`material_init` builds each texture's display list from its own header, and
+three of its bytes decide how the game draws it:
+
+| Header | Meaning |
+|---|---|
+| `format & 0x0F` | the texel format |
+| `format >> 4` | the render mode: `TRANSPARENT` (0), `OPAQUE` (1), `TRANSPARENT_2` (2), `OPAQUE_2` (3) |
+| `numOfTextures >> 8` | how many frames the texture animates through |
+
+RGBA32, RGBA16 and CI4 are see-through when the render mode is a `TRANSPARENT`
+one; IA16, IA8 and IA4 always are; I8 and I4 never are. `render_level_segment`
+draws a see-through texture only in its second pass - over batches
+`[numberofOpaqueBatches, numberOfBatches)` - so a model has to put the batches
+drawing one past that split, or they are never drawn. The Blender exporter
+does, and `docs/LEVEL_MODEL_FORMAT.md` has the rule. A batch flagged
+`RENDER_CUTOUT` is alpha-tested instead of blended, and RT64 draws it the same
+way with an HD replacement, cutting where the replacement's alpha is below an
+eighth; the exporter hardens a cut-out's HD original at half so both cut in the
+same place.
+
+`inspect_texture_payload` reads those headers when a track is scanned, walking
+every frame by its own `textureSize` as `load_texture` does, and refuses a
+payload the loader would misread: a colour-indexed format, a render mode past
+3, no frames, a zero-sized frame, a `textureSize` smaller than its header and
+texels, or a frame that runs past the payload. A compressed payload's frames
+are packed, so only its first header is read. Track Lab shows what each track
+brings: *3 textures, 1 see-through, 1 animated*.
 
 ### The id a level model stores, and why it is a placeholder
 
@@ -389,7 +469,8 @@ filled with a guess.
 
 ## Installing
 
-Track Lab's **IMPORT A COPY** button takes a folder through the system picker.
+Track Lab (**MODS / HACKS**) has an **IMPORT A COPY** button that takes a folder
+through the system picker.
 Point it at the `.dkrmap`, at the track's own folder, or at the folder that
 holds both the `.dkrmap` and its `<track>-hd.zip`; a `.zip` of the `.dkrmap`
 (optionally wrapping the pack too) also works. The manifest is validated before
@@ -417,6 +498,24 @@ injected while N64Recomp translates the ELF. Adding hooks to
 runs again for that revision - the generated `RecompiledFuncs` still carry the
 old code. The first smoke test failed exactly this way: v80 had been
 regenerated after the policy edit and v77 had not, and the run used v77.
+
+**The versioned policy is not the whole policy.** The legacy mod hooks live in
+`runtime-recomp/legacy-*.recomp-fragment.json` and are composed into a build
+copy of each policy before N64Recomp runs; CMake refuses a payload that lacks
+them. Editing a `.dkrmap` hook in the versioned policy therefore means
+regenerating through the composer, which also checks that the legacy entry
+hook and the `.dkrmap` recorder still share `asset_table_load` and `asset_load`
+exactly as reviewed:
+
+```text
+python scripts/generate_legacy_menu_qualification.py --characters --character-menu
+    --v77-build <folder with dkr.us.v77.elf and .z64>
+    --v80-build <folder with dkr.us.v80.elf and .z64>
+    --recompiler <N64Recomp.exe> --output build/legacy-generated
+```
+
+Point `DKR_GENERATED_SOURCE_V77` / `_V80` at `generated-v77` / `generated-v80`
+in that folder. The presentation step accepts only the reviewed ELF hashes.
 
 **`mods/` belongs to librecomp.** N64ModernRuntime ships its own mod system,
 it is live in DKR-R, and it scans `mods/` for its `.nrm` format. A `.dkrmap`

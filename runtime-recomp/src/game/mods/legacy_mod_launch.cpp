@@ -1,6 +1,7 @@
 #include "legacy_mod_launch.hpp"
 #include "legacy_track_catalog.hpp"
 #include "../dkr_save_codec.hpp"
+#include "../custom_tracks.hpp"
 #include <algorithm>
 
 namespace dkr::mods {
@@ -14,6 +15,31 @@ void regular(const std::filesystem::path& path) {
     if(std::filesystem::is_symlink(path) || !std::filesystem::is_regular_file(path))
         throw Error("The Adventure save must be a regular file, not a link.");
 }
+}
+std::vector<Bytes> publish_dkrmap_artwork(std::shared_ptr<const AssetBank> boot) {
+    if(!boot)throw Error("dkrmap artwork requires a verified boot bank.");
+    const auto count=boot->record_count(2);
+    const auto directory=AssetDirectory::build(std::move(boot));
+    const auto table_bytes=directory->read(3,0,directory->section_size(3));
+    std::vector<std::int32_t> table;
+    for(std::size_t at=0;at+4<=table_bytes.size();at+=4) {
+        table.push_back(static_cast<std::int32_t>(be32(table_bytes,at)));
+        if(table.back()==-1)break;
+    }
+    if(table.size()<2 || table.back()!=-1 || table.size()-2!=count)
+        throw Error("Boot artwork table does not describe its records.");
+    namespace authored=dkr::runtime::custom_tracks;
+    // Section-3 loads of a mounted boot bank never reach the dkrmap table
+    // hook, so this is the one build of the texture table for the session.
+    const auto extended=authored::build_extended_table(authored::Section::Textures3D,table.data());
+    std::vector<Bytes> artwork;
+    for(std::size_t id=count;id+2<extended.size();++id) {
+        const auto size=extended[id+1]-extended[id];
+        const auto bytes=authored::payload_for(authored::Section::Textures3D,extended[id],size);
+        if(!bytes || size<=0)throw Error("Shared track artwork lost its published payload.");
+        artwork.emplace_back(bytes,bytes+size);
+    }
+    return artwork;
 }
 std::shared_ptr<const PreparedModLaunch> prepare_mod_launch(
     const std::filesystem::path& config,const std::filesystem::path& rom,bool online,
@@ -36,7 +62,10 @@ std::shared_ptr<const PreparedModLaunch> prepare_mod_launch(
     report("Checking enabled custom courses");
     auto tracks=TrackCatalog::load_enabled(root,stock);
     report("Preparing the isolated game asset session");
-    auto session=std::make_shared<RuntimeSession>(stock,names);
+    // Character IDs are allocated first. Publish dkrmap IDs against that
+    // namespace, then retain the same immutable artwork in every scene bank.
+    auto shared_textures=publish_dkrmap_artwork(names?names->apply(stock):stock);
+    auto session=std::make_shared<RuntimeSession>(stock,names,std::move(shared_textures));
     std::vector<std::string> identities;
     for(auto& track:tracks) {
         report("Preparing custom Track Select previews");
@@ -44,6 +73,9 @@ std::shared_ptr<const PreparedModLaunch> prepare_mod_launch(
         session->admit(std::move(track));
     }
     if(names)for(const auto& character:names->characters)identities.push_back("character:"+character.id);
+    // dkrmap artwork stays out of this identity: it names the modded save
+    // folder, and a track re-export must not strand the player's progress.
+    // The scene banks already fingerprint the artwork for cache ownership.
     if(identities.empty())throw Error("Enabled mod content did not produce a playable library.");
     std::sort(identities.begin(),identities.end());
     std::string identity="dkr-offline-mod-session-1\n"+stock->fingerprint()+"\n";

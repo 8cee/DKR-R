@@ -8876,8 +8876,8 @@ void DrawTexturePackControls(float width) {
             ImGui::EndTable();
         }
     }
-    // The single-pack modal is rendered once, in DrawModsHacks, so it works
-    // whether this section or Track Lab opened it.
+    // The single-pack modal is DrawSharedTexturePackModal, rendered by both
+    // TEXTURES and MODS / HACKS, so it works whichever of them opened it.
 
     if (!g_texture_pack_status.empty()) {
         ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
@@ -9219,8 +9219,8 @@ void DrawTrackLabControls(float width) {
         if (!armed.empty()) {
             ImGui::PushStyleColor(ImGuiCol_Text, kWarm);
             ImGui::TextWrapped(
-                "Track Lab is active. Start any race and it loads the armed "
-                "track instead.");
+                "Track Lab is active. Races you start load the armed track "
+                "until you pick a course in Track Select or stop testing.");
             ImGui::PopStyleColor();
         }
         ImGui::Dummy({0.0F, 10.0F});
@@ -9235,9 +9235,9 @@ void DrawTrackLabControls(float width) {
 
     ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
     ImGui::TextWrapped(
-        "Arming a track sends every race you start to it. A track with HD "
-        "textures needs the Modern profile - arming or playing one switches "
-        "to it for you.");
+        "Arming a track sends the races you start to it; confirming a course "
+        "in Track Select stops testing. A track with HD textures needs the "
+        "Modern profile - arming or playing one switches to it for you.");
     ImGui::PopStyleColor();
     ImGui::Dummy({0.0F, 8.0F});
 
@@ -9272,6 +9272,21 @@ void DrawTrackLabControls(float width) {
             ImGui::Text("%s  -  level assigned at launch",
                         track.author.empty() ? "unknown author"
                                              : track.author.c_str());
+        }
+        // What the track brings of its own. See-through and animated are the
+        // two things about a texture the game decides from its header, and
+        // the ones an author checks first when a picture looks wrong.
+        const tracks_ns::ArtworkSummary art = tracks_ns::artwork(track.id);
+        if (art.textures > 0U) {
+            std::string line = std::to_string(art.textures) +
+                               (art.textures == 1U ? " texture" : " textures");
+            if (art.translucent > 0U) {
+                line += ", " + std::to_string(art.translucent) + " see-through";
+            }
+            if (art.animated > 0U) {
+                line += ", " + std::to_string(art.animated) + " animated";
+            }
+            ImGui::TextUnformatted(line.c_str());
         }
         ImGui::PopStyleColor();
         ImGui::EndGroup();
@@ -9352,8 +9367,50 @@ void DrawTrackLabControls(float width) {
     }
 }
 
-void DrawModsHacks(float width) {
 #include "runtime_mod_library_ui.inl"
+
+// .dkrmap tracks, next to the legacy courses on MODS / HACKS.
+void DrawTrackLabSection(float width) {
+    static bool track_lab_expanded = true;
+    if (!DrawDisclosureButton("TRACK LAB - .DKRMAP TRACKS", "track-lab",
+                              track_lab_expanded, width)) {
+        return;
+    }
+    ImGui::Dummy({0.0F, 6.0F});
+    // Track Lab draws in Accurate too - the list, import and arming. What
+    // stays impossible in Accurate is a custom track actually loading, and
+    // it still is: every arm/play path here goes through Modern first, so
+    // the "untouched regression baseline" is never a custom track.
+    if (!dkr::runtime::enhancements::modern_presentation_enabled()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
+        ImGui::TextWrapped(
+            "You are on the Accurate profile. Importing, arming or playing "
+            "a track switches to Modern - it needs it - and tells you so. "
+            "Accurate itself stays the untouched reference.");
+        ImGui::PopStyleColor();
+        ImGui::Dummy({0.0F, 6.0F});
+    }
+    DrawTrackLabControls(width);
+}
+
+// One shared single-pack modal, reachable from a texture browser card's
+// MANAGE button and from a Track Lab "Manage" line. Both pages render it, and
+// it is only touched when it might be open.
+void DrawSharedTexturePackModal() {
+    if (!g_texture_pack_manage_request &&
+        !ImGui::IsPopupOpen("Manage texture pack") &&
+        !ImGui::IsPopupOpen("Remove texture pack?")) {
+        return;
+    }
+    if (g_texture_pack_manage_request) {
+        ImGui::OpenPopup("Manage texture pack");
+        g_texture_pack_manage_request = false;
+    }
+    const bool request_remove_modal = DrawTexturePackManagementModal(
+        dkr::runtime::texture_packs::snapshot(true));
+    if (request_remove_modal) ImGui::OpenPopup("Remove texture pack?");
+    DrawTexturePackRemovalModal();
+}
 
 void DrawModsHacks(float width, bool game_running = false) {
     DrawPageHeading("MODS / HACKS");
@@ -9381,6 +9438,8 @@ void DrawModsHacks(float width, bool game_running = false) {
     if(DrawDisclosureButton("CUSTOM TRACKS","legacy-tracks",tracks_expanded,width)) {
         ImGui::Dummy({0,6});DrawModCardBrowser(width,false,mods,mods_locked);
     }
+    ImGui::Dummy({0,10});
+    DrawTrackLabSection(width);
     ImGui::Dummy({0,10});
     static bool characters_expanded=true;
     if(DrawDisclosureButton("CUSTOM CHARACTERS","legacy-characters",characters_expanded,width)) {
@@ -9414,6 +9473,7 @@ void DrawModsHacks(float width, bool game_running = false) {
             }
         }
     }
+    DrawSharedTexturePackModal();
 }
 
 void DrawTextures(float width) {
@@ -9432,43 +9492,7 @@ void DrawTextures(float width) {
         if(dkr::runtime::enhancements::modern_presentation_enabled())DrawCrtOverlayControls(width);
         else DrawColoredWrapped(kMuted,"CRT overlays are available in the Modern presentation profile. Accurate mode remains unchanged.");
     }
-    ImGui::Dummy({0.0F, 10.0F});
-
-    static bool track_lab_expanded = true;
-    if (DrawDisclosureButton("TRACK LAB", "track-lab", track_lab_expanded,
-                             width)) {
-        ImGui::Dummy({0.0F, 6.0F});
-        // Track Lab draws in Accurate too - the list, import and arming. What
-        // stays impossible in Accurate is a custom track actually loading, and
-        // it still is: every arm/play path here goes through Modern first, so
-        // the "untouched regression baseline" is never a custom track.
-        if (!dkr::runtime::enhancements::modern_presentation_enabled()) {
-            ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
-            ImGui::TextWrapped(
-                "You are on the Accurate profile. Importing, arming or playing "
-                "a track switches to Modern - it needs it - and tells you so. "
-                "Accurate itself stays the untouched reference.");
-            ImGui::PopStyleColor();
-            ImGui::Dummy({0.0F, 6.0F});
-        }
-        DrawTrackLabControls(width);
-    }
-
-    // One shared single-pack modal, reachable from a browser card's MANAGE
-    // button and from a Track Lab "Manage" line. Rendered here so it exists
-    // whichever section is expanded, and only touched when it might be open.
-    if (g_texture_pack_manage_request ||
-        ImGui::IsPopupOpen("Manage texture pack") ||
-        ImGui::IsPopupOpen("Remove texture pack?")) {
-        if (g_texture_pack_manage_request) {
-            ImGui::OpenPopup("Manage texture pack");
-            g_texture_pack_manage_request = false;
-        }
-        const bool request_remove_modal = DrawTexturePackManagementModal(
-            dkr::runtime::texture_packs::snapshot(true));
-        if (request_remove_modal) ImGui::OpenPopup("Remove texture pack?");
-        DrawTexturePackRemovalModal();
-    }
+    DrawSharedTexturePackModal();
 }
 
 std::string FormatRecordTime(std::uint16_t frames) {

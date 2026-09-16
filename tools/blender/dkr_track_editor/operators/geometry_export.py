@@ -36,7 +36,8 @@ in the pool*, never as a unique key. The bias by one still earns its place: it
 is what separates "conjured from nothing" from "vertex 0 of segment 0".
 
 Everything a rebuilt segment needs is read raw off the mesh rather than
-converted back - the UVs from ``dkr_uv``, the baked colours from ``dkr_colour``
+converted back - the UVs from ``dkr_uv``, the baked colours from the separate
+``dkr_colour_r/g/b/a`` channels (or packed ``dkr_colour`` in older scenes)
 - because the values an author sees are normalised, V-flipped and sRGB, and
 none of those survive the trip back exactly. A segment nobody touched has to
 come out unchanged, which rules out a lossy conversion anywhere near it.
@@ -50,7 +51,7 @@ from typing import Dict, List, Optional, Tuple
 import bpy
 
 from .. import (level_model, level_model_edit, level_model_layout, prefs,
-                scene)
+                scene, transparency as looks, water)
 from . import geometry
 
 
@@ -231,7 +232,7 @@ class MeshRead:
         self.notes: List[str] = []
 
 
-def _segment_of_vertex(mesh, segments_biased, model) -> List[int]:
+def _segment_of_vertex(mesh, segments_biased, model, face_segments=None) -> List[int]:
     """Which segment each Blender vertex belongs to.
 
     Inherited from the vertex it was made from, which covers extrude, subdivide
@@ -246,6 +247,21 @@ def _segment_of_vertex(mesh, segments_biased, model) -> List[int]:
     built two faces out from it, which is a perfectly ordinary thing to model.
     """
     assigned = [value - 1 for value in segments_biased]
+    if face_segments is None:
+        _drop_mixed_claims(mesh, assigned)
+    else:
+        # A welded POINT attribute may name a segment neither source used.
+        # FACE attributes survive welding, so use the incident faces instead.
+        votes = [{} for _ in assigned]
+        for polygon, segment in zip(mesh.polygons, face_segments):
+            if not 0 < segment <= len(model.segments):
+                continue
+            for vertex in polygon.vertices:
+                counts = votes[vertex]
+                counts[segment - 1] = counts.get(segment - 1, 0) + 1
+        for vertex, counts in enumerate(votes):
+            if counts:
+                assigned[vertex] = max(sorted(counts), key=counts.get)
     unknown = {at for at, value in enumerate(assigned) if value < 0}
     if not unknown:
         _check_segment_range(assigned, model)
@@ -256,25 +272,83 @@ def _segment_of_vertex(mesh, segments_biased, model) -> List[int]:
         if any(vertex in unknown for vertex in polygon.vertices)
     ]
 
-    spreading = True
-    while spreading and unknown:
-        spreading = False
+    while unknown:
+        spreading = True
+        while spreading and unknown:
+            spreading = False
+            for vertices in faces:
+                reachable = {assigned[v] for v in vertices if assigned[v] >= 0}
+                if len(reachable) != 1:
+                    continue
+                segment_index = next(iter(reachable))
+                for vertex in vertices:
+                    if vertex in unknown:
+                        assigned[vertex] = segment_index
+                        unknown.discard(vertex)
+                        spreading = True
+        if not unknown:
+            break
+        # Nothing unanimous is left, so what remains sits between two
+        # segments - a gap filled across the join. Either segment is a right
+        # answer: the face that ends up crossing is written into one of them
+        # with copies of the corners the other owns (see read_mesh). The lower
+        # index is taken so the result does not depend on face order.
+        settled = False
         for vertices in faces:
             reachable = {assigned[v] for v in vertices if assigned[v] >= 0}
-            if len(reachable) != 1:
+            if len(reachable) < 2:
                 continue
-            segment_index = next(iter(reachable))
+            choice = min(reachable)
             for vertex in vertices:
                 if vertex in unknown:
-                    assigned[vertex] = segment_index
+                    assigned[vertex] = choice
                     unknown.discard(vertex)
-                    spreading = True
+                    settled = True
+            if settled:
+                break
+        if not settled:
+            break
 
     if unknown:
         raise GeometryExportError(_unplaceable_message(mesh, unknown, assigned))
 
     _check_segment_range(assigned, model)
     return assigned
+
+
+def _drop_mixed_claims(mesh, assigned) -> int:
+    """Forget segment claims that Merge by Distance made up. Returns how many.
+
+    Blender averages integer attributes when it welds vertices: a boundary
+    vertex of segment 1 merged with its twin in segment 3 comes out claiming
+    segment 2, which may lie on the far side of the track, and every face
+    using it would stretch that segment's box across the map - crowding the
+    ten-slot collision candidate list and the culling with it. Measured on
+    Ancient Lake, a full-mesh merge left 32 such vertices and six segments
+    spanning more than half the track.
+
+    A claim that none of the vertex's face-neighbours shares is such a mix, so
+    it is dropped and the vertex placed by its faces, like one made from
+    nothing. Retail never trips this: a segment's vertices are its own, so
+    every neighbour of a vertex shares its segment, and an untouched track
+    still exports byte for byte.
+    """
+    claimed = list(assigned)
+    neighbours = [set() for _ in claimed]
+    for polygon in mesh.polygons:
+        corners = list(polygon.vertices)
+        for vertex in corners:
+            neighbours[vertex].update(corners)
+    dropped = 0
+    for vertex, value in enumerate(claimed):
+        if value < 0:
+            continue
+        around = {claimed[n] for n in neighbours[vertex]
+                  if n != vertex and claimed[n] >= 0}
+        if around and value not in around:
+            assigned[vertex] = -1
+            dropped += 1
+    return dropped
 
 
 def _unplaceable_message(mesh, unknown, assigned) -> str:
@@ -347,8 +421,15 @@ def _check_segment_range(assigned, model) -> None:
             )
 
 
-def read_mesh(obj, model) -> MeshRead:
-    """Re-express the mesh as loose faces and one vertex pool per segment."""
+def read_mesh(obj, model, translucency=None) -> MeshRead:
+    """Re-express the mesh as loose faces and one vertex pool per segment.
+
+    ``translucency`` is :func:`.geometry.table_translucency` for the mesh's
+    texture table. Where it knows a face's texture, the face's side of
+    ``numberofOpaqueBatches`` is the one the game will draw it on, whatever the
+    face carried; see :mod:`..transparency`.
+    """
+    translucency = translucency or {}
     mesh = obj.data
     _require_schema(mesh)
 
@@ -389,7 +470,12 @@ def read_mesh(obj, model) -> MeshRead:
             % (mesh.name, geometry.ATTR_UV)
         )
 
-    owner = _segment_of_vertex(mesh, segments_biased, model)
+    face_segments = _attribute(mesh, geometry.ATTR_FACE_SEGMENT, "FACE", "INT")
+    owner = _segment_of_vertex(mesh, segments_biased, model, face_segments)
+    channels = [_attribute(mesh, name, "POINT", "INT")
+                for name in geometry.ATTR_COLOUR_CHANNELS]
+    colours = (list(zip(*channels)) if all(c is not None for c in channels)
+               else [geometry.unpack_colour(value) for value in raw_colours])
     read = MeshRead()
     matrix = obj.matrix_world
 
@@ -409,29 +495,55 @@ def read_mesh(obj, model) -> MeshRead:
             _map_position(matrix, mesh.vertices[at], at) for at in indices
         ]
         read.colours[segment_index] = [
-            geometry.unpack_colour(raw_colours[at]) for at in indices
+            colours[at] for at in indices
         ]
         read.faces[segment_index] = []
 
+    crossing = copied = 0
     for polygon in mesh.polygons:
         index = polygon.index
-        home = {owner[v] for v in polygon.vertices}
-        if len(home) != 1:
-            raise GeometryExportError(
-                "face %d spans segments %s. A triangle belongs to exactly one "
-                "segment, so a face bridging two cannot be written; build it "
-                "inside one segment instead"
-                % (index, ", ".join(str(h) for h in sorted(home)))
-            )
-        segment_index = next(iter(home))
+        verts = list(polygon.vertices)
+        owners = [owner[v] for v in verts]
+        source_segment = (face_segments[index] - 1
+                          if face_segments is not None else -1)
+        if 0 <= source_segment < len(model.segments):
+            segment_index = source_segment
+        elif len(set(owners)) == 1:
+            segment_index = owners[0]
+        else:
+            # A face across the join between segments - a merge, a fill or a
+            # bridge over the boundary. A triangle lives in exactly one segment
+            # and a segment's vertices are its own, so the face goes to the
+            # segment owning most of its corners and the others are copied into
+            # that segment's pool. Retail never shares a vertex between
+            # segments either: every boundary is a pair of coincident copies.
+            segment_index = max(sorted(set(owners)), key=owners.count)
+        if any(owner[v] != segment_index for v in verts):
+            crossing += 1
+            pool = read.pool_of.setdefault(segment_index, {})
+            read.positions.setdefault(segment_index, [])
+            read.colours.setdefault(segment_index, [])
+            read.faces.setdefault(segment_index, [])
+            for vertex in verts:
+                if owner[vertex] != segment_index and vertex not in pool:
+                    pool[vertex] = len(read.positions[segment_index])
+                    read.positions[segment_index].append(
+                        _map_position(matrix, mesh.vertices[vertex], vertex))
+                    read.colours[segment_index].append(
+                        colours[vertex])
+                    copied += 1
         pool = read.pool_of[segment_index]
 
         serial = serials[index] - 1
+        texture = textures[index] & 0xFF
+        side = bool(opaque[index])
+        if texture != level_model.NO_TEXTURE and texture in translucency:
+            side = looks.draws_in_opaque_pass(
+                geometry.to_unsigned32(flags[index]), translucency[texture])
         key = _batch_key(model, segment_index, serial, flags[index],
-                         textures[index], bool(opaque[index]))
+                         texture, side)
 
         corners = list(polygon.loop_indices)
-        verts = list(polygon.vertices)
         # The file stores triangles. Blender's extrude makes quads out of the
         # sides it sweeps, so anything with more than three corners is fanned
         # rather than refused - refusing would make extrude unusable, which is
@@ -445,6 +557,11 @@ def read_mesh(obj, model) -> MeshRead:
                       for p in picks),
                 tri_flags[index] & 0xFF,
             ))
+    if crossing:
+        read.notes.append(
+            "%d face(s) crossed between segments; each was written into one of "
+            "them, with %d corner vertex copies, since a segment's vertices are "
+            "its own" % (crossing, copied))
     return read
 
 
@@ -627,8 +744,14 @@ def build_edited_model(context) -> Optional[GeometryEdit]:
                "; ".join(conflicts[:3]))
         )
 
-    read = read_mesh(obj, model)
+    read = read_mesh(obj, model, texture_translucency(context, obj))
     notes: List[str] = list(read.notes)
+    moved = _sides_moved(read, model)
+    if moved:
+        notes.append(
+            "%d draw call(s) move between the solid and the see-through pass "
+            "to follow their texture's transparency - the game draws a batch "
+            "only in the pass its texture belongs to" % moved)
 
     added = _add_textures(obj, model, notes)
 
@@ -641,8 +764,95 @@ def build_edited_model(context) -> Optional[GeometryEdit]:
     # here rather than left to the topology comparison to notice.
     if (not added and flags is not None
             and not _topology_changed(read, model, include_hidden)):
-        return _patch_in_place(model, read, flags, path, obj, notes)
-    return _rebuild(model, read, path, obj, notes, added)
+        edit = _patch_in_place(model, read, flags, path, obj, notes)
+    else:
+        edit = _rebuild(model, read, path, obj, notes, added)
+    _settle_waves(context, edit)
+    return edit
+
+
+def _settle_waves(context, edit) -> None:
+    """Put a track with waves back on its grid if an edit knocked it off.
+
+    The game places every segment on the wave grid by its box corner, so
+    moving a vertex across a tile's edge, extruding past it or deleting the
+    reference water each break the waves somewhere with nothing to say why.
+    :func:`..water.problems` finds exactly those, and a retail track has none of
+    them, so an untouched remix keeps its bytes; anything it does find is fixed
+    by cutting the track into the grid again, and the export says so.
+    """
+    model = edit.model
+    found = water.problems(model)
+    if found:
+        try:
+            count = level_model_layout.resegment(model)
+        except level_model_layout.LayoutError as error:
+            raise GeometryExportError(
+                "the track has wave water and could not be cut into its wave "
+                "grid again (%s): %s" % (found[0], error))
+        edit.rebuilt = True
+        edit.notes.append(
+            "the wave water needed the track cut into its grid again - %s. It "
+            "now has %d segments" % (found[0], count))
+        _record(edit.object, model, edit.notes)
+    translucent = _waves_translucent(context)
+    texture = _reference_texture(model)
+    edit.notes.extend(water.notes(model, texture, translucent))
+
+
+def _waves_translucent(context) -> bool:
+    """The header's ``wavesXlu`` as the export will write it."""
+    from . import header as header_ops  # noqa: PLC0415
+
+    value = context.scene.get(header_ops.key_for("/waves/unk70"))
+    if value is None:
+        value = header_ops.surveyed("/waves/unk70")
+    try:
+        return bool(int(value if value is not None else 1))
+    except (TypeError, ValueError):
+        return True
+
+
+def _reference_texture(model):
+    grid = water.simulate(model)
+    if grid is None or grid.reference is None:
+        return None
+    for batch in model.segments[grid.reference].batches:
+        if water.is_reference(batch.flags):
+            texture = model.texture_for(batch)
+            if texture is None:
+                return None
+            return texture.width, texture.height, texture.format & 0xF
+    return None
+
+
+def texture_translucency(context, obj) -> dict:
+    """:func:`.geometry.table_translucency` for this mesh's texture table."""
+    from . import custom_textures  # noqa: PLC0415 - it imports geometry
+
+    return geometry.table_translucency(
+        [record.get("id", 0) for record in geometry.texture_table(obj)],
+        prefs.resolve(context), custom_textures.entries(context))
+
+
+def _sides_moved(read, model) -> int:
+    """How many source batches the derived opaque side moves.
+
+    Only faces that still name their source batch are counted, so a face the
+    author added is not reported as a correction.
+    """
+    moved = set()
+    for segment_index, faces in read.faces.items():
+        segment = model.segments[segment_index]
+        for face in faces:
+            serial = face.key.serial
+            if serial is None or serial >= len(segment.batches):
+                continue
+            if face.key.texture_index != segment.batches[serial].texture_index:
+                continue
+            if face.key.opaque != (serial < segment.opaque_batches):
+                moved.add((segment_index, serial))
+    return len(moved)
 
 
 def _add_textures(obj, model, notes) -> int:
@@ -735,6 +945,10 @@ def _rebuild(model, read, path, obj, notes, textures_added=0):
     before_vertices = model.vertex_count
     before_faces = model.triangle_count
     degenerate = int(obj.get(geometry.PROP_DEGENERATE, 0) or 0)
+    # A tile whose wave water the author deleted must stop drawing waves; one
+    # that never had any keeps whatever retail gave it.
+    had_waves = [any(water.is_wavy(b.flags) for b in segment.batches)
+                 for segment in model.segments]
 
     for index, segment in enumerate(model.segments):
         try:
@@ -748,6 +962,11 @@ def _rebuild(model, read, path, obj, notes, textures_added=0):
             raise GeometryExportError(
                 "segment %d could not be rebuilt: %s" % (index, error)
             )
+        wavy = any(water.is_wavy(b.flags) for b in segment.batches)
+        if had_waves[index] and not wavy:
+            segment.has_waves = 0
+        elif wavy and not segment.has_waves:
+            segment.has_waves = water.HAS_WAVES
 
     # Surface types ride on the texture table, which re-segmenting and
     # re-batching never touch, so they are applied straight rather than through
