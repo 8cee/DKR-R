@@ -216,6 +216,10 @@ def _image_file(image) -> str:
     return path if path and os.path.isfile(path) else ""
 
 
+#: How :func:`image_source` marks a picture that lives only in the ``.blend``.
+PACKED = "packed:"
+
+
 def image_source(image) -> str:
     """What an image is, as :attr:`source` records it: a file, or a packed one.
 
@@ -223,7 +227,7 @@ def image_source(image) -> str:
     one picture become one texture, and a conversion run twice reuses what the
     first run added instead of spending another of the 255 ordinals.
     """
-    return _image_file(image) or "packed:%s" % image.name
+    return _image_file(image) or PACKED + image.name
 
 
 #: Extensions an image datablock's name often keeps from its file, and which
@@ -477,6 +481,164 @@ def original_for(context, ordinal: int) -> str:
         return ""
     record.original = _stored_path(target)
     return target
+
+
+# ---------------------------------------------------------------------------
+# Putting back what a moved scene left behind
+# ---------------------------------------------------------------------------
+
+def missing(context) -> list:
+    """The track's own textures whose resampled PNG is not where the scene says.
+
+    The ``.blend`` records a path, not the picture, and the path is relative so
+    the scene and its folder can move together. A scene moved *without* that
+    folder is the ordinary way to get here.
+    """
+    return [entry for entry in entries(context)
+            if not entry.png or not os.path.isfile(entry.png)]
+
+
+def _source_file(record):
+    """``(path, reason)``: a file holding the picture a texture was made from.
+
+    A picture packed into the ``.blend`` - what a glTF import leaves - is
+    written out through :func:`image_path`, and a file on disk is used where it
+    is. ``path`` is empty when neither is there any more, and ``reason`` says
+    what was looked for.
+    """
+    source = record.source or ""
+    if source.startswith(PACKED):
+        name = source[len(PACKED):]
+        image = bpy.data.images.get(name)
+        if image is None:
+            return "", "%s, the picture it was made from, is no longer in the .blend" % name
+        return image_path(image), ""
+    if source and os.path.isfile(source):
+        return source, ""
+    # A file that has gone may still be packed into the scene under its path.
+    for image in bpy.data.images:
+        if image.packed_file is not None and same_source(
+                bpy.path.abspath(image.filepath), source):
+            return image_path(image), ""
+    return "", "%s, the file it was made from, is gone too" % (source or "the file")
+
+
+def _reload_images(path: str) -> None:
+    """Have every image pointing at ``path`` read it again.
+
+    One that was drawn while the file was missing holds no pixels, and would go
+    on drawing as missing until Blender restarted.
+    """
+    for image in bpy.data.images:
+        try:
+            if same_source(bpy.path.abspath(image.filepath), path):
+                image.reload()
+        except (RuntimeError, ReferenceError):
+            pass
+
+
+def restore_missing(context):
+    """Write back the PNGs a moved scene left behind: ``(restored, lost)``.
+
+    Each is rebuilt from the picture it was made from, at the size, format and
+    look the scene recorded - the same steps :func:`add_image` took, so the
+    texels, and with them the names the HD pack gives the originals, come out
+    as they were. They go into this scene's :func:`folder`, which is where a
+    relative path now points.
+
+    ``restored`` names the textures written back. ``lost`` is ``(name, reason)``
+    for those with nothing left to rebuild them from; they stay missing, and
+    whatever draws them shows no picture.
+    """
+    settings = getattr(context.scene, "dkr", None)
+    if settings is None:
+        return [], []
+    directory = folder(context)
+    restored = []
+    lost = []
+    for record in settings.custom_textures:
+        reduced = resolve(record.png)
+        if reduced and os.path.isfile(reduced):
+            continue
+        try:
+            source, reason = _source_file(record)
+        except Exception as error:  # noqa: BLE001 - Blender image errors vary
+            traceback.print_exc()
+            source, reason = "", "its picture could not be written out: %s" % error
+        if not source:
+            lost.append((record.name, reason))
+            continue
+
+        name = os.path.basename(reduced)
+        target = os.path.join(directory, name) if name else ""
+        if not target or os.path.exists(target):
+            # Another texture's file already has the name: an absolute path
+            # from some other folder, brought into this one.
+            target = _unique(directory, _slug(record.name))
+        original = os.path.join(directory, ORIGINALS, os.path.basename(target))
+        had_original = os.path.isfile(original)
+        try:
+            os.makedirs(directory, exist_ok=True)
+            resample(source, target, record.width, record.height)
+            texture_module.encode_texture(
+                target, record.format, record.render_mode or "OPAQUE",
+                transparency_mode=record.transparency or None,
+            )
+            if not had_original:
+                keep_original(source, original)
+        except Exception as error:  # noqa: BLE001 - Blender image errors vary
+            traceback.print_exc()
+            _discard(target)
+            if not had_original:
+                _discard(original)
+            lost.append((record.name, "rebuilding it failed: %s" % error))
+            continue
+
+        record.png = _stored_path(target)
+        record.original = _stored_path(original)
+        _reload_images(target)
+        restored.append(record.name)
+    return restored, lost
+
+
+def restoration_reports(context, restored, lost) -> list:
+    """``[(level, message), ...]`` saying what :func:`restore_missing` did."""
+    where = folder(context)
+    reports = []
+    if restored:
+        reports.append(({"INFO"}, (
+            "%d of this track's own textures were missing from %s - a .blend "
+            "moved without that folder - and were rebuilt from the pictures "
+            "they were made from" % (len(restored), where))))
+    if lost:
+        named = "; ".join("%s: %s" % pair for pair in lost[:4])
+        reports.append(({"WARNING"}, (
+            "%d of this track's own textures are missing from %s and cannot be "
+            "rebuilt (%s%s). Faces drawing them show no picture, and the export "
+            "refuses until the folder is put back or each is added again"
+            % (len(lost), where, named, "; ..." if len(lost) > 4 else ""))))
+    return reports
+
+
+class DKR_OT_restore_custom_textures(bpy.types.Operator):
+    """Rebuild this track's own textures missing from the folder beside the .blend, from the pictures they were made from, and show them on the track again"""
+
+    bl_idname = "dkr.restore_custom_textures"
+    bl_label = "Rebuild Missing Textures"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(missing(context))
+
+    def execute(self, context):
+        restored, lost = restore_missing(context)
+        geometry.show_own_pictures(context)
+        for level, message in restoration_reports(context, restored, lost):
+            self.report(level, message)
+        for area in (context.screen.areas if context.screen else []):
+            area.tag_redraw()
+        return {"FINISHED"} if restored else {"CANCELLED"}
 
 
 # ---------------------------------------------------------------------------
@@ -848,4 +1010,5 @@ CLASSES = (
     DKR_OT_add_custom_texture,
     DKR_OT_remove_custom_texture,
     DKR_OT_set_texture_transparency,
+    DKR_OT_restore_custom_textures,
 )

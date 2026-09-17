@@ -226,6 +226,17 @@ their native choices. Special debug vehicles remain load arguments; the
 three-entry player selection arrays use an allowed normal vehicle. Authored
 setup-point overrides and boss-specific spawning still run in the native code.
 
+**Memory.** Retail DKR sizes its main pool (`mmInit`) to the 4 MB console,
+about 2.96 MB of allocations. A `.dkrmap` race can need more: a 75-texture
+track (each picture a 64x32 RGBA16, ~4 KB) with eight different hovercraft
+racers peaks at 3.01 MB, and the next allocation returned NULL and crashed in
+`init_triangle_particle_model`. The runtime maps 8 MB, and nothing else uses
+the upper 4 MB. So the same `level_load` hook grows the main pool's tail slot
+to `0x80800000` the first time a `.dkrmap` level loads. The pool never
+shrinks, and the allocator code is unchanged. Retail and legacy levels never
+trigger the growth; the log shows
+`main memory pool grown into expansion RAM` when it happens.
+
 ## Verified end to end
 
 A smoke test installed one track whose payload is a byte copy of Ancient

@@ -417,11 +417,22 @@ def show_look(material, look) -> None:
 
 
 def _show_image(material, category, image):
-    """Point a material at ``image``, building its nodes if it drew none."""
-    if image is None or category == INVISIBLE_WALLS:
+    """Point a material at ``image``, building its nodes if it drew none.
+
+    ``None`` takes the picture away rather than leaving it. The material is
+    reused by (track, kind, table entry), and an entry whose picture cannot be
+    loaded this time must not go on showing what the entry held last time:
+    after a conversion that renumbered the table, that is another entry's
+    picture, and the viewport would disagree with the file without a word.
+    """
+    if category == INVISIBLE_WALLS:
         return
     tree = getattr(material, "node_tree", None)
     nodes = [node for node in tree.nodes if node.type == "TEX_IMAGE"] if tree else []
+    if image is None:
+        if nodes:
+            _build_material_nodes(material, category, None, material.get(PROP_LOOK))
+        return
     if not nodes:
         _build_material_nodes(material, category, image, material.get(PROP_LOOK))
         return
@@ -569,6 +580,42 @@ def texture_png(texture_id, tree=None, own=()):
         own = list(own or ())
         return own[ordinal].png if 0 <= ordinal < len(own) else None
     return tree.texture_3d_png(texture_id) if tree is not None else None
+
+
+def show_own_pictures(context) -> int:
+    """Point every material drawing one of the track's own textures at its PNG.
+
+    For after those PNGs are written back
+    (:func:`.custom_textures.restore_missing`) without the geometry being
+    rebuilt: its materials still show whatever they loaded before - nothing,
+    or another entry's picture. Only the track's own entries are touched; one
+    of the ROM's is drawn from the asset tree, which is not what changed.
+    Returns how many materials now show a picture.
+    """
+    from . import custom_textures  # noqa: PLC0415 - it imports this module
+
+    own = custom_textures.entries(context)
+    shown = 0
+    for obj in geometry_objects(context):
+        table = texture_table(obj)
+        for material in obj.data.materials:
+            if material is None or PROP_TEXTURE_INDEX not in material:
+                continue
+            index = int(material[PROP_TEXTURE_INDEX])
+            if not 0 <= index < len(table):
+                continue
+            texture_id = table[index].get("id", 0)
+            if texture_module.custom_ordinal(texture_id) is None:
+                continue
+            png = texture_png(texture_id, None, own)
+            image = _image(png) if png else None
+            try:
+                _show_image(material, material.get(PROP_CATEGORY), image)
+            except Exception:  # noqa: BLE001 - appearance only
+                traceback.print_exc()
+                continue
+            shown += image is not None
+    return shown
 
 
 def texture_object(texture_id, tree=None, own=()):
@@ -1278,6 +1325,12 @@ class DKR_OT_import_geometry(bpy.types.Operator, ImportHelper):
             )
 
         from . import custom_textures  # noqa: PLC0415 - it imports this module
+
+        if self.textured:
+            restored, lost = custom_textures.restore_missing(context)
+            for level, message in custom_textures.restoration_reports(
+                    context, restored, lost):
+                self.report(level, message)
 
         obj, stats = _build_geometry(
             stem, model, collection,

@@ -267,13 +267,32 @@ def _encode_textures(operator, context, package):
     if not own:
         return [], []
 
+    # A scene moved without the folder beside it still has the pictures its
+    # textures were made from, packed in the .blend, so it rebuilds them.
+    restored, lost = custom_textures.restore_missing(context)
+    if restored:
+        own = custom_textures.entries(context)
+        geometry_ops.show_own_pictures(context)
+        package.notes.append(
+            "%d texture(s) of this track's own were missing beside the .blend "
+            "and were rebuilt from the pictures they were made from: %s"
+            % (len(restored), ", ".join(restored))
+        )
+        for level, message in custom_textures.restoration_reports(
+                context, restored, []):
+            operator.report(level, message)
+
     missing = [entry.name for entry in own
                if not entry.png or not os.path.isfile(entry.png)]
     if missing:
+        reasons = dict(lost)
         raise dkrmap.DkrMapError(
-            "the resampled image for %s is gone from %s. The .blend records "
-            "where it was, not the picture itself, so add it again"
-            % (", ".join(missing), custom_textures.folder(context))
+            "the resampled image for %s is gone from %s and could not be "
+            "rebuilt (%s). The .blend records where it was, not the picture "
+            "itself: put the folder back beside the .blend, or add it again"
+            % (", ".join(missing), custom_textures.folder(context),
+               "; ".join(reasons.get(name, "no reason given")
+                         for name in missing[:4]))
         )
 
     separated = _separate_identical(context, own)

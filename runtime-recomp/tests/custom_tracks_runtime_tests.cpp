@@ -14,6 +14,7 @@
 #include <vector>
 
 extern "C" void dkr_custom_tracks_auto_boot(std::uint8_t*, recomp_context*);
+extern "C" void dkr_custom_tracks_prepare_memory(std::uint8_t*, recomp_context*);
 extern "C" void dkr_custom_tracks_prepare_vehicle(std::uint8_t*, recomp_context*);
 
 namespace tracks = dkr::runtime::custom_tracks;
@@ -187,6 +188,76 @@ int main() {
             assert(memory == before && std::memcmp(&context, &registers, sizeof(context)) == 0);
         }
         tracks::arm_track_override("test");
+
+        // A custom level grows DKR's 4 MB main pool over the unused expansion
+        // RAM exactly once, whether its tail slot is free or allocated.
+        const std::uint32_t pool = rev80() ? 0x80123B00 : 0x80123580;
+        const std::uint32_t slots = 0x8012D3F0;
+        const auto slot = [&](int index) { return addr(slots + index * 0x14U); };
+        const auto make_pool = [&](std::uint32_t tail_end, bool tail_free, int used) {
+            for (int i = 0; i < 1600; ++i) MEM_H(14, slot(i)) = static_cast<std::int16_t>(i);
+            MEM_W(0, slot(0)) = 0x80135100;
+            MEM_W(4, slot(0)) = 0x100;
+            MEM_H(8, slot(0)) = 1;
+            MEM_H(10, slot(0)) = -1;
+            MEM_H(12, slot(0)) = 1;
+            MEM_W(0, slot(1)) = 0x80135200;
+            MEM_W(4, slot(1)) = static_cast<std::int32_t>(tail_end - 0x80135200U);
+            MEM_H(8, slot(1)) = tail_free ? 0 : 1;
+            MEM_H(10, slot(1)) = 0;
+            MEM_H(12, slot(1)) = -1;
+            MEM_H(14, slot(used)) = 7; // next spare index
+            MEM_W(0, addr(pool)) = 1600;
+            MEM_W(4, addr(pool)) = used;
+            MEM_W(8, addr(pool)) = static_cast<std::int32_t>(slots);
+            MEM_W(12, addr(pool)) = 0x2D2C10;
+        };
+        const auto prepare = [&](std::int32_t level) {
+            recomp_context memory_context{};
+            memory_context.r4 = level;
+            memory_context.r5 = 0;
+            auto registers = memory_context;
+            dkr_custom_tracks_prepare_memory(rdram, &memory_context);
+            assert(std::memcmp(&memory_context, &registers, sizeof(memory_context)) == 0);
+        };
+        const std::int32_t custom = tracks::track_override();
+
+        make_pool(0x80400000, true, 2);
+        auto untouched = memory;
+        prepare(0); // retail level
+        assert(memory == untouched);
+        prepare(custom);
+        assert(MEM_W(4, slot(1)) == 0x6CAE00); // 0x80800000 - 0x80135200
+        assert(MEM_W(4, addr(pool)) == 2 && MEM_W(12, addr(pool)) == 0x2D2C10 + 0x400000);
+        auto grown = memory;
+        prepare(custom); // restarts and later loads keep the grown pool
+        assert(memory == grown);
+
+        make_pool(0x80400000, false, 2);
+        prepare(custom);
+        assert(MEM_H(12, slot(1)) == 7 && MEM_W(4, addr(pool)) == 3);
+        assert(static_cast<std::uint32_t>(MEM_W(0, slot(7))) == 0x80400000);
+        assert(MEM_W(4, slot(7)) == 0x400000 && MEM_H(8, slot(7)) == 0);
+        assert(MEM_H(10, slot(7)) == 1 && MEM_H(12, slot(7)) == -1);
+        assert(MEM_W(12, addr(pool)) == 0x2D2C10 + 0x400000);
+        grown = memory;
+        prepare(custom);
+        assert(memory == grown);
+
+        // mmInit's alignment can leave the retail end a few bytes high.
+        make_pool(0x80400008, true, 2);
+        prepare(custom);
+        assert(0x80135200U + static_cast<std::uint32_t>(MEM_W(4, slot(1))) == 0x80800000U);
+
+        // A full slot table or an unrecognised pool is left alone.
+        make_pool(0x80400000, false, 1599);
+        untouched = memory;
+        prepare(custom);
+        assert(memory == untouched);
+        make_pool(0x803F0000, true, 2);
+        untouched = memory;
+        prepare(custom);
+        assert(memory == untouched);
     }
     tracks::set_auto_boot(false);
     tracks::arm_track_override("");

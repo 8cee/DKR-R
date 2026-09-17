@@ -575,6 +575,19 @@ def _draw_own_textures(layout, context, settings, texture_ops):
                  "out at 64x32, so expect a heavy reduction.")
         return
 
+    # The .blend holds the paths, not the PNGs, so a scene moved without the
+    # folder beside it draws and exports nothing for these until they are back.
+    lost = custom_textures.missing(context)
+    if lost:
+        box = info_box(
+            layout, context,
+            "%d of these images are missing from %s beside the .blend - was it "
+            "moved without that folder? Rebuild them from the pictures they "
+            "were made from, or put the folder back."
+            % (len(lost), custom_textures.FOLDER),
+            icon="ERROR", alert=True)
+        box.operator("dkr.restore_custom_textures", icon="FILE_REFRESH")
+
     grid = layout.grid_flow(row_major=True, columns=6, align=True)
     for entry in own:
         grid.operator(

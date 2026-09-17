@@ -79,6 +79,7 @@ def test_registration():
                  "pick_skybox", "show_skybox", "minimap_fit",
                  "make_convertible", "ai_copy_difficulty",
                  "set_face_transparency", "set_texture_transparency",
+                 "restore_custom_textures",
                  "add_water", "select_water", "remove_water", "wave_preset"):
         check(hasattr(bpy.ops.dkr, name), "operator dkr.%s exists" % name)
     check(hasattr(bpy.types.Scene, "dkr"), "scene settings registered")
@@ -3224,6 +3225,140 @@ def test_track_from_mesh_keeps_material_textures():
         fresh()
 
 
+def _shown_pictures(obj):
+    """``{table index: the file its material draws, or None}``."""
+    from dkr_track_editor.operators import custom_textures as custom_ops
+    from dkr_track_editor.operators import geometry as geometry_ops
+
+    shown = {}
+    for material in obj.data.materials:
+        index = int(material.get(geometry_ops.PROP_TEXTURE_INDEX, -1))
+        if index < 0:
+            continue
+        node = custom_ops.image_node(material)
+        shown[index] = (os.path.normcase(os.path.normpath(
+            bpy.path.abspath(node.image.filepath))) if node else None)
+    return shown
+
+
+def test_moved_blend_rebuilds_its_textures():
+    """A .blend moved without its dkr_textures folder converts again correctly.
+
+    The case that shipped: a track converted in one folder, the .blend moved
+    to another without the folder beside it, and converted again after an
+    edit that left one material with no faces - which moves every later
+    texture table entry up. The materials are reused by entry, and with no PNG
+    to load each went on showing what its entry held before: the picture one
+    place along, all over the track, while the file itself was right.
+
+    The pictures are packed and their files deleted, as a glTF import leaves
+    them, so the .blend is the only thing left to rebuild them from.
+    """
+    print("a moved .blend rebuilds its own textures and shows them in place")
+    from dkr_track_editor import textures as texture_module
+    from dkr_track_editor.operators import custom_textures as custom_ops
+    from dkr_track_editor.operators import geometry as geometry_ops
+
+    fresh()
+    first = tempfile.mkdtemp(prefix="dkr-moved-from-")
+    second = tempfile.mkdtemp(prefix="dkr-moved-to-")
+    third = tempfile.mkdtemp(prefix="dkr-moved-again-")
+    try:
+        bpy.ops.wm.save_as_mainfile(filepath=os.path.join(first, "moving.blend"))
+        bpy.ops.mesh.primitive_grid_add(size=4000.0, x_subdivisions=4,
+                                        y_subdivisions=4)
+        source = bpy.context.active_object
+        mesh = source.data
+        for index, name in enumerate(("red", "green", "blue")):
+            path = _write_probe_image(first, name, 90 + 30 * index, 50)
+            material = _image_material(name, path)
+            custom_ops.image_of(material).pack()
+            os.remove(path)
+            mesh.materials.append(material)
+        for polygon in mesh.polygons:
+            polygon.material_index = polygon.index % 3
+
+        result = bpy.ops.dkr.track_from_mesh_blank(keep_source=True)
+        check(result == {"FINISHED"}, "the packed pictures convert (%r)" % (result,))
+        own = custom_ops.entries(bpy.context)
+        check(len(own) == 3
+              and all(e.source.startswith(custom_ops.PACKED) for e in own),
+              "each is recorded as a picture packed in the .blend (%r)"
+              % [e.source for e in own])
+        if len(own) != 3:
+            return
+        before = {e.name: texture_module.read_png(e.png) for e in own}
+
+        # The edit: red's faces become green, so red's material draws nothing
+        # and green and blue each move one table entry up.
+        bpy.ops.dkr.make_convertible(object_name=source.name)
+        for polygon in mesh.polygons:
+            if polygon.material_index == 0:
+                polygon.material_index = 1
+
+        # The move. The old folder stays where it was, as it did on the
+        # author's desktop, so the old materials still find their pictures.
+        bpy.ops.wm.save_as_mainfile(filepath=os.path.join(second, "moving.blend"))
+        check(len(custom_ops.missing(bpy.context)) == 3,
+              "moved without its folder, the scene knows all three are missing")
+
+        bpy.context.view_layer.objects.active = source
+        result = bpy.ops.dkr.track_from_mesh_blank(keep_source=True)
+        check(result == {"FINISHED"}, "the moved scene converts again (%r)" % (result,))
+        own = custom_ops.entries(bpy.context)
+        check(len(own) == 3, "reusing its textures rather than adding them again")
+        folder = custom_ops.folder(bpy.context)
+        check(os.path.samefile(os.path.dirname(folder), second)
+              and all(os.path.isfile(e.png) and os.path.isfile(e.original)
+                      and os.path.samefile(os.path.dirname(e.png), folder)
+                      for e in own),
+              "each PNG and its original were rebuilt beside the moved .blend")
+        check(all(texture_module.read_png(e.png) == before[e.name] for e in own),
+              "with the texels they had, so the HD pack keeps its names")
+
+        obj = geometry_ops.geometry_objects(bpy.context)[0]
+        table = geometry_ops.texture_table(obj)
+        ordinals = [texture_module.custom_ordinal(r["id"]) for r in table]
+        check(ordinals == [1, 2],
+              "the table moved up one, as the empty material asks (%r)" % ordinals)
+        wanted = {index: os.path.normcase(os.path.normpath(own[ordinal].png))
+                  for index, ordinal in enumerate(ordinals)}
+        shown = _shown_pictures(obj)
+        check(shown == wanted,
+              "and each material shows its own entry's picture, not the one "
+              "the entry held before the move (%r)" % shown)
+
+        # Moved again, and exported without converting: the export rebuilds.
+        bpy.ops.wm.save_as_mainfile(filepath=os.path.join(third, "moving.blend"))
+        settings = bpy.context.scene.dkr
+        settings.track_name = "Moving"
+        settings.track_id = "moving"
+        bpy.ops.dkr.place_object(object_id="ASSET_OBJECT_SETUPPOINT")
+        result = bpy.ops.dkr.export_dkrmap(
+            filepath=os.path.join(third, "moving.dkrmap"), validate_first=False)
+        check(result == {"FINISHED"},
+              "a scene moved again exports, rebuilding what it left (%r)" % (result,))
+        check(not custom_ops.missing(bpy.context),
+              "and nothing is missing afterwards")
+
+        # Nothing left to rebuild from: the entry shows no picture, not a stale one.
+        shutil.rmtree(custom_ops.folder(bpy.context))
+        bpy.data.images.remove(bpy.data.images["blue.png"])
+        check(bpy.ops.dkr.restore_custom_textures() == {"FINISHED"},
+              "the panel's button rebuilds what it can")
+        lost = [e.name for e in custom_ops.missing(bpy.context)]
+        check(lost == ["blue"],
+              "and leaves missing only the one whose picture is gone (%r)" % lost)
+        shown = _shown_pictures(obj)
+        check(shown.get(0) is not None and shown.get(1) is None,
+              "whose material then shows no picture rather than its old one (%r)"
+              % shown)
+    finally:
+        fresh()
+        for directory in (first, second, third):
+            shutil.rmtree(directory, ignore_errors=True)
+
+
 def test_track_from_mesh_survives_ctrl_j():
     """Pieces joined with Ctrl+J keep their mapping, whatever their maps were called.
 
@@ -4235,6 +4370,7 @@ def main():
         test_project_texture_onto_new_geometry()
         test_track_from_mesh_with_its_own_textures()
         test_track_from_mesh_keeps_material_textures()
+        test_moved_blend_rebuilds_its_textures()
         test_track_from_mesh_survives_ctrl_j()
         test_texture_browser_pieces()
         test_texture_side_operators()

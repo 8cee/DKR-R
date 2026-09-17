@@ -652,6 +652,14 @@ def build_track(operator, context, obj, textures, keep_source, donor=None,
     refused conversion leaves the scene holding what it held before.
     """
     context.view_layer.update()
+    # A scene moved without the folder beside it has lost the PNGs its own
+    # textures are drawn and exported from. The materials rebuilt below are
+    # reused by table entry, and a conversion can renumber the table, so each
+    # picture has to be loadable again before they are.
+    restored, lost = custom_textures.restore_missing(context)
+    for level, message in custom_textures.restoration_reports(
+            context, restored, lost):
+        operator.report(level, message)
     borrowed = len(textures)
     adopted = None
     if keep_textures:

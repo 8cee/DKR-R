@@ -393,6 +393,88 @@ extern "C" void dkr_custom_tracks_auto_boot(std::uint8_t* rdram,
     context->r2 = static_cast<gpr>(kMenuResultStartLevel | level);
 }
 
+// Called by the existing level_load scene-reset hook, before the level
+// allocates anything. mmInit sizes DKR's main pool to the 4 MB console
+// (0x80400000), while the runtime maps and reports 8 MB that nothing else
+// uses. A .dkrmap track can ship up to 255 64x32 textures on top of eight
+// distinct racers, which the retail pool cannot hold: allocations then return
+// NULL and the next particle or HUD setup writes through it. The first load of
+// such a track therefore grows the main pool's tail over the unused expansion
+// RAM. The allocator itself is untouched, the pool never shrinks, and retail
+// and legacy levels never trigger it.
+extern "C" void dkr_custom_tracks_prepare_memory(std::uint8_t* rdram,
+                                                 recomp_context* context) {
+    constexpr std::uint32_t kRetailRamEnd = 0x80400000U;
+    constexpr std::uint32_t kExpansionRamEnd = 0x80800000U;
+    constexpr std::uint32_t kSlotSize = 0x14U; // MemoryPoolSlot in memory.h
+    constexpr std::int32_t kSlotIndexLimit = 0x7FFF; // slot links are s16
+    if (!dkr::runtime::custom_tracks::owns_level_id(static_cast<std::int32_t>(context->r4))) {
+        return;
+    }
+    // gMemoryPools, verified against ver/symbols/symbol_addrs.us.v{77,80}.txt.
+    // Pool 0 is the main pool; MemoryPool is {maxNumSlots, curNumSlots, slots, size}.
+    const std::uint32_t pool =
+        dkr::runtime::revision_addresses::gSelectedRevision == dkr::runtime::rom::Revision::UsV80
+            ? 0x80123B00U
+            : 0x80123580U;
+    const std::int32_t max_slots = read_word(rdram, pool);
+    const std::int32_t used_slots = read_word(rdram, pool + 4U);
+    const auto slots = static_cast<std::uint32_t>(read_word(rdram, pool + 8U));
+    if (!addressable(slots) || max_slots <= 0 || max_slots > kSlotIndexLimit ||
+        used_slots <= 0 || used_slots >= max_slots) {
+        return;
+    }
+    const auto slot = [&](std::int32_t index) {
+        return slots + static_cast<std::uint32_t>(index) * kSlotSize;
+    };
+    // The slot list is kept in address order, so its tail ends the pool.
+    std::int32_t tail = 0;
+    for (std::int32_t steps = 0;; ++steps) {
+        const std::int32_t next = static_cast<std::int16_t>(MEM_H(12, rdram_address(slot(tail))));
+        if (next == -1) {
+            break;
+        }
+        if (next < 0 || next >= max_slots || steps >= max_slots) {
+            return; // Not a pool this code understands; leave it alone.
+        }
+        tail = next;
+    }
+    const auto tail_data = static_cast<std::uint32_t>(read_word(rdram, slot(tail)));
+    const std::int32_t tail_size = read_word(rdram, slot(tail) + 4U);
+    const std::uint32_t end = tail_data + static_cast<std::uint32_t>(tail_size);
+    // mmInit aligns the first slot's data without shrinking it, so the retail
+    // end can sit a few bytes past 0x80400000. Anything else is already grown.
+    if (tail_size < 0 || end < kRetailRamEnd || end >= kRetailRamEnd + 16U) {
+        return;
+    }
+    const std::uint32_t extra = kExpansionRamEnd - end;
+    if (MEM_H(8, rdram_address(slot(tail))) == 0) { // SLOT_FREE
+        write_word(rdram, slot(tail) + 4U, tail_size + static_cast<std::int32_t>(extra));
+    } else {
+        // mempool_slot_assign's split: slots[curNumSlots].index is the next
+        // spare slot, and mempool_slot_find refuses the pool's last one.
+        if (used_slots + 1 >= max_slots) {
+            return;
+        }
+        const std::int32_t spare = static_cast<std::int16_t>(MEM_H(14, rdram_address(slot(used_slots))));
+        if (spare < 0 || spare >= max_slots) {
+            return;
+        }
+        write_word(rdram, slot(spare), static_cast<std::int32_t>(end));
+        write_word(rdram, slot(spare) + 4U, static_cast<std::int32_t>(extra));
+        MEM_H(8, rdram_address(slot(spare))) = 0;
+        MEM_H(10, rdram_address(slot(spare))) = static_cast<std::int16_t>(tail);
+        MEM_H(12, rdram_address(slot(spare))) = -1;
+        write_word(rdram, slot(spare) + 16U, 0);
+        MEM_H(12, rdram_address(slot(tail))) = static_cast<std::int16_t>(spare);
+        write_word(rdram, pool + 4U, used_slots + 1);
+    }
+    write_word(rdram, pool + 12U, read_word(rdram, pool + 12U) + static_cast<std::int32_t>(extra));
+    std::fprintf(stderr,
+                 "[custom-tracks] main memory pool grown into expansion RAM for level %d (+%u KB)\n",
+                 static_cast<int>(static_cast<std::int32_t>(context->r4)), extra / 1024U);
+}
+
 // Called by the existing level_load scene-reset hook before retail consumes
 // the vehicle argument. Only gameplay on the armed track changes; menus and
 // Track Select retain their choices. Also covers L+Z and switching test tracks.
