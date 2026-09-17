@@ -877,6 +877,61 @@ int main() {
     assert(!std::filesystem::exists(root / "custom-tracks-state.txt"));
 
     std::filesystem::remove_all(root);
+    // Uninstall only the managed copy; keep source tracks, other installed
+    // tracks, saves and separately managed HD packs. Clear persisted testing.
+    const auto installed = root / "installed";
+    const auto working = root / "working";
+    for (const auto& [folder, id] : std::vector<std::pair<std::filesystem::path, std::string>>{
+             {installed / "remove.dkrmap", "remove"},
+             {installed / "keep.dkrmap", "keep"},
+             {working / "source.dkrmap", "source"}}) {
+        std::filesystem::create_directories(folder);
+        write_file(folder / "manifest.json", track_manifest(id, ""));
+        write_file(folder / "h.bin", std::string(64U, 'h'));
+    }
+    write_file(root / "save.bin", "save data");
+    write_file(root / "track-hd.zip", "managed HD pack");
+    scan(installed);
+    set_working_directory(working);
+    scan(installed);
+    assert(tracks().size() == 3U);
+    for (const auto& track : tracks()) assert(is_installed(track) == (track.id != "source"));
+    arm_track_override("remove");
+    set_auto_boot(true);
+    std::string uninstall_error;
+    assert(!uninstall("missing", uninstall_error));
+    assert(!uninstall_error.empty());
+    assert(!uninstall("source", uninstall_error));
+    assert(std::filesystem::exists(working / "source.dkrmap" / "manifest.json"));
+    assert(armed_track_id() == "remove");
+    assert(uninstall("remove", uninstall_error));
+    assert(uninstall_error.empty());
+    assert(!std::filesystem::exists(installed / "remove.dkrmap"));
+    assert(std::filesystem::exists(installed / "keep.dkrmap" / "manifest.json"));
+    assert(read_file_text(root / "save.bin") == "save data");
+    assert(read_file_text(root / "track-hd.zip") == "managed HD pack");
+    assert(tracks().size() == 2U);
+    assert(armed_track_id().empty());
+    assert(!auto_boot_enabled());
+    assert(!std::filesystem::exists(root / "custom-tracks-state.txt"));
+    scan(installed);
+    assert(tracks().size() == 2U);
+    assert(armed_track_id().empty());
+    assert(!uninstall("remove", uninstall_error));
+
+    // A managed-looking symlink to an author's directory must not grant
+    // permission to delete it (Windows may not allow creating symlinks).
+    std::error_code link_error;
+    std::filesystem::create_directory_symlink(working / "source.dkrmap",
+                                              installed / "link.dkrmap", link_error);
+    if (!link_error) {
+        scan(installed);
+        assert(!uninstall("source", uninstall_error));
+        assert(std::filesystem::exists(working / "source.dkrmap" / "manifest.json"));
+        std::filesystem::remove(installed / "link.dkrmap");
+    }
+    set_working_directory({});
+    std::filesystem::remove_all(root);
     std::printf("custom_tracks_tests: ok\n");
     return 0;
 }

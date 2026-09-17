@@ -9479,6 +9479,7 @@ std::vector<DkrLibraryTrack> BuildDkrLibrary(
         entry.name = track.name.empty() ? track.id : track.name;
         entry.author = track.author;
         entry.source = PathLeaf(track.source);
+        entry.installed = tracks_ns::is_installed(track);
         for (const auto& payload : track.entries) entry.bytes += payload.bytes.size();
         entry.enabled = track.enabled;
         if (!track.hd_pack_file.empty()) {
@@ -10344,7 +10345,16 @@ void DrawModsHacks(float available_width, bool game_running = false) {
                           [] { ImportTrackWithDialog(); },
                           [] { ImportTrackZipWithDialog(); },
                           go_to_play});
-    DrawDkrTrackDetails(dkr_tracks, revision != 0U);
+    DrawDkrTrackDetails(dkr_tracks, revision != 0U, mods_locked || mods.busy || picking);
+    if (!g_mods_page.uninstall_track_request.empty()) {
+        const std::string id = std::exchange(g_mods_page.uninstall_track_request, {});
+        if (!mods_locked && !mods.busy && !picking) {
+            std::string error;
+            g_track_import_status = tracks_ns::uninstall(id, error)
+                ? "Track uninstalled. Source files, saves and HD texture packs were kept."
+                : error;
+        }
+    }
     if (!g_mods_page.manage_pack_request.empty()) {
         g_texture_pack_manage_id = g_mods_page.manage_pack_request;
         g_texture_pack_manage_request = true;

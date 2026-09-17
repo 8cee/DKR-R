@@ -1346,6 +1346,57 @@ bool install(const std::filesystem::path& source, std::string& error,
     return true;
 }
 
+namespace {
+
+// Resolve both paths before allowing deletion: a symlink/junction must not
+// turn a managed-looking path into a deletion in the author's source folder.
+bool installed_path_locked(const std::filesystem::path& source) {
+    if (g_directory.empty() || source.extension() != ".dkrmap") return false;
+    std::error_code code;
+    const auto root = std::filesystem::canonical(g_directory, code);
+    if (code) return false;
+    if (!std::filesystem::equivalent(source.parent_path(), root, code) || code) return false;
+    const auto resolved = std::filesystem::canonical(source, code);
+    if (code || resolved == root) return false;
+    return std::filesystem::equivalent(resolved.parent_path(), root, code) && !code;
+}
+
+} // namespace
+
+bool is_installed(const Track& track) {
+    std::scoped_lock lock(g_mutex);
+    return installed_path_locked(track.source);
+}
+
+bool uninstall(const std::string& id, std::string& error) {
+    std::scoped_lock lock(g_mutex);
+    const auto found = std::find_if(g_tracks.begin(), g_tracks.end(),
+        [&id](const Track& track) { return track.id == id; });
+    if (found == g_tracks.end()) {
+        error = "This track is no longer in the library.";
+        return false;
+    }
+    if (!installed_path_locked(found->source)) {
+        error = "This track is read from a working folder. Its source files cannot be uninstalled.";
+        return false;
+    }
+    std::error_code code;
+    std::filesystem::remove_all(found->source, code);
+    if (code) {
+        error = "Could not uninstall the track: " + code.message();
+        return false;
+    }
+    g_tracks.erase(found);
+    g_resolved_level_ids.erase(id);
+    if (g_armed_track == id) {
+        g_armed_track.clear();
+        g_auto_boot = false;
+        save_state_locked();
+    }
+    error.clear();
+    return true;
+}
+
 void reload() {
     std::scoped_lock lock(g_mutex);
 

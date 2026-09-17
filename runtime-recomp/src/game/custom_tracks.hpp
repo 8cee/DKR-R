@@ -209,6 +209,13 @@ struct InstallOutcome {
 bool install(const std::filesystem::path& source, std::string& error,
              InstallOutcome* outcome = nullptr);
 
+// Only managed copies directly inside directory() can be uninstalled. Tracks
+// read from the author's working folder are never deleted by the launcher.
+[[nodiscard]] bool is_installed(const Track& track);
+// Caller must be in the launcher, with no game or import running. Removes the
+// managed track, clears its Track Lab selection and preserves HD packs/saves.
+bool uninstall(const std::string& id, std::string& error);
+
 // Removes a temporary directory reported in InstallOutcome::temp_root. A no-op
 // for an empty path.
 void discard_install_temp(const std::filesystem::path& temp_root);

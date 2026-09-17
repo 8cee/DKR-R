@@ -15,6 +15,7 @@ struct DkrLibraryTrack {
     bool enabled = true;
     bool hd_textures = false;    // an installed, enabled HD pack
     std::string hd_pack_id;      // installed HD pack, for its Manage modal
+    bool installed = false;     // managed copy, safe to uninstall
 };
 
 struct ModsPageState {
@@ -26,6 +27,8 @@ struct ModsPageState {
     bool request_import_chooser = false;
     bool request_dkr_details = false;
     std::string manage_pack_request;
+    bool dkr_remove_confirm = false;
+    std::string uninstall_track_request;
     // The page resets on entry, and the launcher and overlay are separate
     // ImGui contexts: a change of context is an entry too.
     ImGuiContext* context = nullptr;
@@ -986,18 +989,21 @@ void DrawModImportChooser(const ModImportActions& actions) {
     ImGui::EndPopup();
 }
 
-void DrawDkrTrackDetails(const std::vector<DkrLibraryTrack>& tracks, bool rom_ready) {
+void DrawDkrTrackDetails(const std::vector<DkrLibraryTrack>& tracks, bool rom_ready,
+                         bool locked = false) {
     constexpr const char* kName = "Track details";
     if (g_mods_page.request_dkr_details) {
         ImGui::OpenPopup(kName);
         g_mods_page.request_dkr_details = false;
+        g_mods_page.dkr_remove_confirm = false;
     }
     if (!ImGui::IsPopupOpen(kName)) return;
     const PaddockFlatScope paddock;
     const auto display = ImGui::GetIO().DisplaySize;
-    ImGui::SetNextWindowSize({std::min(570.0F, display.x - 48.0F), 0.0F}, ImGuiCond_Appearing);
-    if (!BeginPaddockModalWindow(kName, ImGuiWindowFlags_AlwaysAutoResize |
-                                            ImGuiWindowFlags_NoScrollbar)) {
+    const float modal_width = std::max(240.0F, std::min(570.0F, display.x - 48.0F));
+    ImGui::SetNextWindowSizeConstraints({modal_width, 0.0F},
+                                       {modal_width, std::max(200.0F, display.y - 48.0F)});
+    if (!BeginPaddockModalWindow(kName, ImGuiWindowFlags_AlwaysAutoResize)) {
         return;
     }
     const float width = std::max(ImGui::GetContentRegionAvail().x, 1.0F);
@@ -1006,6 +1012,18 @@ void DrawDkrTrackDetails(const std::vector<DkrLibraryTrack>& tracks, bool rom_re
     });
     if (found == tracks.end()) {
         PaddockModalText("This track is no longer in the library.");
+    } else if (g_mods_page.dkr_remove_confirm) {
+        PaddockModalText(found->name);
+        PaddockModalText("Uninstall this track from DKR-R? Its installed .dkrmap copy will be deleted. "
+                        "Original source files, saves and HD texture packs will be kept. "
+                        "You can import the track again later.");
+        ImGui::BeginDisabled(locked || !found->installed);
+        if (PaddockModalButton("UNINSTALL TRACK", 44)) {
+            g_mods_page.uninstall_track_request = found->id;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndDisabled();
+        if (PaddockModalButton("CANCEL", 44)) g_mods_page.dkr_remove_confirm = false;
     } else {
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {0.0F, 0.0F});
         const ImVec2 at = ImGui::GetCursorScreenPos();
@@ -1020,7 +1038,9 @@ void DrawDkrTrackDetails(const std::vector<DkrLibraryTrack>& tracks, bool rom_re
             PaddockText(body, PaddockRgb(0xFFF6DA), text, width);
         };
         paragraph(found->author.empty() ? std::string("Native .dkrmap track") : "By " + found->author);
-        paragraph("Installed. This course appears automatically in the in-game track menu.");
+        paragraph(found->installed
+            ? "Installed. This course appears automatically in the in-game track menu."
+            : "Read from your working folder. Source files are managed in Track Lab.");
         paragraph("Use Track Lab to test work in progress from your working folder. "
                   "Native tracks use the Modern graphics profile.");
         if (!rom_ready) paragraph("Load your original Diddy Kong Racing ROM in Play before racing.");
@@ -1031,6 +1051,17 @@ void DrawDkrTrackDetails(const std::vector<DkrLibraryTrack>& tracks, bool rom_re
                 ImGui::CloseCurrentPopup();
             }
         }
+        if (found->installed) {
+            PaddockGap(13.0F);
+            ImGui::BeginDisabled(locked);
+            if (PaddockButton("Uninstall track")) g_mods_page.dkr_remove_confirm = true;
+            ImGui::EndDisabled();
+        } else {
+            paragraph("To remove this track, move its .dkrmap out of your working folder and rescan, "
+                      "or stop watching that folder in Track Lab.");
+        }
+        if (locked) paragraph("Return to the launcher and leave the lobby to change tracks. "
+                              "Wait for any current import to finish.");
         PaddockGap(13.0F);
         ImGui::PopStyleVar();
     }

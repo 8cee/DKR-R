@@ -191,6 +191,31 @@ int main() {
         }
         check(rendered>0,"No libraries were checked.");
 
+        // Native details and uninstall confirmation remain scrollable and fit
+        // small launchers, including long track names and locked operations.
+        for(const float width:{360.0F,750.0F})for(const bool confirm:{false,true}) {
+            ImGui::CreateContext();g_mods_page={};fonts(19);
+            auto& io=ImGui::GetIO();io.IniFilename=nullptr;io.LogFilename=nullptr;
+            io.DisplaySize={width,600};io.DeltaTime=1.0F/60;
+            auto native=native_tracks();native.front().installed=true;
+            native.front().name=std::string(180,'W');
+            g_mods_page.dkr_details_id=native.front().id;
+            g_mods_page.request_dkr_details=true;
+            for(int step=0;step<4;++step) {
+                ImGui::NewFrame();ImGui::Begin("Native modal owner");
+                if(step)g_mods_page.dkr_remove_confirm=confirm;
+                DrawDkrTrackDetails(native,false,true);ImGui::End();ImGui::Render();
+            }
+            auto* modal=ImGui::FindWindowByName("Track details");
+            check(modal&&modal->Active,"Native track modal did not open.");
+            check(modal->Size.y<=io.DisplaySize.y-47,"Native track modal exceeds viewport.");
+            check(!(modal->Flags&ImGuiWindowFlags_NoScrollbar),"Native track modal cannot scroll.");
+            check(modal->ContentSize.x<=modal->Size.x-modal->WindowPadding.x*2-modal->ScrollbarSizes.x+1,
+                  "Native track modal clips horizontally.");
+            check(g_mods_page.uninstall_track_request.empty(),"Opening a modal requested an uninstall.");
+            ImGui::DestroyContext();
+        }
+
         // Word wrap: unbroken words break, balance keeps the line count.
         ImGui::CreateContext();fonts(19);ImGui::GetIO().DisplaySize={800,600};ImGui::NewFrame();
         const auto type=PaddockReading(14);
