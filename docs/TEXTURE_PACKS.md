@@ -71,16 +71,20 @@ also writes a Rice pack beside the track, `<track>-hd.zip`, holding each picture
 at the resolution its author made it. With it enabled, the renderer draws the
 original in place of the reduction.
 
-**You do not import this pack yourself.** Track Lab's **Import a copy** finds
-`<track>-hd.zip` beside the track it just installed and imports it in the same
-gesture (`import_archive` with a `TrackPackOwner`). Such a pack is *born
-enabled*, filed against the track (`Origin::TrackPack`), and does **not** get a
-row in the library above - it is not one of the third-party packs you collect
-and browse. It shows only under the browser's **Track packs** visibility
-filter, for auditing, and on the owning track's Track Lab row, which carries a
-one-line HD status and a **Manage** link to this page's single-pack modal. A
-rescan during authoring re-imports nothing: the pack is keyed by its archive's
-entries (each name, CRC-32 and size), so an unchanged re-export is skipped and
+**You do not import this pack yourself.** **Mods / Hacks → Import mods → DKR-R
+tracks** finds `<track>-hd.zip` beside the track it just installed and imports
+it in the same gesture (`import_archive` with a `TrackPackOwner`). Such a pack
+is *born enabled*, filed against the track (`Origin::TrackPack`), and does
+**not** get a row in the library above - it is not one of the third-party packs
+you collect and browse. It shows only under the browser's **Track packs**
+visibility filter, for auditing; in the track's **Details** in **My mods**
+(**Manage HD textures**); and, for a working-folder track, on its Track Lab
+row, which carries a one-line HD status and a **Manage** button. Both open this
+page's single-pack modal. A working-folder track whose matching
+`<track>-hd.zip` is not installed yet offers **Install HD textures** on that
+row. A rescan during authoring re-imports nothing: the pack is keyed by its
+archive's entries (each name, CRC-32 and size), so an unchanged re-export is
+skipped and
 any real change - a new picture, or the same payloads under new replacement
 names - replaces the old pack rather than adding another.
 

@@ -113,6 +113,7 @@ $noticeFiles = [ordered]@{
     'N64Recomp-LICENSE.txt' = 'extern\n64-modern-runtime\N64Recomp\LICENSE'
     'DXC-NOTICE.md' = 'packaging\licenses\DXC-NOTICE.md'
     'Jumpman-LICENSE.txt' = 'packaging\licenses\Jumpman-LICENSE.txt'
+    'Selawik-OFL.txt' = 'packaging\licenses\Selawik-OFL.txt'
     'CRT-FILTERS-NOTICE.md' = 'packaging\licenses\CRT-FILTERS-NOTICE.md'
     'SDL-GAMECONTROLLERDB-LICENSE.txt' = 'packaging\licenses\SDL-GAMECONTROLLERDB-LICENSE.txt'
     'GEKKONET-LICENSE.txt' = 'packaging\licenses\GEKKONET-LICENSE.txt'

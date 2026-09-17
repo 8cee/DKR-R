@@ -3,12 +3,13 @@
 ## Import and play
 
 1. Import your legally obtained original Game Pak in **Play**.
-2. Open **Mods / Hacks → Import Mods — Tracks and Characters**.
+2. Open **Mods / Hacks → Import mods → ROM patches → Choose patch file**.
 3. Choose an `.xdelta` file or a ZIP containing patches. The separate importer
    identifies tracks and characters automatically. A progress modal remains
    visible during inspection and preparation; Cancel stops the active job.
-4. Read the result. Supported content appears in **Custom Tracks** or
-   **Custom Characters**. Imports do not enable themselves automatically.
+4. Read the result. Supported content appears in **My mods**, under **Tracks**
+   (marked **Legacy**) or **Characters**. Imports do not enable themselves
+   automatically.
 5. Enable the content you want and start an offline game normally. Import both
    original US revisions before preparing tracks if you want to switch between
    v 1.0 and v 1.1. The library shows which variants have been prepared.
@@ -21,15 +22,23 @@ animated selection stage; they do not replace their stock donors.
 ## Managing the library
 
 Texture Packs and CRT Overlays now live in the **Textures** sidebar page, in
-both the launcher and overlay. Magic Codes remains at the top of Mods / Hacks.
+both the launcher and overlay. Mods / Hacks opens with its four sections
+closed - **My mods**, **Magic Codes**, **Track Lab** and **Help & imports** -
+and shows one at a time.
 The sidebar sequence after Controls is **Save Manager → Textures → Mods / Hacks
 → DKR-R Online → About DKR-R**. Navigation and visible buttons use the same order.
-Custom Tracks and Custom Characters use individual, full-name cards with
-controller-keyboard search, sorting, source-pack/state/compatibility filters,
-and a Visibility filter. A course's Game Pak variants share one card.
+**My mods** shows one full-name card per mod. Legacy courses (marked
+**Legacy**) share the **Tracks** list with installed `.dkrmap` tracks (marked
+**DKR**); custom characters have their own **Characters** list. Search (a
+controller opens the on-screen keyboard), **Status** and **Sort by** sit above
+the cards, and **Filters** adds track format, compatibility, source pack and
+Visibility. A course's Game Pak variants share one card, and its switch turns
+it on or off for the next launch.
 
-**Manage** provides activation, hide/restore, managed location, source import
+**Details** provides activation, hide/restore, managed location, source import
 details and removal. Hidden mods are inactive; restoring never activates them.
+**Help & imports** lists every import with **Prepare this import again**, and
+can refresh the library or turn all legacy tracks or characters off.
 At most two custom characters can be active, regardless of search filters.
 Changes to installed content are locked while a game/lobby or import owns it.
 

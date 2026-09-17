@@ -100,6 +100,8 @@ install -m 0644 "${project_root}/extern/n64-modern-runtime/N64Recomp/LICENSE" \
   "${notices}/N64Recomp-LICENSE.txt"
 install -m 0644 "${project_root}/packaging/licenses/Jumpman-LICENSE.txt" \
   "${notices}/Jumpman-LICENSE.txt"
+install -m 0644 "${project_root}/packaging/licenses/Selawik-OFL.txt" \
+  "${notices}/Selawik-OFL.txt"
 install -m 0644 "${project_root}/packaging/licenses/CRT-FILTERS-NOTICE.md" \
   "${notices}/CRT-FILTERS-NOTICE.md"
 install -m 0644 "${project_root}/packaging/licenses/GEKKONET-LICENSE.txt" \

@@ -4,6 +4,7 @@
 #include "game_registration.hpp"
 #include "generated/jumpman_font.h"
 #include "generated/racing_banana_font.h"
+#include "generated/selawik_font.h"
 #include "countdown_tone_policy.hpp"
 #include "custom_tracks.hpp"
 #include "launcher_render_policy.hpp"
@@ -103,28 +104,29 @@ constexpr int kRaceButtonPatternWidth = 1984;
 constexpr int kRaceButtonPatternHeight = 64;
 constexpr int kRaceButtonPatternCell = 32;
 int g_race_button_pattern_rect = -1;
+// Scopes that restyle the shared button: the paddock's flat buttons (MODS /
+// HACKS and its modals) and the sidebar rail's softer hover.
+int g_race_button_flat = 0;
+ImFont* g_race_button_flat_font = nullptr;
+int g_race_button_sidebar = 0;
 
 }  // namespace
 
 namespace ImGui {
 
-// Keep every launcher and in-game overlay button on the same racing-themed
-// interaction primitive. The checker layer is painted after the ordinary
-// ImGui button so existing sizing, navigation, disabled-state and activation
-// behaviour remain untouched.
-bool DkrRaceButton(const char* label, const ImVec2& size = ImVec2(0.0F, 0.0F)) {
-    const bool pressed = Button(label, size);
-    if (!IsItemHovered() && !IsItemFocused()) return pressed;
-
-    const ImVec2 minimum = GetItemRectMin();
-    const ImVec2 maximum = GetItemRectMax();
-    if (maximum.x <= minimum.x || maximum.y <= minimum.y) return pressed;
-
+// The checker, border and label plate of a hovered or focused race button.
+// `amount` fades the checker and plate in; `plate_scale` grows the plate.
+void DrawRaceButtonHover(const char* label, ImVec2 minimum, ImVec2 maximum,
+                         float amount, float plate_scale) {
+    if (amount <= 0.0F) return;
     ImDrawList* draw = GetWindowDrawList();
     const float width = maximum.x - minimum.x;
     const float height = maximum.y - minimum.y;
     const float rounding = std::clamp(GetStyle().FrameRounding, 0.0F,
                                       std::min(width, height) * 0.5F);
+    const auto faded = [amount](int r, int g, int b, int a) {
+        return IM_COL32(r, g, b, static_cast<int>(std::lround(a * amount)));
+    };
     // Keep the racing motif broad and calm. A dense black/cream grid creates
     // high-frequency noise behind the label (especially on handheld panels),
     // while two or three rows remain recognisably checkered without competing
@@ -162,14 +164,14 @@ bool DkrRaceButton(const char* label, const ImVec2& size = ImVec2(0.0F, 0.0F)) {
             (static_cast<float>(pattern->Y) + source_height) /
                 static_cast<float>(atlas->TexHeight)};
         draw->AddImageRounded(atlas->TexID, minimum, maximum, uv_min, uv_max,
-                              IM_COL32_WHITE, rounding);
+                              faded(255, 255, 255, 255), rounding);
     } else {
         // Preserve a readable hover state if a constrained backend cannot
         // pack the optional checker artwork into its atlas.
-        draw->AddRectFilled(minimum, maximum, IM_COL32(226, 112, 25, 255),
+        draw->AddRectFilled(minimum, maximum, faded(226, 112, 25, 255),
                             rounding);
     }
-    draw->AddRect(minimum, maximum, IM_COL32(255, 218, 99, 245),
+    draw->AddRect(minimum, maximum, faded(255, 218, 99, 245),
                   rounding, 0, 1.5F);
     const char* rendered_end = FindRenderedTextEnd(label);
     const ImVec2 text_size = CalcTextSize(label, rendered_end, true);
@@ -186,22 +188,138 @@ bool DkrRaceButton(const char* label, const ImVec2& size = ImVec2(0.0F, 0.0F)) {
     plate_max.x = std::min(plate_max.x, maximum.x - 5.0F);
     plate_min.y = std::max(plate_min.y, minimum.y + 4.0F);
     plate_max.y = std::min(plate_max.y, maximum.y - 4.0F);
+    if (plate_scale < 1.0F) {
+        const ImVec2 centre{(plate_min.x + plate_max.x) * 0.5F,
+                            (plate_min.y + plate_max.y) * 0.5F};
+        plate_min = {centre.x + (plate_min.x - centre.x) * plate_scale,
+                     centre.y + (plate_min.y - centre.y) * plate_scale};
+        plate_max = {centre.x + (plate_max.x - centre.x) * plate_scale,
+                     centre.y + (plate_max.y - centre.y) * plate_scale};
+    }
     const float plate_rounding = std::min((plate_max.y - plate_min.y) * 0.5F,
                                           9.0F);
 
     // Give the label its own stable contrast surface. This deliberately does
     // not share the checker animation, so readability is identical at every
     // animation phase and for both mouse hover and controller focus.
-    draw->AddRectFilled(plate_min, plate_max, IM_COL32(7, 28, 39, 242),
+    draw->AddRectFilled(plate_min, plate_max, faded(7, 28, 39, 242),
                         plate_rounding);
-    draw->AddRect(plate_min, plate_max, IM_COL32(255, 204, 75, 225),
+    draw->AddRect(plate_min, plate_max, faded(255, 204, 75, 225),
                   plate_rounding, 0, 1.0F);
-    draw->PushClipRect(plate_min, plate_max, true);
+    draw->PushClipRect({minimum.x + 5.0F, minimum.y + 4.0F},
+                       {maximum.x - 5.0F, maximum.y - 4.0F}, true);
     draw->AddText({text_position.x + 1.0F, text_position.y + 1.0F},
                   IM_COL32(0, 0, 0, 185), label, rendered_end);
     draw->AddText(text_position, IM_COL32(255, 249, 222, 255), label,
                   rendered_end);
     draw->PopClipRect();
+}
+
+// The sidebar's rail buttons: the checker fades in (and snaps out), and the
+// buttons sit on a small drop shadow and sink slightly while pressed.
+bool DkrSidebarRaceButton(const char* label, const ImVec2& size) {
+    ImDrawList* draw = GetWindowDrawList();
+    const ImGuiStyle& style = GetStyle();
+    const char* rendered_end = FindRenderedTextEnd(label);
+    const ImVec2 label_size = CalcTextSize(label, rendered_end, true);
+    const ImVec2 origin = GetCursorScreenPos();
+    const ImVec2 item_size = CalcItemSize(
+        size, label_size.x + style.FramePadding.x * 2.0F,
+        label_size.y + style.FramePadding.y * 2.0F);
+    const float rounding = std::clamp(style.FrameRounding, 0.0F,
+                                      std::min(item_size.x, item_size.y) * 0.5F);
+    const int first_vertex = draw->VtxBuffer.Size;
+    draw->AddRectFilled({origin.x, origin.y + 2.0F},
+                        {origin.x + item_size.x, origin.y + item_size.y + 2.0F},
+                        GetColorU32(IM_COL32(0, 0, 0, 89)), rounding);
+    const ImVec4 resting = GetStyleColorVec4(ImGuiCol_Button);
+    const ImVec4 text = GetStyleColorVec4(ImGuiCol_Text);
+    PushStyleColor(ImGuiCol_ButtonHovered, resting);
+    PushStyleColor(ImGuiCol_ButtonActive, resting);
+    PushStyleColor(ImGuiCol_Text, IM_COL32(0, 0, 0, 0));
+    const bool pressed = Button(label, size);
+    PopStyleColor(3);
+    const ImGuiID id = GetItemID();
+    const ImVec2 minimum = GetItemRectMin();
+    const ImVec2 maximum = GetItemRectMax();
+    const bool lit = IsItemHovered() || (IsItemFocused() && GetIO().NavVisible);
+    const bool held = IsItemActive() && IsItemHovered();
+
+    // Soft in, instant out, like the launcher study's CSS transitions.
+    ImGuiStorage* storage = GetStateStorage();
+    const float step = GetIO().DeltaTime;
+    float& hover = *storage->GetFloatRef(ImHashStr("sidebar-hover", 0, id), 0.0F);
+    hover = lit ? std::min(hover + step / 0.12F, 1.0F) : 0.0F;
+    float& edge = *storage->GetFloatRef(ImHashStr("sidebar-edge", 0, id), 0.0F);
+    edge = lit ? std::min(edge + step / 0.15F, 1.0F)
+               : std::max(edge - step / 0.15F, 0.0F);
+    float& sink = *storage->GetFloatRef(ImHashStr("sidebar-sink", 0, id), 0.0F);
+    sink = held ? std::min(sink + step / 0.15F, 1.0F)
+                : std::max(sink - step / 0.15F, 0.0F);
+    const auto ease = [](float t) {
+        return 1.0F - (1.0F - t) * (1.0F - t) * (1.0F - t);
+    };
+
+    const float inset = rounding * 0.6F;
+    draw->AddRectFilled({minimum.x + inset, minimum.y + 1.0F},
+                        {maximum.x - inset, minimum.y + 2.0F},
+                        GetColorU32(IM_COL32(255, 255, 255, 36)));
+    if (edge > 0.0F) {
+        draw->AddRect(minimum, maximum,
+                      GetColorU32(IM_COL32(
+                          255, 218, 99,
+                          static_cast<int>(245.0F * ease(edge)))),
+                      rounding, 0, 1.0F);
+    }
+    const float faded = ease(hover);
+    if (lit) {
+        DrawRaceButtonHover(label, minimum, maximum, faded,
+                            0.9F + 0.1F * faded);
+    } else {
+        const ImVec2 text_position{
+            minimum.x + (maximum.x - minimum.x - label_size.x) *
+                            style.ButtonTextAlign.x,
+            minimum.y + (maximum.y - minimum.y - label_size.y) *
+                            style.ButtonTextAlign.y};
+        draw->PushClipRect(minimum, maximum, true);
+        draw->AddText({text_position.x, text_position.y + 2.0F},
+                      GetColorU32(IM_COL32(0, 0, 0, 56)), label, rendered_end);
+        draw->AddText(text_position, GetColorU32(text), label, rendered_end);
+        draw->PopClipRect();
+    }
+    const float scale = 1.0F - 0.04F * ease(sink);
+    if (scale < 0.9999F) {
+        const ImVec2 centre{(minimum.x + maximum.x) * 0.5F,
+                            (minimum.y + maximum.y) * 0.5F};
+        for (int index = first_vertex; index < draw->VtxBuffer.Size; ++index) {
+            ImVec2& position = draw->VtxBuffer[index].pos;
+            position.x = centre.x + (position.x - centre.x) * scale;
+            position.y = centre.y + (position.y - centre.y) * scale;
+        }
+    }
+    return pressed;
+}
+
+// Keep every launcher and in-game overlay button on the same racing-themed
+// interaction primitive. The checker layer is painted after the ordinary
+// ImGui button so existing sizing, navigation, disabled-state and activation
+// behaviour remain untouched.
+bool DkrRaceButton(const char* label, const ImVec2& size = ImVec2(0.0F, 0.0F)) {
+    // A paddock scope has already pushed its calm, flat button colours.
+    if (g_race_button_flat > 0) {
+        if (g_race_button_flat_font != nullptr) PushFont(g_race_button_flat_font);
+        const bool pressed = Button(label, size);
+        if (g_race_button_flat_font != nullptr) PopFont();
+        return pressed;
+    }
+    if (g_race_button_sidebar > 0) return DkrSidebarRaceButton(label, size);
+    const bool pressed = Button(label, size);
+    if (!IsItemHovered() && !IsItemFocused()) return pressed;
+
+    const ImVec2 minimum = GetItemRectMin();
+    const ImVec2 maximum = GetItemRectMax();
+    if (maximum.x <= minimum.x || maximum.y <= minimum.y) return pressed;
+    DrawRaceButtonHover(label, minimum, maximum, 1.0F, 1.0F);
     return pressed;
 }
 
@@ -327,14 +445,14 @@ bool g_texture_pack_manage_request = false;
 std::string g_track_import_status;
 struct ModBrowserState {
     char search[160]{};
-    int sort=0,state=0,compatibility=0,visibility=0;
+    int sort=0,state=0,compatibility=0,visibility=0,format=0;
     std::string source,manage_id,remove_id,hide_id;
     std::shared_ptr<const dkr::mods::TrackCatalogView> snapshot;
-    std::vector<dkr::mods::browser::Card> all,shown;
-    std::string filter_key;
-    float measured_width=-1,measured_font_size=0,name_height=0,card_height=0;
-    ImFont* measured_font=nullptr;
-    std::uint64_t measured_generation=0;
+    std::vector<dkr::mods::browser::Card> all;
+    // Shown cards: >= 0 indexes `all`, < 0 the native tracks (-1 is the first).
+    std::vector<int> shown;
+    std::string filter_key,layout_key;
+    std::vector<float> row_heights;
 };
 std::array<ModBrowserState,2> g_mod_browsers;
 unsigned g_mod_browser_revision=0;
@@ -552,6 +670,11 @@ constexpr ImVec4 kWarm{1.0F, 0.67F, 0.08F, 1.0F};
 constexpr ImVec4 kRaceRed{0.91F, 0.18F, 0.13F, 1.0F};
 constexpr ImVec4 kRaceBlue{0.04F, 0.43F, 0.63F, 1.0F};
 constexpr ImVec4 kCream{1.0F, 0.94F, 0.76F, 1.0F};
+
+#include "runtime_ui_paddock.inl"
+
+// A page asks the launcher or overlay to show another page (-1: none).
+int g_page_navigation_request = -1;
 
 std::string PathUtf8(const std::filesystem::path& path) {
     const auto value = path.u8string();
@@ -1035,6 +1158,10 @@ void LoadLauncherFonts() {
     if (g_font_controls == nullptr) {
         g_font_controls = body_font;
     }
+    for (std::size_t index = 0U; index < kPaddockSignSizes.size(); ++index) {
+        g_paddock_sign[index] = add_racing_font(kPaddockSignSizes[index]);
+    }
+    LoadPaddockReadingFonts(io.Fonts);
 
     const auto add_jumpman_font = [&](float size) -> ImFont* {
         ImFontConfig config{};
@@ -1200,7 +1327,8 @@ void AddTrackedText(ImDrawList* draw, ImFont* font, float size,
     }
 }
 
-void DrawPageHeading(const char* text, bool title = false) {
+void DrawPageHeading(const char* text, bool title = false,
+                     float size_override = 0.0F) {
     ImFont* font = title ? g_font_title : g_font_heading;
     if (font == nullptr || text == nullptr) {
         ImGui::TextUnformatted(text != nullptr ? text : "");
@@ -1209,7 +1337,7 @@ void DrawPageHeading(const char* text, bool title = false) {
     const ImVec2 position = ImGui::GetCursorScreenPos();
     const float available_width =
         std::max(ImGui::GetContentRegionAvail().x, 1.0F);
-    float size = font->FontSize;
+    float size = size_override > 0.0F ? size_override : font->FontSize;
     float tracking = size * (title ? 0.03F : 0.04F);
     float width = TrackedTextWidth(font, size, text, tracking);
     if (width > available_width) {
@@ -3016,6 +3144,11 @@ void DrawColoredWrapped(const ImVec4& color, std::string_view text) {
 
 bool BeginPaddedModal(const char* name, ImGuiWindowFlags flags = 0,
                       const ImVec2& padding = {26.0F, 24.0F}) {
+    if (g_paddock_modal_windows > 0) {
+        return BeginPaddockModalWindow(
+            name, flags | ImGuiWindowFlags_NoScrollbar |
+                      ImGuiWindowFlags_NoScrollWithMouse);
+    }
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, padding);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 18.0F);
     // Modal actions must remain fully visible. Long pages may scroll behind a
@@ -3109,6 +3242,13 @@ void DrawLegacyModImportModal() {
         }
     }
     ImGui::EndPopup();
+}
+
+void DrawPaddockLegacyModImportModal() {
+    const PaddockFlatScope paddock;
+    ++g_paddock_modal_windows;
+    DrawLegacyModImportModal();
+    --g_paddock_modal_windows;
 }
 
 void DrawModLaunchModal() {
@@ -3639,6 +3779,19 @@ SidebarLayout CalculateSidebarLayout(float panel_height, float panel_width) {
             1.0F, content_budget - result.button_height * kButtonCount);
     }
     return result;
+}
+
+// The gap before RESTART / EXIT, with a faint hairline across its middle.
+void SidebarActionGap(float width, float gap) {
+    const float spacing = ImGui::GetStyle().ItemSpacing.y;
+    const ImVec2 cursor = ImGui::GetCursorScreenPos();
+    const float previous_bottom = cursor.y - spacing;
+    const float next_top = cursor.y + gap + spacing;
+    const float y = std::floor((previous_bottom + next_top) * 0.5F);
+    ImGui::GetWindowDrawList()->AddRectFilled(
+        {cursor.x + 6.0F, y}, {cursor.x + width - 6.0F, y + 1.0F},
+        ImGui::GetColorU32(IM_COL32(255, 171, 20, 89)));
+    ImGui::Dummy({0.0F, gap});
 }
 
 bool SidebarButton(const char* label, int page, int& sidebar_selection,
@@ -8892,101 +9045,225 @@ void DrawTexturePackControls(float width) {
     }
 }
 
-void DrawMagicCodes(float width) {
+#include "runtime_mod_library_ui.inl"
+
+// A Magic Code as a painted sign: its phrase on the header board, then what it
+// does and where it applies (.im-magic-cell in the launcher study).
+struct MagicCodeCard {
+    const dkr::runtime::magic_codes::MagicCodeDefinition* definition = nullptr;
+    bool enabled = false;
+};
+
+float MeasureMagicCodeCard(const MagicCodeCard& card, float width) {
+    const PaddockType label = PaddockSign(20.0F, 1.25F);
+    const PaddockType effect = PaddockReading(14.0F, false, 1.55F);
+    const PaddockType where = PaddockReading(11.0F, false, 1.55F);
+    const float label_height = std::max(
+        PaddockTextHeight(label, card.definition->phrase, width - 28.0F - 34.0F), 24.0F);
+    const float header = std::max(66.0F, 16.0F + label_height + 13.0F + 2.0F);
+    const float body = 16.0F +
+        PaddockTextHeight(effect, card.definition->effect, width - 32.0F) + 14.0F +
+        1.0F + 10.0F + PaddockTextHeight(where, card.definition->availability, width - 32.0F) +
+        12.0F;
+    return std::ceil(2.0F + header + body + 2.0F);
+}
+
+void DrawMagicCodeCard(const MagicCodeCard& card, ImVec2 origin, float width,
+                       float height, bool diagnostics) {
     using namespace dkr::runtime::magic_codes;
+    const MagicCodeDefinition& definition = *card.definition;
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    ImGui::PushID(static_cast<int>(definition.internal_index));
+    const float on = PaddockEase(PaddockTween(ImGui::GetID("magic-on"), card.enabled, 0.16F, 0.16F));
+    const ImVec2 end{origin.x + width, origin.y + height};
+    PaddockPanelStyle panel;
+    panel.radii = {10.0F, 22.0F, 10.0F, 10.0F};
+    panel.fill = PaddockRgb(0x0C3047);
+    panel.drop = PaddockRgb(0x041822);
+    panel.drop_offset = 5.0F;
+    panel.ring = PaddockRgb(0x071E2D);
+    panel.ring_width = 2.0F;
+    panel.border_width = 2.0F;
+    PaddockPanel(draw, origin, end, panel);
 
-    static bool expanded = false;
-    const float available_width = std::max(
-        std::min(width, ImGui::GetContentRegionAvail().x), 1.0F);
-    if (!DrawDisclosureButton("MAGIC CODES", "magic-codes", expanded,
-                              available_width)) return;
+    const PaddockType label = PaddockSign(20.0F, 1.25F);
+    const float label_width = width - 28.0F - 34.0F;
+    const float label_height = std::max(PaddockTextHeight(label, definition.phrase, label_width), 24.0F);
+    const float header = std::max(66.0F, 16.0F + label_height + 13.0F + 2.0F);
+    const ImVec2 board_min{origin.x + 2.0F, origin.y + 2.0F};
+    const ImVec2 board_max{end.x - 2.0F, origin.y + 2.0F + header};
+    PaddockFill(draw, board_min, board_max, {8.0F, 20.0F, 0.0F, 0.0F},
+                PaddockApply(PaddockMix(PaddockRgb(0x085B78), PaddockRgb(0x79601C), on)));
+    draw->AddRectFilled({board_min.x, board_max.y - 2.0F}, board_max, PaddockCol(0x042338));
+    const bool checker_on = card.enabled;
+    PaddockChecker(draw, {board_min.x + 12.0F, board_min.y}, 8, 6.0F,
+                   checker_on ? 0x675016U : 0x074961U, checker_on ? 0xFFE29AU : 0xA5DCE5U);
 
-    ImGui::TextWrapped("Changes apply on the next game launch. Retail mode restrictions still apply; codes limited to Tracks mode do not affect Adventure.");
-    ImGui::TextWrapped("One-shot actions stay queued until their native action runs. Leaving a game without using them does not discard them. The Golden Balloon uses the game's normal saving rules: allow the game to save before quitting.");
-    const bool lobby_active = dkr::runtime::netplay::session().presentation_active();
-    if (lobby_active) {
-        ImGui::TextWrapped("Leave the online lobby before changing Magic Codes. This session uses the codes agreed with the host. Credits remain queued for offline play.");
-    }
-    ImGui::BeginDisabled(lobby_active);
-
-    const float item_gap = ImGui::GetStyle().ItemSpacing.x;
-    constexpr float kComfortableMagicCodeColumnWidth = 320.0F;
-    const int columns = std::clamp(static_cast<int>(
-        (available_width + item_gap) /
-        (kComfortableMagicCodeColumnWidth + item_gap)), 1, 3);
-
-    const auto draw_group = [&](bool diagnostics, const char* table_id) {
-        if (!ImGui::BeginTable(table_id, columns,
-                               ImGuiTableFlags_SizingStretchSame,
-                               {available_width, 0.0F})) {
-            return;
-        }
-        for (const auto& definition : kMagicCodeDefinitions) {
-            if (magic_code_is_diagnostic(definition) != diagnostics) continue;
-            ImGui::TableNextColumn();
-            ImGui::PushID(static_cast<int>(definition.internal_index));
-            bool enabled = magic_code_enabled(selected_mask(),
-                                              definition.internal_index);
-            if (ImGui::Checkbox(definition.phrase, &enabled)) {
-                std::string error;
-                if (set_enabled(definition.internal_index, enabled, error)) {
-                    SaveSettings();
-                    g_magic_codes_status = enabled
-                        ? std::string(definition.phrase) +
-                            (magic_code_is_one_shot(definition)
-                                ? " queued until its native action runs."
-                                : " will be active on launch.")
-                        : std::string(definition.phrase) + " disabled.";
-                } else {
-                    g_magic_codes_status = error;
-                }
-            }
-            ImGui::Indent(28.0F);
-            ImGui::PushTextWrapPos(
-                ImGui::GetCursorPosX() +
-                std::max(ImGui::GetContentRegionAvail().x, 1.0F));
-            ImGui::PushStyleColor(ImGuiCol_Text,
-                                  diagnostics ? kRaceRed : kMuted);
-            ImGui::TextWrapped("%s", definition.effect);
-            ImGui::TextWrapped("%s", definition.availability);
-            ImGui::PopStyleColor();
-            ImGui::PopTextWrapPos();
-            ImGui::Unindent(28.0F);
-            ImGui::Dummy({0.0F, 8.0F});
-            ImGui::PopID();
-        }
-        ImGui::EndTable();
-    };
-
-    ImGui::Dummy({0.0F, 8.0F});
-    ImGui::SeparatorText("RACE MODIFIERS");
-    draw_group(false, "magic-code-grid");
-    ImGui::SeparatorText("DIAGNOSTICS - USE WITH CARE");
-    draw_group(true, "magic-code-diagnostics-grid");
-
-    ImGui::Dummy({0.0F, 6.0F});
-    if (ImGui::Button("CLEAR ALL MAGIC CODES", {available_width, 42.0F})) {
+    // The whole board is the checkbox.
+    const float content_top = board_min.y + 16.0F;
+    const float content_height = header - 16.0F - 13.0F - 2.0F;
+    const float check_height = std::max({42.0F, label_height, 24.0F});
+    ImGui::SetCursorScreenPos({board_min.x + 12.0F,
+                               content_top + (content_height - check_height) * 0.5F});
+    bool enabled = card.enabled;
+    if (PaddockCheckbox("##magic", definition.phrase, &enabled, width - 28.0F,
+                        PaddockCheckKind::Magic, &label, 0xFFF3CB)) {
         std::string error;
-        if (clear_all(error)) {
+        if (set_enabled(definition.internal_index, enabled, error)) {
             SaveSettings();
-            g_magic_codes_status = "All launch Magic Codes cleared.";
+            g_magic_codes_status = enabled
+                ? std::string(definition.phrase) +
+                      (magic_code_is_one_shot(definition)
+                           ? " queued until its native action runs."
+                           : " will be active on launch.")
+                : std::string(definition.phrase) + " disabled.";
         } else {
             g_magic_codes_status = error;
+        }
+    }
+    const bool focused = ImGui::IsItemFocused() && ImGui::GetIO().NavVisible;
+
+    const float left = origin.x + 16.0F;
+    const float inner = width - 32.0F;
+    const PaddockType effect = PaddockReading(14.0F, false, 1.55F);
+    const PaddockType where = PaddockReading(11.0F, false, 1.55F);
+    PaddockTextStyle effect_style;
+    effect_style.colour = PaddockCol(diagnostics ? 0xFFBBA6U : 0xDAE8EEU);
+    PaddockTextAt(draw, effect, {left, board_max.y + 16.0F}, inner, definition.effect, effect_style);
+    const float where_height = PaddockTextHeight(where, definition.availability, inner);
+    const float where_top = end.y - 2.0F - 12.0F - where_height;
+    PaddockDashes(draw, {left, where_top - 11.0F}, inner, PaddockCol(0x356078), 1.0F);
+    PaddockTextStyle where_style;
+    where_style.colour = PaddockCol(diagnostics ? 0xFFBBA6U : 0xADC8D6U);
+    PaddockTextAt(draw, where, {left, where_top}, inner, definition.availability, where_style);
+
+    const ImU32 border = PaddockMix(PaddockRgb(0x387E9A), PaddockRgb(0xFFC453), on);
+    PaddockStroke(draw, origin, end, panel.radii, PaddockApply(border), 2.0F);
+    if (focused) {
+        draw->AddRect({origin.x - 4.0F, origin.y - 4.0F}, {end.x + 4.0F, end.y + 4.0F},
+                      PaddockCol(0xFFE293), 14.0F, 0, 2.0F);
+    }
+    ImGui::PopID();
+}
+
+void DrawMagicCodeGrid(float width, bool diagnostics, int enter_index) {
+    using namespace dkr::runtime::magic_codes;
+    const auto mask = selected_mask();
+    std::vector<MagicCodeCard> cards;
+    for (const auto& definition : kMagicCodeDefinitions) {
+        if (magic_code_is_diagnostic(definition) != diagnostics) continue;
+        cards.push_back({&definition, magic_code_enabled(mask, definition.internal_index)});
+    }
+    if (cards.empty()) return;
+    constexpr float kGap = 18.0F;
+    const int fit = std::max(static_cast<int>((width + kGap) / (260.0F + kGap)), 1);
+    const int columns = std::min(fit, static_cast<int>(cards.size()));
+    const float card_width = std::floor((width - kGap * (columns - 1)) / columns);
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    float y = origin.y;
+    for (std::size_t first = 0U; first < cards.size(); first += columns) {
+        const std::size_t last = std::min(first + columns, cards.size());
+        float height = 0.0F;
+        for (std::size_t index = first; index < last; ++index) {
+            height = std::max(height, MeasureMagicCodeCard(cards[index], card_width));
+        }
+        if (ImGui::IsRectVisible({origin.x, y}, {origin.x + width, y + height + 5.0F})) {
+            for (std::size_t index = first; index < last; ++index) {
+                PaddockEnter enter(enter_index + static_cast<int>(index));
+                DrawMagicCodeCard(cards[index],
+                                  {origin.x + (card_width + kGap) * (index - first), y},
+                                  card_width, height, diagnostics);
+            }
+        }
+        y += height + kGap;
+    }
+    ImGui::SetCursorScreenPos(origin);
+    ImGui::Dummy({width, y - kGap - origin.y + 5.0F});
+}
+
+void DrawMagicCodesSection(float width, bool lobby_active) {
+    using namespace dkr::runtime::magic_codes;
+    const auto mask = selected_mask();
+    std::size_t selected = 0U;
+    for (const auto& definition : kMagicCodeDefinitions) {
+        if (magic_code_enabled(mask, definition.internal_index)) ++selected;
+    }
+    {
+        PaddockEnter enter(2);
+        PaddockInlineNote(std::to_string(selected) + (selected == 1U ? " code selected" : " codes selected"),
+                          "Conflicting codes are turned off automatically.", width);
+        PaddockGap(18.0F);
+    }
+    {
+        PaddockEnter enter(3);
+        const bool was_open = g_mods_page.disclosures.contains("code-rules");
+        bool open = was_open;
+        PaddockDisclosure disclosure("##code-rules", "When and where do codes apply?", open, width);
+        if (disclosure.Open()) {
+            const PaddockType body = PaddockReading(13.0F, false, 1.55F);
+            PaddockText(body, PaddockRgb(0xABC0CC),
+                        "Changes apply on the next launch. Each code lists its supported modes. "
+                        "Tracks-only codes do not affect Adventure.", disclosure.Inner());
+            PaddockGap(13.0F);
+            PaddockText(body, PaddockRgb(0xABC0CC),
+                        "One-time actions stay queued until used. After granting a Golden Balloon, "
+                        "let the game save before quitting.", disclosure.Inner());
+        }
+        disclosure.End();
+        if (open != was_open) {
+            if (open) g_mods_page.disclosures.insert("code-rules");
+            else g_mods_page.disclosures.erase("code-rules");
+        }
+        PaddockGap(16.0F);
+    }
+    if (lobby_active) {
+        PaddockText(PaddockReading(14.0F, false, 1.55F), PaddockRgb(0xFFF6DA),
+                    "Leave the online lobby before changing Magic Codes. This session uses the codes "
+                    "agreed with the host. Credits remain queued for offline play.", width);
+        PaddockGap(13.0F);
+    }
+    PaddockGap(8.0F);
+    ImGui::BeginDisabled(lobby_active);
+    PaddockGap(24.0F);
+    {
+        PaddockEnter enter(4);
+        PaddockSeparatorText("RACE MODIFIERS", width);
+    }
+    PaddockGap(16.0F);
+    DrawMagicCodeGrid(width, false, 5);
+    PaddockGap(13.0F);
+    {
+        PaddockEnter enter(7);
+        const bool was_open = g_mods_page.disclosures.contains("diagnostics");
+        bool open = was_open;
+        PaddockDisclosure disclosure("##diagnostics", "Advanced: diagnostic codes", open, width);
+        if (disclosure.Open()) DrawMagicCodeGrid(disclosure.Inner(), true, 7);
+        disclosure.End();
+        if (open != was_open) {
+            if (open) g_mods_page.disclosures.insert("diagnostics");
+            else g_mods_page.disclosures.erase("diagnostics");
+        }
+        PaddockGap(16.0F);
+        PaddockGap(6.0F);
+        if (PaddockButton("CLEAR ALL MAGIC CODES", PaddockButtonKind::Flat, width)) {
+            std::string error;
+            if (clear_all(error)) {
+                SaveSettings();
+                g_magic_codes_status = "All launch Magic Codes cleared.";
+            } else {
+                g_magic_codes_status = error;
+            }
         }
     }
     ImGui::EndDisabled();
     const auto pending_queue_error = queue_error();
     if (!pending_queue_error.empty()) {
-        ImGui::PushStyleColor(ImGuiCol_Text, kRaceRed);
-        ImGui::TextWrapped("Magic Code queue could not be saved: %s. A completed action may still be queued on the next launch.", pending_queue_error.c_str());
-        ImGui::PopStyleColor();
+        PaddockGap(13.0F);
+        PaddockText(PaddockReading(13.0F, false, 1.55F), PaddockRgb(0xFFBBA6),
+                    "Magic Code queue could not be saved: " + pending_queue_error +
+                        ". A completed action may still be queued on the next launch.", width);
     }
-    if (!g_magic_codes_status.empty()) {
-        ImGui::Dummy({0.0F, 8.0F});
-        ImGui::PushStyleColor(ImGuiCol_Text, kWarm);
-        ImGui::TextWrapped("%s", g_magic_codes_status.c_str());
-        ImGui::PopStyleColor();
-    }
+    PaddockFeedback(g_magic_codes_status, width);
 }
 
 // The player points the folder picker at the track's .dkrmap, at its own
@@ -9046,7 +9323,7 @@ void FinishTrackImport(
                                    outcome.temp_root)) {
             g_track_import_status =
                 "Installed " + outcome.track_id +
-                " and its HD textures. Use Restart & play in HD to load them.";
+                " and its HD textures. They load the next time the game starts.";
         } else {
             tracks_ns::discard_install_temp(outcome.temp_root);
             g_track_import_status =
@@ -9064,6 +9341,10 @@ void FinishTrackImport(
     }
 
     EnsureModernForTracks();
+    g_mods_page.section = kModsSectionLibrary;
+    g_mods_page.category = 0;
+    g_mods_page.entered_at = PaddockClock();
+    ResetLibraryFilters(g_mod_browsers[0]);
 }
 
 // A track is a folder or a zip, so this is a folder picker rather than a file
@@ -9121,276 +9402,416 @@ void ChooseWorkingFolderWithDialog() {
         : "A picker is already open.";
 }
 
-// Track Lab. Arming a track makes get_track_id_to_load resolve to it, so any
-// race the player starts lands on that track. Pairing that with the retail
-// L+Z restart gives an authoring loop that never returns to a menu.
-void DrawTrackLabControls(float width) {
+// A track shipped as a ZIP takes the same install path as a folder; only the
+// picker differs. Like every picker it runs on the dialog-job thread.
+void ImportTrackZipWithDialog() {
+    const bool started = StartDialogJob([]() -> std::function<void()> {
+        namespace tracks_ns = dkr::runtime::custom_tracks;
+        if (NFD_Init() != NFD_OKAY) {
+            return [] {
+                g_track_import_status =
+                    "The system file picker could not be initialized.";
+            };
+        }
+        nfdu8char_t* result = nullptr;
+        const nfdfilteritem_t filters[] = {{"DKR-R track", "zip"}};
+        const nfdresult_t dialog =
+            NFD_OpenDialogU8(&result, filters, 1, nullptr);
+        std::filesystem::path source;
+        std::string error;
+        if (dialog == NFD_OKAY) {
+            source = std::filesystem::u8path(result);
+            NFD_FreePathU8(result);
+        } else if (dialog == NFD_ERROR) {
+            error = NFD_GetError();
+        }
+        NFD_Quit();
+        if (source.empty()) {
+            return [error] { g_track_import_status = error; };
+        }
+        tracks_ns::InstallOutcome outcome;
+        if (!tracks_ns::install(source, error, &outcome)) {
+            return [error] { g_track_import_status = error; };
+        }
+        return [outcome] { FinishTrackImport(outcome); };
+    });
+    g_track_import_status = started
+        ? "Choose the track ZIP in the file picker..."
+        : "A picker is already open.";
+}
+
+// A working-folder track's <track>-hd.zip goes to the texture-pack importer,
+// filed against the track like an imported copy's pack.
+void InstallWorkingHdPack(const dkr::runtime::custom_tracks::Track& track,
+                          const dkr::runtime::custom_tracks::HdPack& hd) {
+    const dkr::runtime::texture_packs::TrackPackOwner owner{track.id, hd.digest};
+    if (StartTexturePackImport(hd.sibling_archive, &owner)) {
+        g_track_import_status = "Installing HD textures for " + track.name +
+            ". The track stays in your working folder.";
+        EnsureModernForTracks();
+    } else {
+        g_track_import_status =
+            "Another texture-pack import is already running. Try again in a moment.";
+    }
+}
+
+std::string PathLeaf(const std::filesystem::path& path) {
+    return PathUtf8(path.filename());
+}
+
+bool IsWorkingFolderTrack(const dkr::runtime::custom_tracks::Track& track,
+                          const std::filesystem::path& working) {
+    if (working.empty()) return false;
+    std::error_code error;
+    return std::filesystem::equivalent(track.source.parent_path(), working, error) ||
+           track.source.parent_path() == working;
+}
+
+std::vector<DkrLibraryTrack> BuildDkrLibrary(
+    const std::vector<dkr::runtime::custom_tracks::Track>& tracks) {
     namespace tracks_ns = dkr::runtime::custom_tracks;
     namespace packs_ns = dkr::runtime::texture_packs;
-    const std::vector<tracks_ns::Track> installed = tracks_ns::tracks();
-    const std::string armed = tracks_ns::armed_track_id();
-    // The in-game overlay is the only place a full relaunch is meaningful; the
-    // launcher just starts the game, which publishes the texture table anyway.
-    const bool in_game = g_overlay_visible.load(std::memory_order_acquire);
-
-    if (!g_track_lab_modern_notice.empty()) {
-        ImGui::PushStyleColor(ImGuiCol_Text, kWarm);
-        ImGui::TextWrapped("%s", g_track_lab_modern_notice.c_str());
-        ImGui::PopStyleColor();
-        ImGui::Dummy({0.0F, 6.0F});
-    }
-
-    // Two ways in, because they answer different questions. Importing takes a
-    // snapshot, which is what you want for a track you intend to keep. While
-    // authoring it is the wrong shape: a re-export would leave the copy stale.
-    // The working folder is read in place, so exporting again IS the update.
-    const std::filesystem::path working = tracks_ns::working_directory();
-    const float half = (width - 8.0F) * 0.5F;
-
-    // Only one picker at a time, and nothing that rescans while one is open.
-    const bool dialog_open = DialogJobRunning();
-    ImGui::BeginDisabled(dialog_open);
-    if (ImGui::Button("SET WORKING FOLDER", {half, 34.0F})) {
-        ChooseWorkingFolderWithDialog();
-    }
-    ImGui::EndDisabled();
-    ImGui::SameLine(0.0F, 8.0F);
-    ImGui::BeginDisabled(working.empty());
-    if (ImGui::Button("STOP WATCHING", {half, 34.0F})) {
-        tracks_ns::set_working_directory({});
-    }
-    ImGui::EndDisabled();
-
-    ImGui::PushStyleColor(ImGuiCol_Text, working.empty() ? kMuted : kWarm);
-    if (working.empty()) {
-        ImGui::TextWrapped(
-            "Point this at the folder your exporter writes to. Tracks there "
-            "are read in place, so exporting again is the update - no copying "
-            "and nothing to reinstall.");
-    } else {
-        ImGui::TextWrapped("Watching %s", working.string().c_str());
-    }
-    ImGui::PopStyleColor();
-    ImGui::Dummy({0.0F, 6.0F});
-
-    // The authoring loop: export from the editor, rescan here, restart in
-    // place with L+Z. Without this the only way to pick up a re-export is a
-    // relaunch, which throws away the armed track and the auto boot state.
-    ImGui::BeginDisabled(dialog_open);
-    if (ImGui::Button("RESCAN", {width, 28.0F})) {
-        tracks_ns::reload();
-        const std::size_t found = tracks_ns::tracks().size();
-        g_track_import_status =
-            std::to_string(found) + " track(s) after rescan.";
-    }
-    ImGui::Dummy({0.0F, 6.0F});
-
-    if (ImGui::Button("IMPORT A COPY", {width, 28.0F})) {
-        ImportTrackWithDialog();
-    }
-    ImGui::EndDisabled();
-    ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
-    ImGui::TextWrapped(
-        "Copies a .dkrmap in to keep. A later re-export will not reach the "
-        "copy - use the working folder while you are still editing.");
-    ImGui::PopStyleColor();
-    if (!g_track_import_status.empty()) {
-        ImGui::Dummy({0.0F, 4.0F});
-        ImGui::PushStyleColor(ImGuiCol_Text, kWarm);
-        ImGui::TextWrapped("%s", g_track_import_status.c_str());
-        ImGui::PopStyleColor();
-    }
-    ImGui::Dummy({0.0F, 10.0F});
-
-    // The auto-boot control comes first, and outside the "no tracks" guard, so
-    // a setting left over from a since-removed track can always be turned off.
-    if (bool auto_boot = tracks_ns::auto_boot_enabled();
-        !installed.empty() || auto_boot || !armed.empty()) {
-        if (ImGui::Checkbox("Skip the menus on every launch", &auto_boot)) {
-            tracks_ns::set_auto_boot(auto_boot);
+    std::vector<DkrLibraryTrack> library;
+    library.reserve(tracks.size());
+    for (const tracks_ns::Track& track : tracks) {
+        DkrLibraryTrack entry;
+        entry.id = track.id;
+        entry.name = track.name.empty() ? track.id : track.name;
+        entry.author = track.author;
+        entry.source = PathLeaf(track.source);
+        for (const auto& payload : track.entries) entry.bytes += payload.bytes.size();
+        entry.enabled = track.enabled;
+        if (!track.hd_pack_file.empty()) {
+            const packs_ns::TrackPackState pack =
+                packs_ns::track_pack_state(track.id, track.hd_pack_digest);
+            entry.hd_textures = pack.installed && pack.enabled;
+            if (pack.installed) entry.hd_pack_id = pack.pack_id;
         }
-        ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
-        ImGui::TextWrapped(
-            "Boots past the logos, title, file select and character select "
-            "straight into the armed track, as Diddy, single player. Stays on "
-            "until you turn it off; quit a race to reach the menus, restart in "
-            "place with L+Z to reload it.");
-        ImGui::PopStyleColor();
-        if (!armed.empty()) {
-            ImGui::PushStyleColor(ImGuiCol_Text, kWarm);
-            ImGui::TextWrapped(
-                "Track Lab is active. Races you start load the armed track "
-                "until you pick a course in Track Select or stop testing.");
-            ImGui::PopStyleColor();
-        }
-        ImGui::Dummy({0.0F, 10.0F});
+        library.push_back(std::move(entry));
     }
+    return library;
+}
 
-    if (installed.empty()) {
-        ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
-        ImGui::TextWrapped("No custom tracks installed yet.");
-        ImGui::PopStyleColor();
-        return;
-    }
+// A plain paddock card that grows with what is drawn inside it.
+template <typename Content>
+void DrawTaskCard(float width, bool testing, Content&& content) {
+    PaddockBox box(width, {20.0F, 20.0F});
+    content(box.Inner());
+    box.End([testing](ImDrawList* draw, ImVec2 a, ImVec2 b) {
+        PaddockPanelStyle panel;
+        panel.radii = PaddockRound(14.0F);
+        panel.fill = PaddockRgb(0x122A37);
+        panel.ring = testing ? PaddockRgb(0x54C9AD, 128U) : PaddockRgb(0xFFFFFF, 18U);
+        panel.ring_width = 1.0F;
+        PaddockPanel(draw, a, b, panel);
+    });
+}
 
-    ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
-    ImGui::TextWrapped(
-        "Arming a track sends the races you start to it; confirming a course "
-        "in Track Select stops testing. A track with HD textures needs the "
-        "Modern profile - arming or playing one switches to it for you.");
-    ImGui::PopStyleColor();
-    ImGui::Dummy({0.0F, 8.0F});
+void DrawTaskHeading(std::string_view text, float width) {
+    PaddockHeading(text, 23.0F, 0xFFF0C2, width);
+    PaddockGap(8.0F);
+}
 
-    const float button_width = 132.0F;
-    const float manage_width = 84.0F;
-    for (const tracks_ns::Track& track : installed) {
-        const bool is_armed = !armed.empty() && armed == track.id;
-        const std::int32_t level = tracks_ns::resolved_level_id(track.id);
+void DrawTaskParagraph(std::string_view text, float width) {
+    PaddockText(PaddockReading(13.0F, false, 1.6F), PaddockRgb(0xABC0CC), text, width);
+    PaddockGap(13.0F);
+}
 
-        const tracks_ns::HdPack hd = tracks_ns::hd_pack(track.id);
-        const bool declares_pack = !hd.file.empty();
-        const packs_ns::TrackPackState pack_state = declares_pack
-            ? packs_ns::track_pack_state(track.id, hd.digest)
-            : packs_ns::TrackPackState{};
-        const bool pack_ready = pack_state.installed && pack_state.enabled;
-        const bool published = tracks_ns::track_textures_published(track.id);
-        const bool needs_relaunch = pack_ready && !published;
+void DrawToolIntro(std::string_view text, float width) {
+    PaddockText(PaddockReading(14.0F, false, 1.55F), PaddockRgb(0xABC0CC), text, width);
+    PaddockGap(24.0F);
+}
 
-        ImGui::PushID(track.id.c_str());
+// A heading with a link on the right (.mods-library-heading).
+bool DrawHeadingWithLink(std::string_view heading, const char* link, bool link_disabled,
+                         float width) {
+    const PaddockType type = PaddockSign(23.0F, 1.25F);
+    const float link_width = PaddockButtonWidth(link, PaddockButtonKind::Link);
+    const ImVec2 at = ImGui::GetCursorScreenPos();
+    const float height = std::max(type.line, 42.0F);
+    PaddockTextStyle style;
+    style.colour = PaddockCol(0xFFF0C2);
+    style.shadow = PaddockCol(0x031623);
+    PaddockTextAt(ImGui::GetWindowDrawList(), type, {at.x, at.y + (height - type.line) * 0.5F},
+                  width - link_width - 12.0F, heading, style);
+    ImGui::SetCursorScreenPos({at.x + width - link_width, at.y + (height - 42.0F) * 0.5F});
+    ImGui::BeginDisabled(link_disabled);
+    const bool pressed = PaddockButton(link, PaddockButtonKind::Link);
+    ImGui::EndDisabled();
+    ImGui::SetCursorScreenPos(at);
+    ImGui::Dummy({width, height});
+    return pressed;
+}
+
+void DrawTrackLabTrack(const dkr::runtime::custom_tracks::Track& track, float width,
+                       const std::string& armed, bool locked, bool in_game) {
+    namespace tracks_ns = dkr::runtime::custom_tracks;
+    namespace packs_ns = dkr::runtime::texture_packs;
+    const bool is_armed = !armed.empty() && armed == track.id;
+    const std::int32_t level = tracks_ns::resolved_level_id(track.id);
+    const tracks_ns::HdPack hd = tracks_ns::hd_pack(track.id);
+    const bool declares_pack = !hd.file.empty();
+    const packs_ns::TrackPackState pack_state = declares_pack
+        ? packs_ns::track_pack_state(track.id, hd.digest)
+        : packs_ns::TrackPackState{};
+    const bool pack_ready = pack_state.installed && pack_state.enabled;
+    const bool published = tracks_ns::track_textures_published(track.id);
+    const bool needs_relaunch = pack_ready && !published;
+
+    ImGui::PushID(track.id.c_str());
+    DrawTaskCard(width, is_armed, [&](float inner) {
+        const char* action = is_armed ? "STOP TESTING"
+            : declares_pack && pack_ready ? "PLAY IN HD" : "RACE THIS";
+        const PaddockButtonKind kind = is_armed ? PaddockButtonKind::Stop : PaddockButtonKind::Flat;
+        const float action_width = PaddockButtonWidth(action, kind);
+        const float info_width = std::max(inner - action_width - 20.0F, 1.0F);
+
+        // The name, who made it and what artwork it brings.
+        const ImVec2 row = ImGui::GetCursorScreenPos();
         ImGui::BeginGroup();
-        ImGui::TextUnformatted(track.name.c_str());
-        ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
-        if (level >= 0) {
-            ImGui::Text("%s  -  level %d",
-                        track.author.empty() ? "unknown author"
-                                             : track.author.c_str(),
-                        level);
-        } else {
-            // Before the first level load the extended table has not been
-            // built, so no id exists yet. Arming still works; it resolves
-            // when the game asks.
-            ImGui::Text("%s  -  level assigned at launch",
-                        track.author.empty() ? "unknown author"
-                                             : track.author.c_str());
-        }
-        // What the track brings of its own. See-through and animated are the
-        // two things about a texture the game decides from its header, and
-        // the ones an author checks first when a picture looks wrong.
+        PaddockHeading(track.name, 23.0F, 0xFFF0C2, info_width);
+        PaddockGap(5.0F);
+        const PaddockType muted = PaddockReading(14.0F, false, 1.55F);
+        const std::string author = track.author.empty() ? "unknown author" : track.author;
+        PaddockText(muted, PaddockRgb(0xABC0CC),
+                    level >= 0 ? author + "  -  level " + std::to_string(level)
+                               : author + "  -  level assigned at launch",
+                    info_width);
         const tracks_ns::ArtworkSummary art = tracks_ns::artwork(track.id);
         if (art.textures > 0U) {
             std::string line = std::to_string(art.textures) +
                                (art.textures == 1U ? " texture" : " textures");
-            if (art.translucent > 0U) {
-                line += ", " + std::to_string(art.translucent) + " see-through";
-            }
-            if (art.animated > 0U) {
-                line += ", " + std::to_string(art.animated) + " animated";
-            }
-            ImGui::TextUnformatted(line.c_str());
+            if (art.translucent > 0U) line += ", " + std::to_string(art.translucent) + " see-through";
+            if (art.animated > 0U) line += ", " + std::to_string(art.animated) + " animated";
+            PaddockGap(5.0F);
+            PaddockText(muted, PaddockRgb(0xABC0CC), line, info_width);
         }
-        ImGui::PopStyleColor();
         ImGui::EndGroup();
-
-        ImGui::SameLine(width - button_width);
-        const bool play_in_hd = declares_pack && pack_ready;
-        if (is_armed) {
-            ImGui::PushStyleColor(ImGuiCol_Button,
-                                  ImVec4{0.92F, 0.43F, 0.06F, 1.0F});
-            if (ImGui::Button("STOP TESTING", {button_width, 30.0F})) {
+        const float info_height = ImGui::GetItemRectSize().y;
+        ImGui::SetCursorScreenPos({row.x + inner - action_width,
+                                   row.y + std::max((info_height - 42.0F) * 0.5F, 0.0F)});
+        ImGui::BeginDisabled(locked);
+        if (PaddockButton(action, kind)) {
+            if (is_armed) {
                 tracks_ns::arm_track_override(std::string{});
-            }
-            ImGui::PopStyleColor();
-        } else if (ImGui::Button(play_in_hd ? "PLAY IN HD" : "RACE THIS",
-                                 {button_width, 30.0F})) {
-            tracks_ns::arm_track_override(track.id);
-            EnsureModernForTracks();
-            // From the launcher there is no process to relaunch, so skipping
-            // the menus on the coming boot is how the track's textures load.
-            if (needs_relaunch && !in_game) {
-                tracks_ns::set_auto_boot(true);
+            } else {
+                tracks_ns::arm_track_override(track.id);
+                EnsureModernForTracks();
+                // From the launcher there is no process to relaunch, so skipping
+                // the menus on the coming boot is how the track's textures load.
+                if (needs_relaunch && !in_game) tracks_ns::set_auto_boot(true);
             }
         }
+        ImGui::EndDisabled();
+        ImGui::SetCursorScreenPos(row);
+        ImGui::Dummy({inner, std::max(info_height, 42.0F)});
 
-        // One status line per track, never a second panel.
+        // One status line for the track's HD pack.
         if (declares_pack) {
-            const char* hd_line = nullptr;
-            ImVec4 hd_colour = kMuted;
+            const char* hd_line = "HD textures: pack not installed";
+            unsigned colour = 0xABC0CC;
             if (pack_ready && published) {
                 hd_line = "HD textures: ready";
-                hd_colour = kAccent;
+                colour = 0x1AC2A3;
             } else if (pack_ready) {
                 hd_line = "HD textures: restart to load";
-                hd_colour = kWarm;
+                colour = 0xFFAB14;
             } else if (hd.sibling_mismatch ||
                        (pack_state.installed && !pack_state.digest_matches)) {
                 hd_line = "HD textures: pack does not match this export";
-                hd_colour = kWarm;
+                colour = 0xFFAB14;
             } else if (pack_state.installed) {
                 hd_line = "HD textures: pack disabled";
-            } else {
-                hd_line = "HD textures: pack not installed";
             }
-            ImGui::PushStyleColor(ImGuiCol_Text, hd_colour);
-            ImGui::TextUnformatted(hd_line);
-            ImGui::PopStyleColor();
+            PaddockGap(10.0F);
+            const ImVec2 line = ImGui::GetCursorScreenPos();
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+            draw->AddRectFilled(line, {line.x + inner, line.y + 1.0F}, PaddockCol(0xFFFFFF, 18U));
+            const bool can_install = !hd.sibling_archive.empty() &&
+                (!pack_state.installed || !pack_state.digest_matches);
+            const char* install = pack_state.installed ? "Update HD textures" : "Install HD textures";
+            float buttons = 0.0F;
+            if (pack_state.installed) buttons += PaddockButtonWidth("Manage", PaddockButtonKind::Flat) + 12.0F;
+            if (can_install) buttons += PaddockButtonWidth(install, PaddockButtonKind::Flat) + 12.0F;
+            const PaddockType status_type = PaddockReading(12.0F, false, 1.5F);
+            const float top = line.y + 11.0F;
+            const float row_height = buttons > 0.0F ? 42.0F : status_type.line;
+            PaddockTextStyle style;
+            style.colour = PaddockCol(colour);
+            PaddockTextAt(draw, status_type, {line.x, top + (row_height - status_type.line) * 0.5F},
+                          inner - buttons, hd_line, style);
+            float x = line.x + inner;
+            ImGui::BeginDisabled(locked);
+            if (can_install) {
+                x -= PaddockButtonWidth(install, PaddockButtonKind::Flat);
+                ImGui::SetCursorScreenPos({x, top});
+                if (PaddockButton(install, PaddockButtonKind::Flat)) {
+                    InstallWorkingHdPack(track, hd);
+                }
+                x -= 12.0F;
+            }
+            ImGui::EndDisabled();
             if (pack_state.installed) {
-                ImGui::SameLine(width - manage_width);
-                if (ImGui::Button("Manage", {manage_width, 22.0F})) {
+                x -= PaddockButtonWidth("Manage", PaddockButtonKind::Flat);
+                ImGui::SetCursorScreenPos({x, top});
+                if (PaddockButton("Manage", PaddockButtonKind::Flat)) {
                     g_texture_pack_manage_id = pack_state.pack_id;
                     g_texture_pack_manage_request = true;
                 }
             }
+            ImGui::SetCursorScreenPos(line);
+            ImGui::Dummy({inner, 11.0F + row_height});
         }
 
-        // The one step no layout removes: the 3D texture table is published
-        // once at boot, so a track added since needs a relaunch. Make it one
-        // click that does the whole chain.
+        // The 3D texture table is published once at boot, so a track added
+        // since needs a relaunch. In game that is one click.
         if (needs_relaunch && in_game) {
-            ImGui::Dummy({0.0F, 3.0F});
-            ImGui::PushStyleColor(ImGuiCol_Button, kAccent);
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kWarm);
-            if (ImGui::Button("RESTART & PLAY IN HD", {width, 30.0F})) {
+            PaddockGap(12.0F);
+            if (PaddockButton("RESTART & PLAY IN HD", PaddockButtonKind::Primary, inner)) {
                 tracks_ns::arm_track_override(track.id);
                 EnsureModernForTracks();
                 tracks_ns::set_auto_boot(true);
                 SaveSettings();
-                g_lifecycle_request.store(
-                    dkr::runtime::ui::LifecycleRequest::Restart,
-                    std::memory_order_release);
+                g_lifecycle_request.store(dkr::runtime::ui::LifecycleRequest::Restart,
+                                          std::memory_order_release);
                 g_overlay_visible.store(false, std::memory_order_release);
             }
-            ImGui::PopStyleColor(2);
         }
-
-        ImGui::PopID();
-        ImGui::Dummy({0.0F, 8.0F});
-    }
+    });
+    ImGui::PopID();
 }
 
-#include "runtime_mod_library_ui.inl"
+// Track Lab: author tools for .dkrmap tracks read in place from a working
+// folder. Arming a track sends every race the player starts to it.
+void DrawTrackLabSection(float width, bool locked,
+                         const std::vector<dkr::runtime::custom_tracks::Track>& tracks) {
+    namespace tracks_ns = dkr::runtime::custom_tracks;
+    const std::filesystem::path working = tracks_ns::working_directory();
+    const std::string armed = tracks_ns::armed_track_id();
+    const bool in_game = g_overlay_visible.load(std::memory_order_acquire);
+    const bool picking = DialogJobRunning();
+    const bool lab_locked = locked || picking;
+    std::vector<const tracks_ns::Track*> watched;
+    for (const auto& track : tracks) {
+        if (IsWorkingFolderTrack(track, working)) watched.push_back(&track);
+    }
+    const bool auto_boot = tracks_ns::auto_boot_enabled();
 
-// .dkrmap tracks, next to the legacy courses on MODS / HACKS.
-void DrawTrackLabSection(float width) {
-    static bool track_lab_expanded = true;
-    if (!DrawDisclosureButton("TRACK LAB - .DKRMAP TRACKS", "track-lab",
-                              track_lab_expanded, width)) {
-        return;
+    {
+        PaddockEnter enter(2);
+        // Track Lab draws in Accurate too - the list and arming. Every arm path
+        // goes through Modern first, so Accurate never loads a custom track.
+        if (!dkr::runtime::enhancements::modern_presentation_enabled()) {
+            PaddockGap(14.0F);
+            PaddockAlert("Testing a track uses the Modern graphics profile. Selecting a test "
+                         "track switches to it automatically.", width);
+            PaddockGap(14.0F);
+        }
+        PaddockFeedback(g_track_lab_modern_notice, width);
     }
-    ImGui::Dummy({0.0F, 6.0F});
-    // Track Lab draws in Accurate too - the list, import and arming. What
-    // stays impossible in Accurate is a custom track actually loading, and
-    // it still is: every arm/play path here goes through Modern first, so
-    // the "untouched regression baseline" is never a custom track.
-    if (!dkr::runtime::enhancements::modern_presentation_enabled()) {
-        ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
-        ImGui::TextWrapped(
-            "You are on the Accurate profile. Importing, arming or playing "
-            "a track switches to Modern - it needs it - and tells you so. "
-            "Accurate itself stays the untouched reference.");
-        ImGui::PopStyleColor();
-        ImGui::Dummy({0.0F, 6.0F});
+    {
+        PaddockEnter enter(3);
+        PaddockGap(20.0F);
+        DrawTaskCard(width, false, [&](float inner) {
+            DrawTaskHeading("Work on a track", inner);
+            DrawTaskParagraph("Keep your .dkrmap tracks in one working folder. Re-export in place, "
+                              "then rescan to find updates and new tracks. Remove a track from this "
+                              "folder to remove it from the list.", inner);
+            DrawTaskParagraph("Track files stay in this folder. HD texture packs are installed "
+                              "separately in AppData.", inner);
+            if (!working.empty()) PaddockFeedback("Watching: " + PathUtf8(working), inner);
+            ImGui::BeginDisabled(lab_locked);
+            if (PaddockButton(working.empty() ? "Choose working folder" : "Change folder")) {
+                ChooseWorkingFolderWithDialog();
+            }
+            if (!working.empty()) {
+                ImGui::SameLine(0.0F, 10.0F);
+                if (PaddockButton("Stop watching", PaddockButtonKind::Link)) {
+                    tracks_ns::set_working_directory({});
+                    tracks_ns::arm_track_override(std::string{});
+                    tracks_ns::set_auto_boot(false);
+                }
+            }
+            ImGui::EndDisabled();
+        });
+        PaddockGap(26.0F);
     }
-    DrawTrackLabControls(width);
+    {
+        PaddockEnter enter(4);
+        PaddockFeedback(g_track_import_status, width);
+        const std::string heading = "Test tracks (" + std::to_string(watched.size()) + ")";
+        if (DrawHeadingWithLink(heading, "Rescan tracks", lab_locked || working.empty(), width)) {
+            tracks_ns::reload();
+            const std::size_t found = tracks_ns::tracks().size();
+            g_track_import_status = std::to_string(found) + " track(s) after rescan.";
+        }
+        PaddockGap(20.0F);
+    }
+    {
+        PaddockEnter enter(5);
+        if (watched.empty()) {
+            PaddockBox box(width, {24.0F, 48.0F});
+            const PaddockType heading = PaddockSign(23.0F, 1.25F);
+            const ImVec2 at = ImGui::GetCursorScreenPos();
+            PaddockTextStyle heading_style;
+            heading_style.colour = PaddockCol(0xFFF0C2);
+            heading_style.shadow = PaddockCol(0x031623);
+            heading_style.centre = true;
+            float y = PaddockTextAt(ImGui::GetWindowDrawList(), heading, at, box.Inner(),
+                                    "No test tracks yet", heading_style, true) + 13.0F;
+            PaddockTextStyle body_style;
+            body_style.colour = PaddockCol(0xABC0CC);
+            body_style.centre = true;
+            y += PaddockTextAt(ImGui::GetWindowDrawList(), PaddockReading(14.0F, false, 1.55F),
+                               {at.x, at.y + y}, box.Inner(),
+                               "Choose the folder containing your .dkrmap tracks to start testing.",
+                               body_style) + 13.0F;
+            ImGui::Dummy({box.Inner(), y});
+            box.End([](ImDrawList* draw, ImVec2 a, ImVec2 b) {
+                PaddockPanelStyle panel;
+                panel.radii = PaddockRound(14.0F);
+                panel.fill = PaddockRgb(0xFFFFFF, 4U);
+                panel.ring = PaddockRgb(0xFFFFFF, 13U);
+                panel.ring_width = 1.0F;
+                PaddockPanel(draw, a, b, panel);
+            });
+        } else {
+            DrawToolIntro("Select a track, then launch the game. Races load that track until you "
+                          "stop testing or choose a course in Track Select.", width);
+            for (std::size_t index = 0U; index < watched.size(); ++index) {
+                if (index != 0U) PaddockGap(12.0F);
+                DrawTrackLabTrack(*watched[index], width, armed, lab_locked, in_game);
+            }
+        }
+    }
+    // Shown whenever it could matter, so a setting left over from a removed
+    // track can always be turned off.
+    if (!watched.empty() || auto_boot || !armed.empty()) {
+        PaddockEnter enter(6);
+        PaddockGap(22.0F);
+        PaddockBox box(width, {18.0F, 18.0F});
+        bool boot = auto_boot;
+        ImGui::BeginDisabled(lab_locked);
+        if (PaddockCheckbox("##auto-boot", "Skip the menus on every launch", &boot, box.Inner())) {
+            tracks_ns::set_auto_boot(boot);
+        }
+        ImGui::EndDisabled();
+        PaddockGap(6.0F);
+        PaddockText(PaddockReading(13.0F, false, 1.55F), PaddockRgb(0xABC0CC),
+                    "Start directly in the selected test track as Diddy, in single player. Stays on "
+                    "until you turn it off. Quit a race to reach the menus; L+Z reloads the track.",
+                    box.Inner());
+        if (!armed.empty()) {
+            const auto found = std::find_if(tracks.begin(), tracks.end(),
+                [&armed](const tracks_ns::Track& track) { return track.id == armed; });
+            PaddockFeedback("Selected for testing: " +
+                                (found != tracks.end() ? found->name : armed),
+                            box.Inner());
+        }
+        box.End([](ImDrawList* draw, ImVec2 a, ImVec2 b) {
+            PaddockFill(draw, a, b, PaddockRound(12.0F), PaddockCol(0xFFFFFF, 4U));
+        });
+    }
 }
 
 // One shared single-pack modal, reachable from a texture browser card's
@@ -9412,68 +9833,527 @@ void DrawSharedTexturePackModal() {
     DrawTexturePackRemovalModal();
 }
 
-void DrawModsHacks(float width, bool game_running = false) {
-    DrawPageHeading("MODS / HACKS");
-    ImGui::TextDisabled("Choose the island rules that DKR-R applies on the next launch.");
-    ImGui::Dummy({0.0F, 16.0F});
-    DrawMagicCodes(width);
-    ImGui::Dummy({0.0F, 10.0F});
-    const auto mods=g_legacy_imports.snapshot();
-    const bool mods_locked=game_running || dkr::runtime::netplay::session().active() || g_mod_launch.snapshot().modal;
-    ImGui::BeginDisabled(mods_locked||mods.busy);
-    if(ImGui::Button("IMPORT MODS - TRACKS AND CHARACTERS",{width,46}))ImportLegacyModWithDialog();
-    ImGui::EndDisabled();
-    DrawColoredWrapped(kMuted,"Offline mods. Changes apply on next game launch.");
-    if(mods.busy) {
-        const auto cursor=ImGui::GetCursorScreenPos();const float angle=static_cast<float>(ImGui::GetTime()*4);
-        auto* draw=ImGui::GetWindowDrawList();draw->PathArcTo({cursor.x+10,cursor.y+10},8,angle,angle+4.5F,20);
-        draw->PathStroke(ImGui::GetColorU32(kWarm),0,2);ImGui::Dummy({24,22});ImGui::SameLine();
-        ImGui::TextWrapped("%s",mods.stage.c_str());
+// A disclosure whose open state lives with the page.
+template <typename Content>
+void DrawPageDisclosure(const std::string& key, const std::string& label, float width,
+                        Content&& content) {
+    const bool was_open = g_mods_page.disclosures.contains(key);
+    bool open = was_open;
+    PaddockDisclosure disclosure(("##" + key).c_str(), label.c_str(), open, width);
+    if (disclosure.Open()) content(disclosure.Inner());
+    disclosure.End();
+    if (open != was_open) {
+        if (open) g_mods_page.disclosures.insert(key);
+        else g_mods_page.disclosures.erase(key);
     }
-    if(mods_locked)DrawColoredWrapped(kWarm,"Browsing is available. Return to the launcher and leave the lobby to change mods.");
-    if(!mods.busy&&!mods.succeeded&&!mods.result.empty())DrawColoredWrapped(kWarm,"A library operation needs attention. Open Mod Help / Import Details below.");
-    if(!g_legacy_import_status.empty())ImGui::TextWrapped("%s",g_legacy_import_status.c_str());
-    ImGui::Dummy({0,10});
-    static bool tracks_expanded=true;
-    if(DrawDisclosureButton("CUSTOM TRACKS","legacy-tracks",tracks_expanded,width)) {
-        ImGui::Dummy({0,6});DrawModCardBrowser(width,false,mods,mods_locked);
+}
+
+void DrawModHelpSection(float width, const dkr::mods::ModLibraryView& mods, bool locked) {
+    using dkr::mods::TrackCatalog;
+    const PaddockType note = PaddockReading(13.0F, false, 1.6F);
+    const bool library_locked = locked || mods.busy;
+    {
+        PaddockEnter enter(2);
+        PaddockGap(20.0F);
+        const bool two_columns = width >= 640.0F;
+        const float card_width = two_columns ? std::floor((width - 16.0F) * 0.5F) : width;
+        const float text_width = card_width - 40.0F;
+        const PaddockType heading = PaddockSign(23.0F, 1.25F);
+        constexpr std::array<std::string_view, 3> steps{{
+            "Use Import mods to choose a legacy patch or a DKR track.",
+            "Load your original ROM in Play. Legacy patches need it for preparation; DKR tracks can be "
+            "imported before this step.",
+            "Enable legacy tracks for Track Select. Installed DKR tracks appear automatically in the "
+            "in-game track menu.",
+        }};
+        constexpr std::array<std::string_view, 2> safety{{
+            "Each enabled legacy mod set uses separate Adventure saves and Controller Paks.",
+            "Hiding a legacy mod turns it off and keeps its files. Removing it keeps your saves and "
+            "original files.",
+        }};
+        const auto list_height = [&] {
+            float height = 0.0F;
+            for (std::size_t index = 0U; index < steps.size(); ++index) {
+                if (index != 0U) height += 10.0F;
+                height += PaddockTextHeight(note, steps[index], text_width - 18.0F);
+            }
+            return height;
+        };
+        const float heading_a = PaddockTextHeight(heading, "From import to race", text_width, true);
+        const float heading_b = PaddockTextHeight(heading, "Your progress stays safe", text_width, true);
+        const float card_a = 40.0F + heading_a + 8.0F + list_height();
+        const float card_b = 40.0F + heading_b + 8.0F +
+            PaddockTextHeight(note, safety[0], text_width) + 13.0F +
+            PaddockTextHeight(note, safety[1], text_width);
+        const float shared = two_columns ? std::max(card_a, card_b) : 0.0F;
+        const ImVec2 origin = ImGui::GetCursorScreenPos();
+        const auto card = [&](ImVec2 at, float min_height, const auto& content) {
+            ImGui::SetCursorScreenPos(at);
+            PaddockBox box(card_width, {20.0F, 20.0F}, min_height);
+            content(box.Inner());
+            return box.End([](ImDrawList* draw, ImVec2 a, ImVec2 b) {
+                PaddockPanelStyle panel;
+                panel.radii = PaddockRound(14.0F);
+                panel.fill = PaddockRgb(0x122A37);
+                panel.ring = PaddockRgb(0xFFFFFF, 18U);
+                panel.ring_width = 1.0F;
+                PaddockPanel(draw, a, b, panel);
+            });
+        };
+        const float first = card(origin, shared, [&](float inner) {
+            DrawTaskHeading("From import to race", inner);
+            for (std::size_t index = 0U; index < steps.size(); ++index) {
+                if (index != 0U) PaddockGap(10.0F);
+                const ImVec2 at = ImGui::GetCursorScreenPos();
+                const std::string number = std::to_string(index + 1U) + ". ";
+                const float number_width = PaddockMeasure(note, number);
+                PaddockDrawRun(ImGui::GetWindowDrawList(), note, {at.x + 18.0F - number_width, at.y},
+                               PaddockCol(0xABC0CC), number.data(), number.data() + number.size());
+                ImGui::SetCursorScreenPos({at.x + 18.0F, at.y});
+                PaddockText(note, PaddockRgb(0xABC0CC), steps[index], inner - 18.0F);
+                ImGui::SetCursorScreenPos({at.x, ImGui::GetCursorScreenPos().y});
+                ImGui::Dummy({0.0F, 0.0F});
+            }
+        });
+        const ImVec2 second_at = two_columns ? ImVec2{origin.x + card_width + 16.0F, origin.y}
+                                             : ImVec2{origin.x, origin.y + first + 16.0F};
+        const float second = card(second_at, shared, [&](float inner) {
+            DrawTaskHeading("Your progress stays safe", inner);
+            DrawTaskParagraph(safety[0], inner);
+            PaddockText(note, PaddockRgb(0xABC0CC), safety[1], inner);
+        });
+        const float total = two_columns ? std::max(first, second) : first + 16.0F + second;
+        ImGui::SetCursorScreenPos(origin);
+        ImGui::Dummy({width, total});
+        PaddockGap(26.0F);
     }
-    ImGui::Dummy({0,10});
-    DrawTrackLabSection(width);
-    ImGui::Dummy({0,10});
-    static bool characters_expanded=true;
-    if(DrawDisclosureButton("CUSTOM CHARACTERS","legacy-characters",characters_expanded,width)) {
-        ImGui::Dummy({0,6});DrawModCardBrowser(width,true,mods,mods_locked);
+    {
+        PaddockEnter enter(3);
+        DrawPageDisclosure("versions", "ROM versions and compatibility", width, [](float inner) {
+            PaddockText(PaddockReading(13.0F, false, 1.55F), PaddockRgb(0xABC0CC),
+                        "Legacy patches need their exact source ROM. Tracks are prepared for your "
+                        "imported US v1.0 or v1.1 ROMs; characters are validated for either version. "
+                        "Native DKR tracks do not need patch preparation.", inner);
+        });
+        PaddockGap(16.0F);
     }
-    ImGui::Dummy({0,10});
-    static bool details_expanded=false;
-    if(DrawDisclosureButton("MOD HELP / IMPORT DETAILS","legacy-reviews",details_expanded,width)) {
-        ImGui::TextWrapped("Import a .xdelta or ZIP. Tracks and characters are detected automatically and added without replacing the originals. Enabled tracks appear below the original worlds in Track Select, with wooden-frame previews. Up to two custom characters join the original selection stage.");
-        ImGui::TextWrapped("Import the patch's exact source Game Pak once. Track variants are prepared for your imported US v 1.0/v 1.1 Game Paks; characters are validated for either revision. Source-file limitations still apply.");
-        ImGui::TextWrapped("Custom mods are offline-only. Modded games use separate Adventure saves and Controller Paks per enabled mod set. Hiding deactivates a mod. Removal never deletes your saves or original files.");
-        if(!mods.result.empty())ImGui::TextWrapped("%s",mods.result.c_str());
-        ImGui::BeginDisabled(mods_locked||mods.busy);
-        if(ImGui::Button("REFRESH MOD LIBRARIES",{width,38}))g_legacy_imports.refresh();
-        if(ImGui::Button("DEACTIVATE ALL CUSTOM TRACKS",{width,38}))g_legacy_imports.disable_all(dkr::mods::TrackCatalog::Kind::Track);
-        if(ImGui::Button("DEACTIVATE ALL CUSTOM CHARACTERS",{width,38}))g_legacy_imports.disable_all(dkr::mods::TrackCatalog::Kind::Character);
-        ImGui::EndDisabled();
-        std::set<std::string> shown;
-        for(const auto& item:mods.imports->items) {
-            ImGui::Separator();ImGui::TextWrapped("%s - %s",item.name.c_str(),item.kind.c_str());
-            for(const auto& warning:item.warnings)DrawColoredWrapped(kWarm,warning);
-            if(shown.insert(item.review).second) {
-                ImGui::PushID(item.review.c_str());ImGui::BeginDisabled(mods_locked||mods.busy);
-                if(ImGui::Button("PREPARE THIS IMPORT AGAIN",{width,38})) {
-                    std::vector<std::filesystem::path> roms;
-                    for(const auto& entry:LoadRomCatalog()){if(roms.size()==8)break;roms.push_back(entry.path);}
-                    g_legacy_imports.prepare_review(item.review,std::move(roms));
+    {
+        PaddockEnter enter(4);
+        ImGui::BeginDisabled(library_locked);
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        float x = at.x;
+        float y = at.y;
+        constexpr std::array<const char*, 3> actions{{
+            "Refresh library", "Turn off legacy tracks", "Turn off all characters"}};
+        for (std::size_t index = 0U; index < actions.size(); ++index) {
+            const float button = PaddockButtonWidth(actions[index], PaddockButtonKind::Plain);
+            if (x > at.x && x + button > at.x + width) {
+                x = at.x;
+                y += 52.0F;
+            }
+            ImGui::SetCursorScreenPos({x, y});
+            if (PaddockButton(actions[index])) {
+                if (index == 0U) {
+                    g_legacy_imports.refresh();
+                } else {
+                    g_legacy_imports.disable_all(index == 1U ? TrackCatalog::Kind::Track
+                                                             : TrackCatalog::Kind::Character);
                 }
-                ImGui::EndDisabled();ImGui::PopID();
-                ImGui::TextWrapped("Re-preparing explicitly reinstalls removed entries from this import. Hidden entries stay hidden.");
+            }
+            x += button + 10.0F;
+        }
+        ImGui::EndDisabled();
+        ImGui::SetCursorScreenPos(at);
+        ImGui::Dummy({width, y + 42.0F - at.y});
+        PaddockGap(14.0F);
+        if (!mods.result.empty()) PaddockFeedback(mods.result, width);
+    }
+    {
+        PaddockEnter enter(5);
+        PaddockGap(16.0F);
+        PaddockHeading("Legacy import history", 23.0F, 0xFFF0C2, width);
+        PaddockGap(8.0F);
+        DrawToolIntro("Preparing an import again adds support for your current ROM and reinstalls "
+                      "removed entries. Hidden mods stay hidden.", width);
+    }
+    PaddockEnter enter(6);
+    if (mods.imports == nullptr || mods.imports->items.empty()) {
+        PaddockText(PaddockReading(14.0F, false, 1.55F), PaddockRgb(0xFFF6DA),
+                    "No imports yet. Start with Import mods.", width);
+        return;
+    }
+    // Group every item under its review, in first-seen order.
+    std::vector<std::string> order;
+    std::map<std::string, std::vector<const dkr::mods::ImportReviewItem*>> groups;
+    for (const auto& item : mods.imports->items) {
+        auto [found, added] = groups.try_emplace(item.review);
+        if (added) order.push_back(item.review);
+        found->second.push_back(&item);
+    }
+    for (std::size_t group = 0U; group < order.size(); ++group) {
+        const auto& items = groups[order[group]];
+        std::string title;
+        for (const auto* item : items) {
+            if (!title.empty()) title += ", ";
+            title += item->name;
+        }
+        ImGui::PushID(static_cast<int>(group));
+        DrawPageDisclosure("import-" + order[group], title, width, [&](float inner) {
+            for (const auto* item : items) {
+                PaddockGap(12.0F);
+                PaddockText(PaddockReading(14.0F, true, 1.55F), PaddockRgb(0xFFF6DA),
+                            item->name + " / " + item->kind, inner);
+                for (std::string warning : item->warnings) {
+                    for (std::size_t at = warning.find("Game Pak"); at != std::string::npos;
+                         at = warning.find("Game Pak", at)) {
+                        warning.replace(at, 8U, "ROM");
+                    }
+                    PaddockGap(4.0F);
+                    PaddockText(PaddockReading(13.0F, false, 1.55F), PaddockRgb(0xFFCF83),
+                                warning, inner);
+                }
+                PaddockGap(12.0F);
+            }
+            ImGui::BeginDisabled(library_locked || g_mod_browser_revision == 0U);
+            if (PaddockButton("Prepare this import again")) {
+                g_legacy_imports.prepare_review(order[group], ModReviewRoms());
+            }
+            ImGui::EndDisabled();
+        });
+        ImGui::PopID();
+        PaddockGap(16.0F);
+    }
+}
+
+void DrawModsLibrarySection(float width, const dkr::mods::ModLibraryView& mods,
+                            bool mods_locked,
+                            const std::vector<DkrLibraryTrack>& dkr_tracks) {
+    const bool locked = mods_locked || mods.busy;
+    const std::size_t track_count = g_mod_browsers[0].all.size() + dkr_tracks.size();
+    const std::size_t character_count = g_mod_browsers[1].all.size();
+    {
+        PaddockEnter enter(0);
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        const int chosen = DrawLibraryCategories(g_mods_page.category, track_count, character_count);
+        const float row = ImGui::GetItemRectSize().y;
+        if (chosen != g_mods_page.category) {
+            g_mods_page.category = chosen;
+            g_mods_page.entered_at = PaddockClock();
+        }
+        const float refresh = PaddockButtonWidth("Refresh library", PaddockButtonKind::Link);
+        ImGui::SetCursorScreenPos({at.x + width - refresh, at.y + (row - 42.0F) * 0.5F});
+        ImGui::BeginDisabled(locked);
+        if (PaddockButton("Refresh library##library", PaddockButtonKind::Link)) {
+            g_legacy_imports.refresh();
+            dkr::runtime::custom_tracks::reload();
+        }
+        ImGui::EndDisabled();
+        ImGui::SetCursorScreenPos(at);
+        ImGui::Dummy({width, row});
+        PaddockGap(20.0F);
+    }
+    const bool characters = g_mods_page.category == 1;
+    if (!characters) {
+        PaddockEnter enter(1);
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        const PaddockType type = PaddockReading(12.0F, false, 1.5F);
+        const ImVec2 tag = PaddockFormatTagSize(PaddockFormat::Legacy);
+        float x = at.x;
+        const float text_top = at.y + (tag.y - type.line) * 0.5F;
+        PaddockFormatTag(draw, {x, at.y}, PaddockFormat::Legacy);
+        x += tag.x + 8.0F;
+        constexpr std::string_view legacy = "Original-ROM patches";
+        PaddockDrawRun(draw, type, {x, text_top}, PaddockCol(0xC0D4DF), legacy.data(),
+                       legacy.data() + legacy.size());
+        x += PaddockMeasure(type, legacy) + 8.0F + 12.0F;
+        PaddockFormatTag(draw, {x, at.y}, PaddockFormat::Dkr);
+        x += PaddockFormatTagSize(PaddockFormat::Dkr).x + 8.0F;
+        constexpr std::string_view native = "Native .dkrmap tracks";
+        PaddockDrawRun(draw, type, {x, text_top}, PaddockCol(0xC0D4DF), native.data(),
+                       native.data() + native.size());
+        ImGui::Dummy({width, tag.y});
+        PaddockGap(16.0F);
+        PaddockFeedback(g_track_import_status, width);
+    }
+    DrawModCardBrowser(width, characters, mods, mods_locked, dkr_tracks, [] {
+        g_mods_page.request_import_chooser = true;
+    });
+    PaddockEnter enter(7);
+    PaddockGap(22.0F);
+    PaddockText(PaddockReading(12.0F, false, 1.5F), PaddockRgb(0x9CB2BE),
+                "Installed DKR tracks appear automatically in the in-game track menu. Enable legacy "
+                "mods to include them. Track Lab is for development and testing.", width);
+}
+
+void DrawModsHacks(float available_width, bool game_running = false) {
+    namespace tracks_ns = dkr::runtime::custom_tracks;
+    // Each visit starts with every section closed.
+    const int frame = ImGui::GetFrameCount();
+    if (g_mods_page.context != ImGui::GetCurrentContext() ||
+        g_mods_page.last_frame != frame - 1) {
+        g_mods_page.context = ImGui::GetCurrentContext();
+        g_mods_page.section = -1;
+        g_mods_page.filters_open = false;
+        g_mods_page.disclosures.clear();
+    }
+    g_mods_page.last_frame = frame;
+
+    const float width = std::min(available_width, 1400.0F);
+    const float indent = std::floor((available_width - width) * 0.5F);
+    if (indent > 0.0F) ImGui::Indent(indent);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {0.0F, 0.0F});
+
+    const auto mods = g_legacy_imports.snapshot();
+    const bool lobby = dkr::runtime::netplay::session().active();
+    const bool mods_locked = game_running || lobby || g_mod_launch.snapshot().modal;
+    const bool picking = DialogJobRunning();
+    const unsigned revision = g_mod_browser_revision;
+    const std::vector<tracks_ns::Track> tracks = tracks_ns::tracks();
+    const std::vector<DkrLibraryTrack> dkr_tracks = BuildDkrLibrary(tracks);
+    const std::string armed = tracks_ns::armed_track_id();
+    const auto go_to_play = [] { g_page_navigation_request = kPagePlay; };
+    // Card caches follow the library snapshots even while My mods is closed.
+    for (const bool characters : {false, true}) {
+        auto& browser = g_mod_browsers[characters ? 1 : 0];
+        const auto snapshot = characters ? mods.characters : mods.tracks;
+        if (browser.snapshot != snapshot) {
+            browser.snapshot = snapshot;
+            browser.all = snapshot != nullptr
+                ? dkr::mods::browser::cards(*snapshot, characters)
+                : std::vector<dkr::mods::browser::Card>{};
+            browser.filter_key.clear();
+        }
+    }
+
+    // Header: the page title and the import sign.
+    {
+        const ImVec2 header = ImGui::GetCursorScreenPos();
+        const char* import_label = "Import mods";
+        const float import_width = PaddockImportButtonWidth(import_label);
+        const bool stacked = width < 700.0F;
+        const float text_width = stacked ? width : width - import_width - 24.0F;
+        ImGui::BeginGroup();
+        PaddockGap(7.0F);
+        DrawPageHeading("MODS / HACKS", false, 48.0F);
+        PaddockGap(9.0F);
+        PaddockText(PaddockReading(14.0F, false, 1.55F), PaddockRgb(0xABC0CC),
+                    "Your tracks, racers and race modifiers.", text_width);
+        ImGui::EndGroup();
+        const float title_height = ImGui::GetItemRectSize().y;
+        const ImVec2 import_at = stacked
+            ? ImVec2{header.x, header.y + title_height + 16.0F}
+            : ImVec2{header.x + width - import_width,
+                     header.y + std::round((title_height - 56.0F) * 0.5F)};
+        ImGui::SetCursorScreenPos(import_at);
+        ImGui::BeginDisabled(mods_locked || mods.busy || picking);
+        if (PaddockImportButton(import_label, width < 420.0F ? width : 0.0F)) {
+            g_mods_page.request_import_chooser = true;
+        }
+        ImGui::EndDisabled();
+        const float header_height = stacked ? title_height + 16.0F + 56.0F
+                                            : std::max(title_height, 56.0F);
+        ImGui::SetCursorScreenPos(header);
+        ImGui::Dummy({width, header_height});
+        PaddockGap(26.0F);
+    }
+
+    // The ROM line.
+    {
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        std::size_t enabled = 0U;
+        for (const auto& snapshot : {mods.tracks, mods.characters}) {
+            if (snapshot == nullptr) continue;
+            std::set<std::string> counted;
+            for (const auto& item : snapshot->tracks) {
+                if (item.enabled && !item.hidden && counted.insert(item.id).second) ++enabled;
+            }
+        }
+        const std::string status = revision != 0U
+            ? std::to_string(enabled) + " legacy mods enabled. Changes apply on the next launch."
+            : "No ROM loaded. Choose your original Diddy Kong Racing ROM to play or prepare legacy mods.";
+        const char* link = revision != 0U ? "Go to Play" : "Choose ROM";
+        const PaddockType type = PaddockReading(13.0F, false, 1.55F);
+        const PaddockType link_type = PaddockReading(14.0F, true, 1.5F);
+        const float link_width = PaddockMeasure(link_type, link);
+        const bool side_by_side = width - link_width - 24.0F >= 300.0F;
+        const float text_width = side_by_side ? width - link_width - 24.0F : width;
+        const float text_height = PaddockTextHeight(type, status, text_width);
+        float height = 4.0F;
+        if (side_by_side) {
+            const float row = std::max(text_height, 40.0F);
+            PaddockTextStyle style;
+            style.colour = PaddockCol(0xC3D3DC);
+            PaddockTextAt(ImGui::GetWindowDrawList(), type,
+                          {at.x, at.y + 4.0F + (row - text_height) * 0.5F}, text_width, status, style);
+            ImGui::SetCursorScreenPos({at.x + width - link_width, at.y + 4.0F + (row - 40.0F) * 0.5F});
+            if (PaddockTextLink(link)) go_to_play();
+            height += row;
+        } else {
+            ImGui::SetCursorScreenPos({at.x, at.y + 4.0F});
+            PaddockText(type, PaddockRgb(0xC3D3DC), status, width);
+            PaddockGap(12.0F);
+            if (PaddockTextLink(link)) go_to_play();
+            height += text_height + 12.0F + 40.0F;
+        }
+        height += 16.0F;
+        ImGui::GetWindowDrawList()->AddRectFilled({at.x, at.y + height}, {at.x + width, at.y + height + 1.0F},
+                                                  PaddockCol(0x325365));
+        ImGui::SetCursorScreenPos(at);
+        ImGui::Dummy({width, height + 1.0F});
+    }
+
+    // The armed Track Lab track.
+    if (!armed.empty()) {
+        const auto found = std::find_if(tracks.begin(), tracks.end(),
+            [&armed](const tracks_ns::Track& track) { return track.id == armed; });
+        const std::string name = found != tracks.end() ? found->name : armed;
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        const PaddockType type = PaddockReading(14.0F, false, 1.5F);
+        const PaddockType strong = PaddockReading(14.0F, true, 1.5F);
+        constexpr std::string_view lead = "Track Lab test: ";
+        const float text_top = at.y + 8.0F + (42.0F - type.line) * 0.5F;
+        PaddockDrawRun(draw, type, {at.x, text_top}, PaddockCol(0xC6DCE6), lead.data(),
+                       lead.data() + lead.size());
+        const std::string shown = PaddockEllipsize(strong, name, width - 160.0F - PaddockMeasure(type, lead));
+        PaddockDrawRun(draw, strong, {at.x + PaddockMeasure(type, lead), text_top},
+                       PaddockCol(0xFFE4A5), shown.data(), shown.data() + shown.size());
+        const float stop = PaddockButtonWidth("Stop testing", PaddockButtonKind::Link);
+        ImGui::SetCursorScreenPos({at.x + width - stop, at.y + 8.0F});
+        ImGui::BeginDisabled(mods_locked || mods.busy);
+        if (PaddockButton("Stop testing##armed", PaddockButtonKind::Link)) {
+            tracks_ns::arm_track_override(std::string{});
+            tracks_ns::set_auto_boot(false);
+        }
+        ImGui::EndDisabled();
+        draw->AddRectFilled({at.x, at.y + 58.0F}, {at.x + width, at.y + 59.0F}, PaddockCol(0x325365));
+        ImGui::SetCursorScreenPos(at);
+        ImGui::Dummy({width, 59.0F});
+    }
+
+    // What needs attention.
+    bool mismatch = false;
+    if (revision != 0U) {
+        for (const auto& browser : g_mod_browsers) {
+            for (const auto& card : browser.all) {
+                if (card.item.enabled && !card.item.hidden &&
+                    !dkr::mods::browser::compatible(card, revision)) {
+                    mismatch = true;
+                }
             }
         }
     }
+    if (mismatch) {
+        PaddockGap(14.0F);
+        PaddockAlert("Some legacy mods were prepared for a different ROM version. Use Prepare mod "
+                     "on their cards.", width);
+    }
+    if (game_running) {
+        PaddockGap(14.0F);
+        PaddockAlert("Browsing is available. Return to the launcher and leave the lobby to change mods.",
+                     width);
+    } else if (mods_locked) {
+        PaddockGap(14.0F);
+        PaddockAlert("You are in an online lobby. Leave the lobby to change mods or Magic Codes.", width);
+    }
+    if (mods.busy) {
+        PaddockGap(14.0F);
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        const PaddockType type = PaddockReading(14.0F, false, 1.5F);
+        PaddockSpinner(ImGui::GetWindowDrawList(), {at.x + 10.0F, at.y + type.line * 0.5F}, 8.0F,
+                       2.0F, PaddockCol(0xFFAB14));
+        ImGui::SetCursorScreenPos({at.x + 30.0F, at.y});
+        PaddockText(type, PaddockRgb(0xFFD388), mods.stage + "\xE2\x80\xA6", width - 30.0F);
+    }
+    if (!mods.busy && !mods.succeeded && !mods.result.empty()) {
+        PaddockGap(14.0F);
+        PaddockAlert(mods.result, width);
+    }
+    if (!g_legacy_import_status.empty()) PaddockFeedback(g_legacy_import_status, width);
+
+    // The section switcher.
+    PaddockGap(24.0F);
+    {
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        constexpr std::array<const char*, 4> labels{{
+            "My mods##section", "Magic Codes##section", "Track Lab##section",
+            "Help & imports##section"}};
+        const float tab_height = PaddockSectionTabHeight();
+        float x = at.x;
+        float y = at.y;
+        for (int index = 0; index < 4; ++index) {
+            const float tab = PaddockSectionTabWidth(labels[index]);
+            if (x > at.x && x + tab > at.x + width) {
+                x = at.x;
+                y += tab_height + 10.0F;
+            }
+            ImGui::SetCursorScreenPos({x, y});
+            const bool open = g_mods_page.section == index;
+            if (PaddockSectionTab(labels[index], open)) {
+                g_mods_page.section = open ? -1 : index;
+                g_mods_page.entered_at = PaddockClock();
+            }
+            x += tab + 10.0F;
+        }
+        const float bottom = y + tab_height + 16.0F;
+        ImGui::GetWindowDrawList()->AddRectFilled({at.x, bottom}, {at.x + width, bottom + 2.0F},
+                                                  PaddockCol(0x24495B));
+        ImGui::SetCursorScreenPos(at);
+        ImGui::Dummy({width, bottom + 2.0F - at.y});
+    }
+
+    if (g_mods_page.section >= 0) {
+        PaddockGap(24.0F);
+        const bool tools_locked = mods_locked;
+        if (g_mods_page.section == kModsSectionLibrary) {
+            DrawModsLibrarySection(width, mods, mods_locked, dkr_tracks);
+        } else {
+            constexpr std::array<std::array<const char*, 2>, 4> titles{{
+                {{"", ""}},
+                {{"Magic Codes", "Choose a race modifier. Enabled codes apply on your next launch."}},
+                {{"Track Lab", "Create and test your own .dkrmap tracks. These tools are for track creators."}},
+                {{"Help & imports",
+                  "Manage your library, review imports and prepare mods for a different ROM."}},
+            }};
+            const auto& [title, description] = titles[static_cast<std::size_t>(g_mods_page.section)];
+            {
+                PaddockEnter enter(0);
+                PaddockHeading(title, 30.0F, 0xFFCD67, width);
+                PaddockGap(8.0F);
+            }
+            {
+                PaddockEnter enter(1);
+                DrawToolIntro(description, width);
+            }
+            if (g_mods_page.section == kModsSectionMagic) {
+                DrawMagicCodesSection(width, dkr::runtime::netplay::session().presentation_active());
+            } else if (g_mods_page.section == kModsSectionTrackLab) {
+                DrawTrackLabSection(width, tools_locked || mods.busy, tracks);
+            } else {
+                DrawModHelpSection(width, mods, mods_locked);
+            }
+        }
+    }
+
+    ImGui::PopStyleVar();
+    if (indent > 0.0F) ImGui::Unindent(indent);
+
+    DrawModImportChooser({revision != 0U, mods_locked || mods.busy || picking,
+                          [] { ImportLegacyModWithDialog(); },
+                          [] { ImportTrackWithDialog(); },
+                          [] { ImportTrackZipWithDialog(); },
+                          go_to_play});
+    DrawDkrTrackDetails(dkr_tracks, revision != 0U);
+    if (!g_mods_page.manage_pack_request.empty()) {
+        g_texture_pack_manage_id = g_mods_page.manage_pack_request;
+        g_texture_pack_manage_request = true;
+        g_mods_page.manage_pack_request.clear();
+    }
+    const PaddockFlatScope paddock;
+    ++g_paddock_modal_windows;
     DrawSharedTexturePackModal();
+    --g_paddock_modal_windows;
 }
 
 void DrawTextures(float width) {
@@ -12124,7 +13004,13 @@ dkr::runtime::ui::StartupResult dkr::runtime::ui::run_startup_screen(
         ImGui::BeginGroup();
         BrandBlock(nav_inner_width, sidebar_layout.logo_size);
         ImGui::Dummy({0.0F, sidebar_layout.brand_gap});
+        if (g_page_navigation_request >= 0) {
+            page = g_page_navigation_request;
+            sidebar_selection = page;
+            g_page_navigation_request = -1;
+        }
         ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);
+        ++g_race_button_sidebar;
         LauncherSidebarButton("PLAY", 0, page, sidebar_selection,
                               nav_inner_width, sidebar_layout.button_height);
         LauncherSidebarButton("GRAPHICS", 1, page, sidebar_selection,
@@ -12143,7 +13029,7 @@ dkr::runtime::ui::StartupResult dkr::runtime::ui::run_startup_screen(
                               nav_inner_width, sidebar_layout.button_height);
         LauncherSidebarButton("ABOUT DKR-R", 7, page, sidebar_selection,
                               nav_inner_width, sidebar_layout.button_height);
-        ImGui::Dummy({0.0F, sidebar_layout.action_section_gap});
+        SidebarActionGap(nav_inner_width, sidebar_layout.action_section_gap);
         ImGui::PushStyleColor(
             ImGuiCol_Button,
             sidebar_selection == launcher_page_count
@@ -12165,6 +13051,7 @@ dkr::runtime::ui::StartupResult dkr::runtime::ui::run_startup_screen(
             request_quit_popup = true;
         }
         ImGui::PopStyleColor();
+        --g_race_button_sidebar;
         ImGui::PopItemFlag();
         ImGui::EndGroup();
         ImGui::PopStyleVar();
@@ -12172,8 +13059,9 @@ dkr::runtime::ui::StartupResult dkr::runtime::ui::run_startup_screen(
         ImGui::EndChild();
         ImGui::PopStyleColor(2);
         ImGui::SetCursorPos({content_x, outer_margin});
-        constexpr ImVec4 launcher_content_color{
-            0.035F, 0.085F, 0.12F, 0.90F};
+        // MODS / HACKS reads best on an almost opaque panel.
+        const ImVec4 launcher_content_color{
+            0.035F, 0.085F, 0.12F, page == kPageModsHacks ? 0.98F : 0.90F};
         if (launcher_profile.enabled()) ImGui::GetWindowDrawList()->AddCallback(LauncherDrawProfileRange::begin, &underlay_profile);
         DrawLinuxSoftwarePanelUnderlay(
             {right_width, content_height}, launcher_content_color);
@@ -12380,7 +13268,7 @@ dkr::runtime::ui::StartupResult dkr::runtime::ui::run_startup_screen(
         ImGui::End();
         PumpDialogJob();
         DrawTexturePackImportModal();
-        DrawLegacyModImportModal();
+        DrawPaddockLegacyModImportModal();
         DrawModLaunchModal();
         DrawTextEntryKeyboard();
         DrawOnlineNotification();
@@ -12393,6 +13281,7 @@ dkr::runtime::ui::StartupResult dkr::runtime::ui::run_startup_screen(
             DrawOnlineErrorNotification();
         }
 
+        ApplyPaddockModalDim();
         ImGui::Render();
         const auto launcher_ui_build_finished =
             std::chrono::steady_clock::now();
@@ -12663,7 +13552,15 @@ void dkr::runtime::ui::draw(RT64::Application& application) {
         ImGui::Dummy({0.0F, sidebar_layout.brand_gap});
         // The sidebar is a shoulder-button rail. Excluding its widgets from
         // ImGui navigation keeps the D-pad entirely inside the content panel.
+        if (g_page_navigation_request >= 0) {
+            sidebar_selection = g_page_navigation_request;
+            g_overlay_page = sidebar_selection;
+            g_overlay_sidebar_selection.store(sidebar_selection,
+                                              std::memory_order_release);
+            g_page_navigation_request = -1;
+        }
         ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);
+        ++g_race_button_sidebar;
         SidebarButton("PLAY", 0, sidebar_selection, nav_inner_width,
                       sidebar_layout.button_height);
         SidebarButton("GRAPHICS", 1, sidebar_selection, nav_inner_width,
@@ -12682,7 +13579,7 @@ void dkr::runtime::ui::draw(RT64::Application& application) {
                       sidebar_layout.button_height);
         SidebarButton("ABOUT DKR-R", 7, sidebar_selection, nav_inner_width,
                       sidebar_layout.button_height);
-        ImGui::Dummy({0.0F, sidebar_layout.action_section_gap});
+        SidebarActionGap(nav_inner_width, sidebar_layout.action_section_gap);
         ImGui::PushStyleColor(
             ImGuiCol_Button,
             sidebar_selection == kMenuPageCount
@@ -12710,6 +13607,7 @@ void dkr::runtime::ui::draw(RT64::Application& application) {
             request_quit_popup = true;
         }
         ImGui::PopStyleColor();
+        --g_race_button_sidebar;
         ImGui::PopItemFlag();
         ImGui::EndGroup();
         ImGui::PopStyleVar();
@@ -12793,7 +13691,7 @@ void dkr::runtime::ui::draw(RT64::Application& application) {
     }
     PumpDialogJob();
     DrawTexturePackImportModal();
-    DrawLegacyModImportModal();
+    DrawPaddockLegacyModImportModal();
     DrawTextEntryKeyboard();
     DrawFpsOverlay(application);
     DrawNetworkOverlay();
@@ -12804,6 +13702,7 @@ void dkr::runtime::ui::draw(RT64::Application& application) {
     DrawOnlineFailureModal();
     if (show_online_error) DrawOnlineErrorNotification();
     if (show_online_notification) DrawOnlineNotification();
+    ApplyPaddockModalDim();
     inspector->endFrame();
 }
 

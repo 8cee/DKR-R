@@ -55,6 +55,16 @@ overlay. Its supplied licence is packaged as `Jumpman-LICENSE.txt`; source
 SHA-256 is
 `36D473DF3E85F93AEECB619EF06432F4F6DCC572773AAB668D09C8AD9A04C334`.
 
+Selawik by Microsoft Corporation (<https://github.com/microsoft/Selawik>,
+release 1.01) is the embedded reading face of the MODS / HACKS page. It is an
+open-source, metric-compatible stand-in for Segoe UI, licensed under the SIL
+Open Font License 1.1, packaged as `Selawik-OFL.txt`. The Regular and Semibold
+TTF sources have SHA-256
+`E9D98518D8AC2817782A9A382430463A2E0793EA68350B695BB727D9A830EE1C` and
+`0A9E9D0549A10F24BEF9B3A29E06FE6E0B5C21E7A784C503B048A307841A7783`.
+Segoe UI itself is never bundled: on Windows the launcher reads the copy the
+operating system installed, and uses Selawik when it is absent.
+
 ## CRT masks
 
 Six optional PNG display masks are included for Modern presentation. They are

@@ -210,7 +210,9 @@ without legacy courses installed, so the player's choice is what loads. Auto
 boot and the L+Z restart never pass through that confirmation and keep
 reloading the armed track.
 
-Track Lab lives on **MODS / HACKS**, under the legacy **CUSTOM TRACKS** list.
+Track Lab is a section of **MODS / HACKS**. It lists the tracks in the
+author's working folder; installed tracks appear beside the legacy courses in
+**My mods**, marked **DKR**.
 
 ## Verified end to end
 
@@ -469,12 +471,12 @@ filled with a guess.
 
 ## Installing
 
-Track Lab (**MODS / HACKS**) has an **IMPORT A COPY** button that takes a folder
-through the system picker.
-Point it at the `.dkrmap`, at the track's own folder, or at the folder that
-holds both the `.dkrmap` and its `<track>-hd.zip`; a `.zip` of the `.dkrmap`
-(optionally wrapping the pack too) also works. The manifest is validated before
-anything is copied.
+**MODS / HACKS → Import mods → DKR-R tracks** installs a copy. **Choose
+.dkrmap folder** takes the `.dkrmap`, the track's own folder, or the folder that
+holds both the `.dkrmap` and its `<track>-hd.zip`; **Choose track ZIP** takes a
+`.zip` of the `.dkrmap` (optionally wrapping the pack too). Both run the system
+picker off the graphics thread. The manifest is validated before anything is
+copied, and the installed track is shown in **My mods**.
 
 If the track declares an `hdTexturePack` and the matching `<track>-hd.zip` is
 found beside it, DKR-R imports that pack in the same gesture -
@@ -484,8 +486,8 @@ texture-pack browser's default list. A pack whose stamped `textureDigest` does
 not match the manifest's is left out with a note; the track still plays, in
 64x32.
 
-Track Lab draws in the Accurate profile as well now. The list, the import and
-arming all work there; what stays impossible in Accurate is a custom track
+Track Lab and the importer work in the Accurate profile as well. The list, the
+import and arming all work there; what stays impossible in Accurate is a custom track
 actually *loading*, because importing, arming or playing one switches the
 profile to Modern first (with a note saying so). Copying a folder into
 `custom-tracks/` by hand still works.

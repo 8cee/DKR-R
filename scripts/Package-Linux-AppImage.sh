@@ -121,6 +121,7 @@ install -m 0644 "${PROJECT_ROOT}/extern/sdl3/LICENSE.txt" "${APPDIR}/usr/share/d
 install -m 0644 "${PROJECT_ROOT}/extern/n64-modern-runtime/COPYING" "${APPDIR}/usr/share/doc/dkr-port/licenses/N64ModernRuntime-COPYING.txt"
 install -m 0644 "${PROJECT_ROOT}/extern/n64-modern-runtime/N64Recomp/LICENSE" "${APPDIR}/usr/share/doc/dkr-port/licenses/N64Recomp-LICENSE.txt"
 install -m 0644 "${PROJECT_ROOT}/packaging/licenses/Jumpman-LICENSE.txt" "${APPDIR}/usr/share/doc/dkr-port/licenses/Jumpman-LICENSE.txt"
+install -m 0644 "${PROJECT_ROOT}/packaging/licenses/Selawik-OFL.txt" "${APPDIR}/usr/share/doc/dkr-port/licenses/Selawik-OFL.txt"
 install -m 0644 "${PROJECT_ROOT}/packaging/licenses/CRT-FILTERS-NOTICE.md" "${APPDIR}/usr/share/doc/dkr-port/licenses/CRT-FILTERS-NOTICE.md"
 install -m 0644 "${PROJECT_ROOT}/packaging/licenses/SDL-GAMECONTROLLERDB-LICENSE.txt" "${APPDIR}/usr/share/doc/dkr-port/licenses/SDL-GAMECONTROLLERDB-LICENSE.txt"
 install -m 0644 "${PROJECT_ROOT}/packaging/licenses/GEKKONET-LICENSE.txt" "${APPDIR}/usr/share/doc/dkr-port/licenses/GEKKONET-LICENSE.txt"

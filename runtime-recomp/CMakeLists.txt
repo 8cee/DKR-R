@@ -498,6 +498,7 @@ if(DKR_RUNTIME_BUILD_GENERATED)
             src/game/f3ddkr_rt64.cpp
             src/game/generated/jumpman_font.c
             src/game/generated/racing_banana_font.c
+            src/game/generated/selawik_font.c
             src/game/rt64_renderer.cpp
             src/game/runtime_crt_overlay.cpp
             src/game/runtime_rice_texture_import.cpp
@@ -1065,6 +1066,7 @@ if(BUILD_TESTING)
 
         add_executable(DKRHudEditorTests tests/hud_basic_settings_tests.cpp
             src/game/generated/racing_banana_font.c src/game/generated/jumpman_font.c
+            src/game/generated/selawik_font.c
             "${DKR_RT64_SOURCE}/src/contrib/imgui/backends/imgui_impl_sdlrenderer2.cpp")
         target_include_directories(DKRHudEditorTests PRIVATE
             "${CMAKE_CURRENT_LIST_DIR}/src/game"

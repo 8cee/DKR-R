@@ -16,7 +16,8 @@ set(_mod_imgui "${DKRPORT_ROOT}/extern/rt64/src/contrib/imgui")
 add_executable(DKRLegacyModBrowserUiTests ../legacy_mod_browser_ui_tests.cpp
     "${_mod_imgui}/imgui.cpp" "${_mod_imgui}/imgui_draw.cpp"
     "${_mod_imgui}/imgui_widgets.cpp" "${_mod_imgui}/imgui_tables.cpp"
-    ../../src/game/generated/racing_banana_font.c ../../src/game/generated/jumpman_font.c)
+    ../../src/game/generated/racing_banana_font.c ../../src/game/generated/jumpman_font.c
+    ../../src/game/generated/selawik_font.c)
 target_include_directories(DKRLegacyModBrowserUiTests PRIVATE "${_mod_imgui}" ../../src/game)
 target_link_libraries(DKRLegacyModBrowserUiTests PRIVATE DKRLegacyImportLibrary)
 if(MSVC)
