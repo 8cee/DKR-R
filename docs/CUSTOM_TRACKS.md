@@ -214,6 +214,18 @@ Track Lab is a section of **MODS / HACKS**. It lists the tracks in the
 author's working folder; installed tracks appear beside the legacy courses in
 **My mods**, marked **DKR**.
 
+**Test-race setup.** Auto boot prepares a single-player Tracks race as Diddy,
+fills the opponents through the native unlock-dependent character selection,
+and commits all eight racer headers before entering the track. Skipping the
+menus must not skip that initialization: zeroed racer characters are Krunch.
+At the existing `level_load` scene-reset hook, gameplay on the armed track
+uses the addon's exported default vehicle and synchronizes the player vehicle
+selections read by the AI. This applies again on L+Z and track changes, without
+rerolling the roster on restart. Menu previews and disarmed Track Select keep
+their native choices. Special debug vehicles remain load arguments; the
+three-entry player selection arrays use an allowed normal vehicle. Authored
+setup-point overrides and boss-specific spawning still run in the native code.
+
 ## Verified end to end
 
 A smoke test installed one track whose payload is a byte copy of Ancient

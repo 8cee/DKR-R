@@ -54,6 +54,14 @@ struct GamePayload {
     RecompiledEntrypoint sound_bank_play;
     RecompiledEntrypoint sound_parameter;
     RecompiledEntrypoint sound_spatial_point;
+    RecompiledEntrypoint titlescreen_controller_assign;
+    RecompiledEntrypoint input_assign_players;
+    RecompiledEntrypoint charselect_assign_ai;
+    RecompiledEntrypoint init_racer_headers;
+    RecompiledEntrypoint leveltable_vehicle_default;
+    RecompiledEntrypoint leveltable_vehicle_usable;
+    RecompiledEntrypoint set_level_default_vehicle;
+    RecompiledEntrypoint set_time_trial_enabled;
     void (*register_sections)();
 };
 

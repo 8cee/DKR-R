@@ -358,8 +358,10 @@ extern "C" std::uint32_t dkr_audio_event_queue_next(
     return recover(true, "non-progressing");
 }
 
+extern "C" void dkr_custom_tracks_prepare_vehicle(std::uint8_t*, recomp_context*);
+
 extern "C" void dkr_runtime_scene_reset(std::uint8_t* rdram,
-                                          recomp_context*) {
+                                          recomp_context* context) {
 #if DKR_RUNTIME_HAS_RT64
     // A transition can abandon one of these scoped patches before its normal
     // end hook runs. Restore any in-place matrix edit while the outgoing scene
@@ -407,6 +409,11 @@ extern "C" void dkr_runtime_scene_reset(std::uint8_t* rdram,
 #endif
     g_title_intro_tail_gate.reset();
     ResetAudioEventGuards();
+    // The existing level_load entry hook covers both initial Track Lab loads
+    // and restarts. Synchronize its vehicle before retail consumes r7.
+    if (rdram && context) {
+        dkr_custom_tracks_prepare_vehicle(rdram, context);
+    }
 }
 
 void dkr::runtime::presentation::postrace_presentation_begin_frame() {

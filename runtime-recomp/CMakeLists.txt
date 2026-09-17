@@ -1306,6 +1306,18 @@ if(BUILD_TESTING)
             "${DKR_RT64_SOURCE}/src/contrib"
         )
         add_test(NAME DKRCustomTracks COMMAND DKRCustomTracksTests)
+        add_executable(DKRCustomTracksRuntimeTests
+            tests/custom_tracks_runtime_tests.cpp
+            src/game/custom_tracks_hooks.cpp
+            src/game/custom_tracks.cpp
+            "${DKR_RT64_SOURCE}/src/contrib/miniz/miniz.c"
+        )
+        target_include_directories(DKRCustomTracksRuntimeTests PRIVATE
+            "${CMAKE_CURRENT_LIST_DIR}/src/game"
+            "${DKR_RT64_SOURCE}/src/contrib"
+            "${DKRPORT_ROOT}/extern/n64-modern-runtime/N64Recomp/include"
+        )
+        add_test(NAME DKRCustomTracksRuntime COMMAND DKRCustomTracksRuntimeTests)
     endif()
     add_executable(DKRPresentationMarkerPolicyTests
         tests/presentation_marker_policy_tests.cpp)
@@ -1479,7 +1491,7 @@ if(BUILD_TESTING)
         DKRDeterminismStateHash80Tests
     )
     if(DKR_RUNTIME_BUILD_RT64)
-        list(APPEND DKR_ASSERT_TEST_TARGETS DKRCustomTracksTests)
+        list(APPEND DKR_ASSERT_TEST_TARGETS DKRCustomTracksTests DKRCustomTracksRuntimeTests)
     endif()
     foreach(DKR_ASSERT_TEST_TARGET IN LISTS DKR_ASSERT_TEST_TARGETS)
         if(MSVC)

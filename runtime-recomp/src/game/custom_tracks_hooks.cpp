@@ -338,24 +338,99 @@ extern "C" void dkr_custom_tracks_auto_boot(std::uint8_t* rdram,
     if (level < 0 || level > kMenuResultMapMask) {
         return; // Not resolvable yet; stay armed and try the next frame.
     }
+    const auto* payload = dkr::runtime::active_payload();
+    if (!payload || !payload->titlescreen_controller_assign || !payload->input_assign_players ||
+        !payload->unlock_drumstick || !payload->unlock_tt || !payload->charselect_assign_ai ||
+        !payload->init_racer_headers || !payload->set_time_trial_enabled) {
+        return;
+    }
     if (!tracks_ns::consume_auto_boot()) {
         return;
     }
 
-    // These two globals are not in AddressTable: its per-revision initialisers
-    // are positional, so inserting fields into the middle silently shifts every
-    // later address. Selecting here keeps the change local and auditable.
-    const bool rev_a = dkr::runtime::revision_addresses::gSelectedRevision ==
-                       dkr::runtime::rom::Revision::UsV80;
-    const std::uint32_t character_slots = rev_a ? 0x80126990U : 0x801263F0U;
-    const std::uint32_t game_num_players = rev_a ? 0x80123A80U : 0x80123500U;
+    namespace addresses = dkr::runtime::revision_addresses;
+    const auto invoke = [&](dkr::runtime::RecompiledEntrypoint function, gpr argument = 0) {
+        recomp_context call = *context;
+        call.r4 = argument;
+        function(rdram, &call);
+        return call.r2;
+    };
+    // Reproduce the nonvisual character/game-select setup skipped by auto boot.
+    // Merely writing a player slot leaves Settings::racers zeroed (all Krunch).
+    invoke(payload->titlescreen_controller_assign, 0);
+    invoke(payload->input_assign_players);
+    // The character-mod adapter shares charselect_assign_ai's native commit
+    // boundary and expects every active player to have confirmed a character.
+    for (int player = 0; player < 4; ++player) {
+        MEM_B(player, rdram_address(addresses::CharacterSelectStatus)) = player == 0 ? 2 : 0;
+    }
+    MEM_W(0, rdram_address(addresses::NumberOfReadyPlayers)) = 1;
+    MEM_W(0, rdram_address(addresses::TracksMode)) = 1;
+    invoke(payload->set_time_trial_enabled, 0);
 
-    // Player one races as Diddy. The remaining slots stay as the game left
-    // them, which is what the retail AI fill already expects.
-    MEM_B(0, rdram_address(character_slots)) = kCharacterDiddy;
-    // load_next_ingame_level stores players minus one, so zero is a single
-    // player.
-    MEM_W(0, rdram_address(game_num_players)) = 0U;
+    // charselect_assign_ai needs the unlock-dependent table normally selected
+    // by menu_character_select_init. Do not load that menu's graphics/music.
+    // Addresses verified against ver/symbols/symbol_addrs.us.v{77,80}.txt.
+    const bool rev_a = addresses::gSelectedRevision == dkr::runtime::rom::Revision::UsV80;
+    const bool drumstick = invoke(payload->unlock_drumstick) != 0;
+    const bool tt = invoke(payload->unlock_tt) != 0;
+    const std::uint32_t tables77[] = {0x800DFDD0U, 0x800DFE40U, 0x800DFEC0U, 0x800DFF40U};
+    const std::uint32_t tables80[] = {0x800E0350U, 0x800E03C0U, 0x800E0440U, 0x800E04C0U};
+    const unsigned table = unsigned(drumstick) | (unsigned(tt) << 1);
+    write_word(rdram, rev_a ? 0x8012696CU : 0x801263CCU,
+               static_cast<std::int32_t>((rev_a ? tables80 : tables77)[table]));
+    MEM_B(0, rdram_address(addresses::CharacterIdSlots)) = kCharacterDiddy;
+    invoke(payload->charselect_assign_ai, 1);
+    invoke(payload->init_racer_headers);
+    std::fprintf(stderr, "[track-lab] single-player roster:");
+    for (int racer = 0; racer < 8; ++racer) {
+        std::fprintf(stderr, " %d", int(MEM_B(racer, rdram_address(addresses::CharacterIdSlots))));
+    }
+    std::fprintf(stderr, "\n");
+    // mode_menu's direct-level result uses players minus one.
+    write_word(rdram, rev_a ? 0x80123A80U : 0x80123500U, 0);
 
     context->r2 = static_cast<gpr>(kMenuResultStartLevel | level);
+}
+
+// Called by the existing level_load scene-reset hook before retail consumes
+// the vehicle argument. Only gameplay on the armed track changes; menus and
+// Track Select retain their choices. Also covers L+Z and switching test tracks.
+extern "C" void dkr_custom_tracks_prepare_vehicle(std::uint8_t* rdram,
+                                                  recomp_context* context) {
+    namespace addresses = dkr::runtime::revision_addresses;
+    const auto level = static_cast<std::int32_t>(context->r4);
+    const auto players_minus_one = static_cast<std::int32_t>(context->r5);
+    const auto armed = dkr::runtime::custom_tracks::track_override();
+    if (armed < 0 || level != armed || players_minus_one < 0 || players_minus_one >= 4 ||
+        read_word(rdram, addresses::GameMode) != 0) { // GAMEMODE_INGAME
+        return;
+    }
+    const auto* payload = dkr::runtime::active_payload();
+    if (!payload || !payload->leveltable_vehicle_default || !payload->leveltable_vehicle_usable ||
+        !payload->set_level_default_vehicle) {
+        return;
+    }
+    recomp_context call = *context;
+    payload->leveltable_vehicle_default(rdram, &call);
+    const auto vehicle = static_cast<std::int32_t>(call.r2);
+    auto selected = vehicle;
+    // The addon's debug override may name a boss/special vehicle. Preserve it
+    // as the load argument, but player-selection arrays index three vehicle
+    // records and must remain within the authored normal vehicles for the AI.
+    if (selected < 0 || selected >= 3) {
+        call = *context;
+        payload->leveltable_vehicle_usable(rdram, &call);
+        const auto allowed = static_cast<std::uint32_t>(call.r2);
+        selected = (allowed & 1U) ? 0 : (allowed & 2U) ? 1 : (allowed & 4U) ? 2 : 0;
+    }
+    for (int player = 0; player <= players_minus_one; ++player) {
+        MEM_B(player, rdram_address(addresses::PlayerSelectVehicle)) = selected;
+    }
+    call = *context;
+    call.r4 = vehicle;
+    payload->set_level_default_vehicle(rdram, &call);
+    context->r7 = static_cast<gpr>(vehicle);
+    std::fprintf(stderr, "[track-lab] level=%d vehicle=%d selected=%d players=%d\n",
+                 level, vehicle, selected, players_minus_one + 1);
 }

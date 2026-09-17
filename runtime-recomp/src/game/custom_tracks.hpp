@@ -302,6 +302,10 @@ void arm_track_override(std::string track_id);   // empty string disarms
 // menu_loop returns MENU_RESULT_FLAGS_200 with a map id in its low bits, so
 // auto boot returns exactly that result and lets retail run its own sequence:
 // vehicle default, entrance, cutscene, game mode and load_level_game.
+// Before returning that result, the host prepares the single-player inputs,
+// Diddy's slot, the native unlock-dependent AI roster and Settings::racers.
+// The level_load lifecycle hook synchronizes the armed track's authored
+// default vehicle with player selections, which the native AI also reads.
 //
 // It fires once per launch. Restarting in place with L+Z keeps reloading the
 // same track, while quitting still returns to the menus rather than trapping
