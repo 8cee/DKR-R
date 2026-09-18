@@ -141,7 +141,10 @@ def adopt_answers(context, header) -> None:
 def inherited_overrides(context) -> dict:
     """The :data:`INHERITED` answers, for laying over an inherited header."""
     found = overrides(context)
-    return {pointer: found[pointer] for pointer in INHERITED if pointer in found}
+    result = {pointer: found[pointer] for pointer in INHERITED if pointer in found}
+    # A remix joins Custom Tracks too, unless the author chooses another world.
+    result["/world"] = found.get("/world", surveyed("/world"))
+    return result
 
 
 def music_index(context) -> int:

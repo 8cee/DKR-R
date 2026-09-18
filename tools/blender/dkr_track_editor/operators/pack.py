@@ -130,10 +130,8 @@ class DKR_OT_export_dkrmap(bpy.types.Operator, ExportHelper):
                     "the level-object translation table was unavailable"
                 )
 
-            # The header comes from the track being remixed, so the geometry
-            # and world stay whatever the base track had - except what the
-            # Level Type owns, which the import filled from this same header,
-            # so an untouched remix writes it back unchanged.
+            # A remix keeps the base geometry and overlays the author's
+            # settings. Its world defaults to the Custom Tracks category.
             from .. import level_header_template as template  # noqa: PLC0415
             from . import header as header_ops  # noqa: PLC0415
             base = _base_header(context, tree)
@@ -683,10 +681,8 @@ def _authored_header(context):
 
     Returns ``None`` when the author has answered nothing, which leaves the
     package exactly as it was before this existed - no header, and the warning
-    that says so. A partial answer is refused rather than filled in, because
-    the two fields with no default are world and race type, and zero is a real
-    world and a real race type: a track that never answered would not fail, it
-    would quietly become a Central Area default race.
+    that says so. A partial answer is refused because the race type has no
+    default: encoding an unanswered type as zero would silently make a race.
     """
     from . import header as header_ops
     from .. import level_header_template as template

@@ -2109,28 +2109,33 @@ def test_header_from_scratch():
     fresh(level_type=None)
     check(not header_ops.overrides(bpy.context),
           "a fresh scene answers nothing")
-    check(sorted(header_ops.unanswered(bpy.context)) == ["/race-type", "/world"],
-          "and the two fields with no default are the ones outstanding (%r)"
+    check(header_ops.unanswered(bpy.context) == ["/race-type"],
+          "only the race type remains outstanding (%r)"
           % (header_ops.unanswered(bpy.context),))
 
     check(bpy.ops.dkr.header_defaults() == {"FINISHED"}, "Fill Defaults runs")
     filled = header_ops.overrides(bpy.context)
     check(len(filled) >= 10, "it answers most of the form (%d)" % len(filled))
-    check(sorted(header_ops.unanswered(bpy.context)) == ["/race-type", "/world"],
-          "but never invents a world or a race type, because zero is a real "
-          "value for both rather than an absence")
+    check(header_ops.unanswered(bpy.context) == ["/race-type"],
+          "the race type still needs an answer")
+    check(filled.get("/world") == "WORLD_CUSTOM_TRACKS",
+          "Fill Defaults selects Custom Tracks")
     check(header_ops.key_for("/race-type") not in bpy.context.scene,
           "and leaves what the Level Type owns to the Level Type")
 
     bpy.ops.dkr.set_level_type(mode="RACE")
-    check(header_ops.unanswered(bpy.context) == ["/world"],
-          "choosing the level type answers the race type")
+    check(not header_ops.unanswered(bpy.context),
+          "choosing the level type completes the default header")
+    check(header_ops.inherited_overrides(bpy.context)["/world"] == "WORLD_CUSTOM_TRACKS",
+          "remixes also default to Custom Tracks")
 
     world = _pick("World")
     if not world:
         print("  skip: the catalogue has no World enum")
         return
     bpy.context.scene[header_ops.key_for("/world")] = world
+    check(header_ops.inherited_overrides(bpy.context)["/world"] == world,
+          "an explicit world is respected for remixes")
     check(not header_ops.unanswered(bpy.context),
           "answering the world completes the header")
 
@@ -2166,18 +2171,12 @@ def test_header_reaches_the_package():
     try:
         target = os.path.join(temporary, "scratch-track.dkrmap")
 
-        # Answering only some of it is refused, not filled in: the field with
-        # no default is the world (the race type comes from the Level Type),
-        # and shipping zero for it would quietly make the track something else.
+        # A new race exports directly into Custom Tracks without choosing a world.
         bpy.ops.dkr.header_defaults()
-        try:
-            bpy.ops.dkr.export_dkrmap(filepath=target, validate_first=False)
-            check(False, "a partly answered header is refused")
-        except RuntimeError as error:
-            check("unanswered" in str(error),
-                  "a partly answered header is refused (%s)" % str(error)[:70])
-            check("/world" in str(error) and "/race-type" not in str(error),
-                  "and the message names the world, the one field left")
+        check(bpy.ops.dkr.export_dkrmap(filepath=target, validate_first=False) == {"FINISHED"},
+              "the default world exports without another answer")
+        with open(os.path.join(target, "header.bin"), "rb") as handle:
+            check(handle.read(1) == bytes([6]), "the package targets Custom Tracks")
 
         bpy.context.scene[header_ops.key_for("/world")] = world
         result = bpy.ops.dkr.export_dkrmap(filepath=target, validate_first=False)

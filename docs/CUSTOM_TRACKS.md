@@ -316,8 +316,18 @@ counts, and the decomp extracts exactly 65 level header files. The second line
 repeats once per `asset_table_load` call, which is once at level table init and
 again for each level load.
 
-What this does *not* yet prove: nothing navigates to the added index. The table
-grows, but a menu entry or a hub door still has to point at it.
+The Blender addon defaults new tracks and remixes to `WORLD_CUSTOM_TRACKS`
+(header world byte `6`). Enabled normal races in that category appear beside
+legacy courses under **CUSTOM TRACKS** in the offline Track Select menu, even
+when no legacy courses are enabled. Preview and race loads use each `.dkrmap`'s
+appended level ID. The native menu supports IDs below 128; higher IDs remain
+available through Track Lab. Hub, boss and special level types are not added
+to the normal-race grid.
+
+An explicit World selection in the addon overrides the default. Existing
+packages retain their exported world: select `WORLD_CUSTOM_TRACKS` and export
+again to put them in this category. Choosing another world does not itself
+create a retail menu entry or hub door.
 
 ## Sections a track can replace or extend
 

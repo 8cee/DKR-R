@@ -188,6 +188,11 @@ class Catalog:
                 % (raw.get("schemaVersion"), SUPPORTED_SCHEMA)
             )
         self.raw = raw
+        # DKR-R's additive Track Select category, beyond the retail worlds.
+        raw.setdefault("enumValues", {}).setdefault("World", {})["WORLD_CUSTOM_TRACKS"] = 6
+        worlds = raw.setdefault("enums", {}).setdefault("World", [])
+        if "WORLD_CUSTOM_TRACKS" not in worlds:
+            worlds.append("WORLD_CUSTOM_TRACKS")
         self.enums: Dict[str, List[str]] = raw.get("enums", {})
         self.levels: List[str] = raw.get("levels", [])
         self.categories: List[str] = raw.get("categories", [])

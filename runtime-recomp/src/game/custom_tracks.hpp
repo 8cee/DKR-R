@@ -236,6 +236,16 @@ void reload();
 [[nodiscard]] std::int32_t resolved_level_id(const std::string& track_id);
 [[nodiscard]] bool owns_level_id(std::int32_t level_id);
 
+// WORLD_CUSTOM_TRACKS in the Blender addon. Track Select appends these races
+// to the same logical category as legacy courses, outside retail world arrays.
+inline constexpr std::uint8_t kCustomTrackWorld = 6;
+struct TrackSelectEntry {
+    std::string id, name;
+    std::int32_t level_id;
+    std::uint8_t vehicles;
+};
+[[nodiscard]] std::vector<TrackSelectEntry> track_select_entries();
+
 // Triangle batches in the level model the track at `level_id` ships, summed
 // over its segments. render_level_segment spends several display-list
 // commands on each one, so this sizes the game's display-list heap before the

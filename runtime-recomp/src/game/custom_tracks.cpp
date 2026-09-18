@@ -317,6 +317,25 @@ std::int32_t resolved_level_id(const std::string& track_id) {
     return found == g_resolved_level_ids.end() ? -1 : found->second;
 }
 
+std::vector<TrackSelectEntry> track_select_entries() {
+    std::scoped_lock lock(g_mutex);
+    std::vector<TrackSelectEntry> result;
+    for (const Track& track : g_tracks) {
+        const auto resolved = g_resolved_level_ids.find(track.id);
+        // Native preview/selection stores level IDs in signed bytes.
+        if (!track.enabled || resolved == g_resolved_level_ids.end() ||
+            resolved->second < 0 || resolved->second >= 128) continue;
+        const auto header = std::find_if(track.entries.begin(), track.entries.end(),
+            [](const Entry& entry) { return entry.section == Section::LevelHeaders; });
+        if (header == track.entries.end() || header->bytes.size() < 0xC8 ||
+            header->bytes[0] != kCustomTrackWorld || header->bytes[0x4C] != 0) continue;
+        const auto vehicles = header->bytes[0x4E];
+        if (!vehicles || (vehicles & ~7U)) continue;
+        result.push_back({track.id, track.name, resolved->second, vehicles});
+    }
+    return result;
+}
+
 HdPack hd_pack(const std::string& track_id) {
     std::scoped_lock lock(g_mutex);
     for (const Track& track : g_tracks) {

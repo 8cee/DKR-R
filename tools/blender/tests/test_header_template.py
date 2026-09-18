@@ -87,6 +87,11 @@ def check_document_encodes():
     enum_values = catalog.load().raw.get("enumValues", {})
     payload = level_header.encode(document, enum_values)
 
+    if document.get("world") != "WORLD_CUSTOM_TRACKS" or payload[0] != 6:
+        return "new tracks must default to the Custom Tracks category"
+    if "/world" in level_header_template.missing():
+        return "the default world must not require an explicit answer"
+
     if len(payload) != level_header.HEADER_SIZE:
         return "encoded %d bytes, expected %d" % (
             len(payload), level_header.HEADER_SIZE

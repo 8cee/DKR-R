@@ -117,8 +117,8 @@ def _field(pointer: str) -> level_header.Field:
 #: looks.
 CHOICES: Tuple[Choice, ...] = (
     Choice("/world", "World",
-           "Which world the track belongs to, which decides the hub it is "
-           "reached from"),
+           "Custom Tracks groups this course with legacy tracks in Track Select",
+           default="WORLD_CUSTOM_TRACKS"),
     Choice("/race-type", "Race type",
            "A normal race, a battle, a challenge or a boss"),
     Choice("/lap-count", "Laps", "Laps in a race", minimum=1, maximum=9),

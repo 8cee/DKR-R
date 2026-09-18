@@ -1432,7 +1432,7 @@ class DKR_PT_header(DkrPanel, bpy.types.Panel):
             info_box(layout, context,
                      "This track inherits its header from %s, so the fields "
                      "below are unused - except the ones set by Level Type, "
-                     "the music, the skybox and the AI Racers settings, which "
+                     "the world, the music, the skybox and the AI Racers settings, which "
                      "the export lays over it." % level.label)
 
         layout.operator("dkr.header_defaults", icon="LOOP_BACK")

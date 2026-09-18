@@ -997,6 +997,39 @@ int main() {
         assert(level_model_batches(0) == -1);
     }
 
+    // Only enabled races assigned to Custom Tracks join the native menu.
+    {
+        const auto library = root / "track-select";
+        for (const std::string id : {"race", "retail", "hub", "disabled"}) {
+            const auto path = library / (id + ".dkrmap");
+            std::filesystem::create_directories(path);
+            write_file(path / "manifest.json", track_manifest(id, ""));
+            std::string header(200, '\0');
+            header[0] = id == "retail" ? 1 : kCustomTrackWorld;
+            header[0x4C] = id == "hub" ? 5 : 0;
+            header[0x4E] = 7;
+            header[0x37] = 73;
+            header[0xBB] = 5;
+            write_file(path / "h.bin", header);
+        }
+        scan(library);
+        assert(track_select_entries().empty()); // IDs are not published yet.
+        set_enabled("disabled", false);
+        build_extended_table(Section::LevelHeaders, kRetail);
+        auto entries = track_select_entries();
+        assert(entries.size() == 1 && entries[0].id == "race");
+        assert(entries[0].level_id == resolved_level_id("race"));
+        assert(entries[0].name == "race" && entries[0].vehicles == 7);
+        set_enabled("race", false);
+        assert(track_select_entries().empty());
+        set_enabled("race", true);
+        // IDs beyond signed-byte range must never wrap into a retail level.
+        std::vector<std::int32_t> large_table(130);
+        for (unsigned i = 0; i < 129; ++i) large_table[i] = i * 200;
+        large_table.back() = -1;
+        build_extended_table(Section::LevelHeaders, large_table.data());
+        assert(track_select_entries().empty());
+    }
     std::filesystem::remove_all(root);
     std::printf("custom_tracks_tests: ok\n");
     return 0;
