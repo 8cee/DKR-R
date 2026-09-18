@@ -410,9 +410,10 @@ extern "C" void dkr_runtime_scene_reset(std::uint8_t* rdram,
 #endif
     g_title_intro_tail_gate.reset();
     ResetAudioEventGuards();
-    // The existing level_load entry hook covers both initial Track Lab loads
-    // and restarts. Give a custom track its memory before the level allocates,
-    // and synchronize its vehicle before retail consumes r7.
+    // The existing level_load entry hook covers initial Track Lab loads,
+    // restarts and Track Select previews. Give a custom track its memory and
+    // model heap before the level allocates, and synchronize its vehicle
+    // before retail consumes r7.
     if (rdram && context) {
         dkr_custom_tracks_prepare_memory(rdram, context);
         dkr_custom_tracks_prepare_vehicle(rdram, context);

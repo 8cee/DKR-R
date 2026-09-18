@@ -18,6 +18,10 @@ extern "C" void dkr_custom_tracks_prepare_memory(std::uint8_t*, recomp_context*)
 extern "C" void dkr_custom_tracks_prepare_level(std::uint8_t*, recomp_context*);
 extern "C" void dkr_custom_tracks_prepare_vehicle(std::uint8_t*, recomp_context*);
 extern "C" void dkr_custom_tracks_track_heap(std::uint8_t*, recomp_context*);
+extern "C" void dkr_custom_tracks_table_load_begin(std::uint8_t*, recomp_context*);
+extern "C" void dkr_custom_tracks_table_load_end(std::uint8_t*, recomp_context*);
+extern "C" void dkr_custom_tracks_asset_load_begin(std::uint8_t*, recomp_context*);
+extern "C" void dkr_custom_tracks_asset_load_end(std::uint8_t*, recomp_context*);
 
 namespace tracks = dkr::runtime::custom_tracks;
 namespace addresses = dkr::runtime::revision_addresses;
@@ -421,10 +425,13 @@ int main() {
 
         constexpr std::int32_t kRetailHeap = tracks::kRetailTrackHeap;
         constexpr std::int32_t kGrownHeap = 0x84000; // align16(0x83000 + 0x1000)
+        // level_load's entry decides the heap, so Track Select previews, which
+        // load through load_level_for_menu and never reach load_level_game's
+        // hook, get it as well as races do.
         const auto heap_for = [&](std::int32_t level, std::int32_t held) {
             recomp_context level_context{};
             level_context.r4 = level;
-            dkr_custom_tracks_prepare_level(rdram, &level_context);
+            dkr_custom_tracks_prepare_memory(rdram, &level_context);
             recomp_context inside{};
             inside.r21 = held;
             dkr_custom_tracks_track_heap(rdram, &inside);
@@ -441,7 +448,7 @@ int main() {
         // level_load of its own cannot inherit the previous level's heap.
         recomp_context prepared{};
         prepared.r4 = big_level;
-        dkr_custom_tracks_prepare_level(rdram, &prepared);
+        dkr_custom_tracks_prepare_memory(rdram, &prepared);
         recomp_context once{};
         once.r21 = kRetailHeap;
         dkr_custom_tracks_track_heap(rdram, &once);
@@ -450,6 +457,151 @@ int main() {
         twice.r21 = kRetailHeap;
         dkr_custom_tracks_track_heap(rdram, &twice);
         assert(static_cast<std::int32_t>(twice.r21) == kRetailHeap);
+
+        // load_level_game's hook leaves the heap to level_load's, which every
+        // load reaches next; deciding it twice would report it twice.
+        dkr_custom_tracks_prepare_level(rdram, &prepared);
+        recomp_context unprepared{};
+        unprepared.r21 = kRetailHeap;
+        dkr_custom_tracks_track_heap(rdram, &unprepared);
+        assert(static_cast<std::int32_t>(unprepared.r21) == kRetailHeap);
+    }
+
+    // -----------------------------------------------------------------------
+    // Display lists for Track Select previews
+    // -----------------------------------------------------------------------
+    // A preview draws into the menu's one-player list, and nothing on
+    // load_level_for_menu's path may resize it, so the boot header table sizes
+    // it for the largest .dkrmap course Track Select offers.
+    {
+        assert(addresses::select(dkr::runtime::rom::Revision::UsV77));
+        const auto library = root / "track-select";
+        const auto folder = library / "preview.dkrmap";
+        std::filesystem::create_directories(folder);
+        std::ofstream(folder / "manifest.json") <<
+            R"({"schemaVersion":1,"id":"preview","name":"Preview","adds":[{"section":"LEVEL_HEADERS","file":"header.bin"},)"
+            R"({"section":"LEVEL_MODELS","file":"model.bin"}]})";
+        std::string race(200, '\0');
+        race[0] = static_cast<char>(tracks::kCustomTrackWorld);
+        race[0x4E] = 7; // car, hovercraft and plane
+        race[0x37] = 73;
+        race[0xBB] = 5;
+        std::ofstream(folder / "header.bin", std::ios::binary) << race;
+        // One segment drawing 700 batches: past even the retail four-player list.
+        std::string model(0x4C + 0x44, '\0');
+        model[7] = 0x4C;
+        model[0x1B] = 1;
+        model[0x4C + 0x20] = 0x02;
+        model[0x4C + 0x21] = static_cast<char>(0xBC);
+        const auto length = static_cast<std::uint16_t>(model.size());
+        std::string container{static_cast<char>(length & 0xFF), static_cast<char>(length >> 8), 0, 0, 0x09,
+                              0x01, static_cast<char>(length & 0xFF), static_cast<char>(length >> 8),
+                              static_cast<char>(~length & 0xFF), static_cast<char>((~length >> 8) & 0xFF)};
+        std::ofstream(folder / "model.bin", std::ios::binary) << container << model;
+        tracks::scan(library);
+
+        std::fill(memory.begin(), memory.end(), 0xA5);
+        payload.mempool_alloc_safe = [](std::uint8_t*, recomp_context* ctx) { ctx->r2 = addr(0x80300000); };
+        const std::uint32_t retail_table = 0x80200000;
+        const std::int32_t retail_headers[] = {0, 196, -1};
+        for (int i = 0; i < 3; ++i) MEM_W(i * 4, addr(retail_table)) = retail_headers[i];
+        const std::uint32_t table = 0x800DD3B0, previous_players = 0x8012350C, lists = 0x801211F0;
+        const std::int32_t retail_commands[] = {4500, 7000, 11000, 11000};
+        const auto set_table = [&] {
+            for (int players = 0; players < 4; ++players)
+                MEM_W(players * 4, addr(table)) = retail_commands[players];
+        };
+        const auto commands = [&](int players) { return MEM_W(players * 4, addr(table)); };
+        const auto load_headers = [&] {
+            recomp_context begin{};
+            begin.r4 = 22; // ASSET_LEVEL_HEADERS_TABLE
+            dkr_custom_tracks_table_load_begin(rdram, &begin);
+            recomp_context end{};
+            end.r2 = addr(retail_table);
+            dkr_custom_tracks_table_load_end(rdram, &end);
+            return static_cast<std::uint32_t>(end.r2);
+        };
+        // The retail 4 MB pool, its tail free, so the session's larger lists
+        // can come out of expansion RAM.
+        const std::uint32_t pool = 0x80123580, slots = 0x8012D3F0;
+        const auto slot = [&](int index) { return addr(slots + index * 0x14U); };
+        for (int i = 0; i < 1600; ++i) MEM_H(14, slot(i)) = static_cast<std::int16_t>(i);
+        MEM_W(0, slot(0)) = 0x80135100;
+        MEM_W(4, slot(0)) = 0x100;
+        MEM_H(8, slot(0)) = 1;
+        MEM_H(10, slot(0)) = -1;
+        MEM_H(12, slot(0)) = 1;
+        MEM_W(0, slot(1)) = 0x80135200;
+        MEM_W(4, slot(1)) = 0x80400000 - 0x80135200;
+        MEM_H(8, slot(1)) = 0;
+        MEM_H(10, slot(1)) = 0;
+        MEM_H(12, slot(1)) = -1;
+        MEM_W(0, addr(pool)) = 1600;
+        MEM_W(4, addr(pool)) = 2;
+        MEM_W(8, addr(pool)) = static_cast<std::int32_t>(slots);
+        MEM_W(12, addr(pool)) = 0x2D2C10;
+
+        // Boot: level_global_init runs before default_alloc_displaylist_heap.
+        set_table();
+        MEM_W(0, addr(lists)) = 0;
+        assert(load_headers() == 0x80300000);
+        const std::int32_t level = tracks::resolved_level_id("preview");
+        assert(level == 1 && tracks::track_select_entries().size() == 1);
+        constexpr std::int32_t kFloor = 4500 + 700 * 10;
+        for (int players = 0; players < 4; ++players) assert(commands(players) == kFloor);
+        assert(MEM_W(4, slot(1)) == 0x6CAE00 && MEM_W(12, addr(pool)) == 0x2D2C10 + 0x400000);
+
+        // The game indexes five-world arrays with the header's world, so it is
+        // served Dino Domain - both the level_global_init read and the full
+        // level_load read - while the catalogue keeps the payload's world.
+        const auto header_offset = static_cast<std::uint32_t>(MEM_W(4, addr(0x80300000)));
+        for (const std::int32_t size : {196, 200}) {
+            const std::uint32_t destination = 0x80310000;
+            recomp_context load{};
+            load.r4 = 23; // ASSET_LEVEL_HEADERS
+            load.r5 = addr(destination);
+            load.r6 = header_offset;
+            load.r7 = size;
+            dkr_custom_tracks_asset_load_begin(rdram, &load);
+            dkr_custom_tracks_asset_load_end(rdram, &load);
+            assert(MEM_B(0, addr(destination)) == 1);
+            assert(MEM_B(0x4E, addr(destination)) == 7);
+        }
+        assert(tracks::track_select_entries().size() == 1);
+
+        // Once the lists exist, header table loads never touch the table.
+        MEM_W(0, addr(lists)) = 0x80140000;
+        set_table();
+        load_headers();
+        for (int players = 0; players < 4; ++players) assert(commands(players) == retail_commands[players]);
+
+        // A retail race keeps the floor, so the heap it leaves for the menu can
+        // still draw every preview; a .dkrmap race adds its own on top.
+        const auto load_level = [&](std::int32_t id) {
+            recomp_context level_context{};
+            level_context.r4 = id;
+            MEM_W(0, addr(previous_players)) = 0;
+            dkr_custom_tracks_prepare_level(rdram, &level_context);
+        };
+        load_level(0);
+        for (int players = 0; players < 4; ++players) assert(commands(players) == kFloor);
+        assert(MEM_W(0, addr(previous_players)) == -1);
+        load_level(0);
+        assert(MEM_W(0, addr(previous_players)) == 0);
+        load_level(level);
+        for (int players = 0; players < 4; ++players)
+            assert(commands(players) == std::max(kFloor, retail_commands[players] + 7000 * (players + 1)));
+        assert(MEM_W(0, addr(previous_players)) == -1);
+
+        // A boot whose Track Select offers no .dkrmap course keeps retail lists.
+        tracks::scan(root / "empty");
+        MEM_W(0, addr(lists)) = 0;
+        set_table();
+        load_headers();
+        for (int players = 0; players < 4; ++players) assert(commands(players) == retail_commands[players]);
+        load_level(0);
+        for (int players = 0; players < 4; ++players) assert(commands(players) == retail_commands[players]);
+        payload.mempool_alloc_safe = nullptr;
     }
 
     tracks::set_auto_boot(false);

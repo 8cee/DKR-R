@@ -156,9 +156,9 @@ void write_word(std::uint8_t* rdram, std::uint32_t address,
 }
 
 // The level model heap generate_track is about to reserve, or 0 for the retail
-// size. Written at load_level_game's entry, where the level id is known, and
-// taken by the generate_track hook, which only sees a model index. Consuming
-// it clears it, so a value prepared for one load can never reach a second.
+// size. Written at level_load's entry, where the level id is known, and taken
+// by the generate_track hook, which only sees a model index. Consuming it
+// clears it, so a value prepared for one load can never reach a second.
 std::int32_t g_track_heap_bytes = 0;
 
 // Leaves most of the four megabytes dkr_custom_tracks_prepare_memory adds for
@@ -171,6 +171,60 @@ constexpr std::int32_t kTrackHeapCeiling = 0x200000;
 // being the thing that overflows.
 constexpr std::int32_t kTrackHeapSlack = 0x1000;
 
+// gNumF3dCmdsPerPlayer in thread3_main.c, identical in both revisions.
+constexpr std::int32_t kRetailCommands[4] = {4500, 7000, 11000, 11000};
+constexpr std::int32_t kCommandsPerBatch = 10;
+constexpr std::int32_t kCommandLimit = 0x20000;
+
+// The one-player budget a Track Select preview of the largest .dkrmap course
+// needs, decided at boot. 0 when Track Select offers none.
+std::int32_t g_menu_commands = 0;
+
+// thread3_main.c's display-list globals, verified against
+// ver/symbols/symbol_addrs.us.v{77,80}.txt.
+struct DisplayListGlobals {
+    std::uint32_t table;            // gNumF3dCmdsPerPlayer
+    std::uint32_t previous_players; // gPrevPlayerCount
+    std::uint32_t current_commands; // gCurrNumF3dCmdsPerPlayer
+    std::uint32_t lists;            // gDisplayLists
+};
+
+DisplayListGlobals display_list_globals() {
+    if (dkr::runtime::revision_addresses::gSelectedRevision ==
+        dkr::runtime::rom::Revision::UsV80) {
+        return {0x800DD920U, 0x80123A8CU, 0x80123AA8U, 0x80121770U};
+    }
+    return {0x800DD3B0U, 0x8012350CU, 0x80123528U, 0x801211F0U};
+}
+
+// A frame's budget with `players` viewports (0 is one player) for a level
+// drawing `batches`, or the retail budget when it is not a .dkrmap level.
+std::int32_t commands_for(int players, std::int32_t batches) {
+    if (batches <= 0) {
+        return kRetailCommands[players];
+    }
+    const std::int64_t budget = std::int64_t(kRetailCommands[players]) +
+                                std::int64_t(batches) * kCommandsPerBatch * (players + 1);
+    return static_cast<std::int32_t>(std::min<std::int64_t>(budget, kCommandLimit));
+}
+
+// Writes gNumF3dCmdsPerPlayer for a level drawing `batches`, never below the
+// Track Select floor, so the heap a race leaves behind for the menu can still
+// draw every preview. Returns whether any entry changed.
+bool write_display_list_budget(std::uint8_t* rdram, std::int32_t batches) {
+    const DisplayListGlobals globals = display_list_globals();
+    bool changed = false;
+    for (int players = 0; players < 4; ++players) {
+        const std::int32_t commands = std::max(commands_for(players, batches), g_menu_commands);
+        const std::uint32_t entry = globals.table + static_cast<std::uint32_t>(players) * 4U;
+        if (read_word(rdram, entry) != commands) {
+            write_word(rdram, entry, commands);
+            changed = true;
+        }
+    }
+    return changed;
+}
+
 } // namespace
 
 // Entry of asset_table_load. Only the requested section is recorded; the
@@ -181,12 +235,12 @@ extern "C" void dkr_custom_tracks_table_load_begin(std::uint8_t*,
     g_requested_table = static_cast<std::uint32_t>(context->r4);
 }
 
-// Common epilogue of asset_table_load. Publishes a longer level table so the
-// retail count, range check and world maximum all grow with it.
-extern "C" void dkr_custom_tracks_table_load_end(std::uint8_t* rdram,
-                                                  recomp_context* context) {
-    const std::uint32_t requested = g_requested_table;
-    g_requested_table = 0xFFFFFFFFU;
+static void size_menu_display_lists(std::uint8_t* rdram);
+
+// Publishes a longer level table so the retail count, range check and world
+// maximum all grow with it.
+static void publish_extended_table(std::uint8_t* rdram, recomp_context* context,
+                                   std::uint32_t requested) {
     Section section = Section::LevelHeaders;
     if (!section_for_table(requested, section)) {
         return; // Not a section custom tracks contribute to.
@@ -243,6 +297,17 @@ extern "C" void dkr_custom_tracks_table_load_end(std::uint8_t* rdram,
     }
 }
 
+// Common epilogue of asset_table_load.
+extern "C" void dkr_custom_tracks_table_load_end(std::uint8_t* rdram,
+                                                  recomp_context* context) {
+    const std::uint32_t requested = g_requested_table;
+    g_requested_table = 0xFFFFFFFFU;
+    publish_extended_table(rdram, context, requested);
+    if (requested == kLevelHeadersTableSection) {
+        size_menu_display_lists(rdram);
+    }
+}
+
 // Entry of asset_load. The destination register is clobbered by the DMA call
 // before the epilogue is reached, so every argument is captured here.
 extern "C" void dkr_custom_tracks_asset_load_begin(std::uint8_t*,
@@ -280,6 +345,20 @@ extern "C" void dkr_custom_tracks_asset_load_end(std::uint8_t* rdram,
 
     if (section != Section::LevelHeaders) {
         return;
+    }
+
+    // WORLD_CUSTOM_TRACKS only files a course under Track Select's Custom
+    // Tracks, and the catalogue reads it from the payload. The game itself
+    // indexes five-world arrays with header->world - 1: postrace_init's mosaic
+    // read past gTracksMenuBgTextureIndices, and bgdraw_texture then tiled a
+    // non-texture until its display list ran out of memory. A sixth world
+    // also grows gNumberOfWorlds, and with it the save file's per-world
+    // fields. So the game is served the world whose background Track Select
+    // already draws for that category.
+    constexpr std::uint8_t kWorldDinoDomain = 1;
+    if (static_cast<std::uint8_t>(payload[0]) ==
+        dkr::runtime::custom_tracks::kCustomTrackWorld) {
+        MEM_B(0, rdram_address(request.destination)) = kWorldDinoDomain;
     }
 
     // A header names its model and object map by index, and both indices are
@@ -410,24 +489,19 @@ extern "C" void dkr_custom_tracks_auto_boot(std::uint8_t* rdram,
     context->r2 = static_cast<gpr>(kMenuResultStartLevel | level);
 }
 
-// Called by the existing level_load scene-reset hook, before the level
-// allocates anything. mmInit sizes DKR's main pool to the 4 MB console
-// (0x80400000), while the runtime maps and reports 8 MB that nothing else
-// uses. A .dkrmap track can ship up to 255 64x32 textures on top of eight
-// distinct racers, which the retail pool cannot hold: allocations then return
-// NULL and the next particle or HUD setup writes through it. The first load of
-// such a track therefore grows the main pool's tail over the unused expansion
-// RAM. The allocator itself is untouched, the pool never shrinks, and retail
-// and legacy levels never trigger it.
-extern "C" void dkr_custom_tracks_prepare_memory(std::uint8_t* rdram,
-                                                 recomp_context* context) {
+// mmInit sizes DKR's main pool to the 4 MB console (0x80400000), while the
+// runtime maps and reports 8 MB that nothing else uses. A .dkrmap track can
+// ship up to 255 64x32 textures on top of eight distinct racers, which the
+// retail pool cannot hold: allocations then return NULL and the next particle
+// or HUD setup writes through it. So the pool's tail is grown over the unused
+// expansion RAM, once. The allocator itself is untouched and the pool never
+// shrinks. Returns the bytes added, or 0 when the pool is already grown or is
+// not one this code understands.
+static std::uint32_t grow_main_pool(std::uint8_t* rdram) {
     constexpr std::uint32_t kRetailRamEnd = 0x80400000U;
     constexpr std::uint32_t kExpansionRamEnd = 0x80800000U;
     constexpr std::uint32_t kSlotSize = 0x14U; // MemoryPoolSlot in memory.h
     constexpr std::int32_t kSlotIndexLimit = 0x7FFF; // slot links are s16
-    if (!dkr::runtime::custom_tracks::owns_level_id(static_cast<std::int32_t>(context->r4))) {
-        return;
-    }
     // gMemoryPools, verified against ver/symbols/symbol_addrs.us.v{77,80}.txt.
     // Pool 0 is the main pool; MemoryPool is {maxNumSlots, curNumSlots, slots, size}.
     const std::uint32_t pool =
@@ -439,7 +513,7 @@ extern "C" void dkr_custom_tracks_prepare_memory(std::uint8_t* rdram,
     const auto slots = static_cast<std::uint32_t>(read_word(rdram, pool + 8U));
     if (!addressable(slots) || max_slots <= 0 || max_slots > kSlotIndexLimit ||
         used_slots <= 0 || used_slots >= max_slots) {
-        return;
+        return 0;
     }
     const auto slot = [&](std::int32_t index) {
         return slots + static_cast<std::uint32_t>(index) * kSlotSize;
@@ -452,7 +526,7 @@ extern "C" void dkr_custom_tracks_prepare_memory(std::uint8_t* rdram,
             break;
         }
         if (next < 0 || next >= max_slots || steps >= max_slots) {
-            return; // Not a pool this code understands; leave it alone.
+            return 0; // Not a pool this code understands; leave it alone.
         }
         tail = next;
     }
@@ -462,7 +536,7 @@ extern "C" void dkr_custom_tracks_prepare_memory(std::uint8_t* rdram,
     // mmInit aligns the first slot's data without shrinking it, so the retail
     // end can sit a few bytes past 0x80400000. Anything else is already grown.
     if (tail_size < 0 || end < kRetailRamEnd || end >= kRetailRamEnd + 16U) {
-        return;
+        return 0;
     }
     const std::uint32_t extra = kExpansionRamEnd - end;
     if (MEM_H(8, rdram_address(slot(tail))) == 0) { // SLOT_FREE
@@ -471,11 +545,11 @@ extern "C" void dkr_custom_tracks_prepare_memory(std::uint8_t* rdram,
         // mempool_slot_assign's split: slots[curNumSlots].index is the next
         // spare slot, and mempool_slot_find refuses the pool's last one.
         if (used_slots + 1 >= max_slots) {
-            return;
+            return 0;
         }
         const std::int32_t spare = static_cast<std::int16_t>(MEM_H(14, rdram_address(slot(used_slots))));
         if (spare < 0 || spare >= max_slots) {
-            return;
+            return 0;
         }
         write_word(rdram, slot(spare), static_cast<std::int32_t>(end));
         write_word(rdram, slot(spare) + 4U, static_cast<std::int32_t>(extra));
@@ -487,9 +561,7 @@ extern "C" void dkr_custom_tracks_prepare_memory(std::uint8_t* rdram,
         write_word(rdram, pool + 4U, used_slots + 1);
     }
     write_word(rdram, pool + 12U, read_word(rdram, pool + 12U) + static_cast<std::int32_t>(extra));
-    std::fprintf(stderr,
-                 "[custom-tracks] main memory pool grown into expansion RAM for level %d (+%u KB)\n",
-                 static_cast<int>(static_cast<std::int32_t>(context->r4)), extra / 1024U);
+    return extra;
 }
 
 // Decides the level model heap for the level about to load, and leaves it for
@@ -543,6 +615,84 @@ static void prepare_track_heap(std::int32_t level) {
                  static_cast<int>(custom_tracks::kRetailTrackHeap));
 }
 
+static void grow_main_pool_for_level(std::uint8_t* rdram, std::int32_t level) {
+    if (!dkr::runtime::custom_tracks::owns_level_id(level)) {
+        return; // Retail and legacy levels never grow the pool.
+    }
+    const std::uint32_t extra = grow_main_pool(rdram);
+    if (extra != 0) {
+        std::fprintf(stderr,
+                     "[custom-tracks] main memory pool grown into expansion RAM for level %d (+%u KB)\n",
+                     static_cast<int>(level), extra / 1024U);
+    }
+}
+
+// The most batches any .dkrmap course in Track Select draws.
+static std::int32_t track_select_batches() {
+    namespace custom_tracks = dkr::runtime::custom_tracks;
+    std::int32_t most = 0;
+    for (const custom_tracks::TrackSelectEntry& entry : custom_tracks::track_select_entries()) {
+        most = std::max(most, custom_tracks::level_model_batches(entry.level_id));
+    }
+    return most;
+}
+
+// Track Select previews a course by loading it behind the menu, through
+// load_level_for_menu - often on thread30 while the main thread keeps drawing
+// the menu - and renders it into the one-player display list the menu already
+// holds. Nothing on that path resizes the list, and it cannot be resized
+// safely there. So the budget is decided before the lists first exist:
+// level_global_init loads the header table (publishing each course's level
+// id) right before default_alloc_displaylist_heap, and gDisplayLists is still
+// NULL then. Every later load keeps this floor; see write_display_list_budget.
+static void size_menu_display_lists(std::uint8_t* rdram) {
+    const DisplayListGlobals globals = display_list_globals();
+    if (read_word(rdram, globals.lists) != 0) {
+        return; // Past boot: the lists exist and are sized per level.
+    }
+    const std::int32_t batches = track_select_batches();
+    g_menu_commands = batches > 0 ? commands_for(0, batches) : 0;
+    if (batches <= 0) {
+        return;
+    }
+    // The larger lists live for the whole session; keep the retail headroom.
+    const std::uint32_t extra = grow_main_pool(rdram);
+    if (extra != 0) {
+        std::fprintf(stderr,
+                     "[custom-tracks] main memory pool grown into expansion RAM for Track Select "
+                     "previews (+%u KB)\n",
+                     extra / 1024U);
+    }
+    write_display_list_budget(rdram, -1);
+    std::fprintf(stderr,
+                 "[custom-tracks] Track Select previews draw up to %d batches; display lists sized "
+                 "for %d commands with one player\n",
+                 static_cast<int>(batches), static_cast<int>(g_menu_commands));
+}
+
+// Called by the existing level_load scene-reset hook, before the level
+// allocates anything. Every load passes here - races, Track Lab and restarts,
+// and also the Track Select previews that load_level_game's hook never sees -
+// so this is where a .dkrmap level gets its pool and its model heap.
+extern "C" void dkr_custom_tracks_prepare_memory(std::uint8_t* rdram,
+                                                 recomp_context* context) {
+    const auto level = static_cast<std::int32_t>(context->r4);
+    grow_main_pool_for_level(rdram, level);
+    prepare_track_heap(level);
+
+    // A preview that outgrows the display list it is drawn into runs over the
+    // matrices behind it. The boot sizing covers every course Track Select
+    // offered then; a course enabled later is named here rather than guessed at.
+    const std::int32_t batches = dkr::runtime::custom_tracks::level_model_batches(level);
+    const std::int32_t held = read_word(rdram, display_list_globals().current_commands);
+    if (batches > 0 && held > 0 && held < commands_for(0, batches)) {
+        std::fprintf(stderr,
+                     "[custom-tracks] level %d draws up to %d batches, more than the %d commands "
+                     "this display list holds; restart the game before previewing it\n",
+                     static_cast<int>(level), static_cast<int>(batches), static_cast<int>(held));
+    }
+}
+
 // Called inside generate_track, on the instruction after the one that finishes
 // materialising LEVEL_MODEL_MAX_SIZE into s5. That register carries the
 // constant to both of the places that matter in the same function:
@@ -589,49 +739,28 @@ extern "C" void dkr_custom_tracks_track_heap(std::uint8_t*,
 // sees everything). Past the budget the list runs into the matrices the same
 // frame writes, and the renderer receives garbage. So a custom level gets a
 // budget for its whole model in every viewport, and every other level gets the
-// retail table back. A changed table invalidates gPrevPlayerCount, and that
-// makes the retail allocator rebuild the heap in this same call.
+// retail table back - raised to the Track Select floor when the menu previews
+// .dkrmap courses. A changed table invalidates gPrevPlayerCount, and that
+// makes the retail allocator rebuild the heap in this same call. The model
+// heap is left to level_load's hook, which this load reaches next.
 extern "C" void dkr_custom_tracks_prepare_level(std::uint8_t* rdram,
                                                 recomp_context* context) {
-    // gNumF3dCmdsPerPlayer in thread3_main.c, identical in both revisions.
-    constexpr std::int32_t kRetailCommands[4] = {4500, 7000, 11000, 11000};
-    constexpr std::int32_t kCommandsPerBatch = 10;
-    constexpr std::int32_t kCommandLimit = 0x20000;
-    dkr_custom_tracks_prepare_memory(rdram, context);
-
     const auto level = static_cast<std::int32_t>(context->r4);
-    prepare_track_heap(level);
+    // The heap alloc_displaylist_heap is about to build comes out of the pool.
+    grow_main_pool_for_level(rdram, level);
+
     const std::int32_t batches = dkr::runtime::custom_tracks::level_model_batches(level);
-    // gNumF3dCmdsPerPlayer and gPrevPlayerCount, verified against
-    // ver/symbols/symbol_addrs.us.v{77,80}.txt.
-    const bool rev_a = dkr::runtime::revision_addresses::gSelectedRevision ==
-                       dkr::runtime::rom::Revision::UsV80;
-    const std::uint32_t table = rev_a ? 0x800DD920U : 0x800DD3B0U;
-    const std::uint32_t previous_players = rev_a ? 0x80123A8CU : 0x8012350CU;
-    bool changed = false;
-    for (int players = 0; players < 4; ++players) {
-        std::int32_t commands = kRetailCommands[players];
-        if (batches > 0) {
-            const std::int64_t budget = std::int64_t(commands) +
-                                        std::int64_t(batches) * kCommandsPerBatch * (players + 1);
-            commands = static_cast<std::int32_t>(std::min<std::int64_t>(budget, kCommandLimit));
-        }
-        const std::uint32_t entry = table + static_cast<std::uint32_t>(players) * 4U;
-        if (read_word(rdram, entry) != commands) {
-            write_word(rdram, entry, commands);
-            changed = true;
-        }
-    }
-    if (!changed) {
+    const DisplayListGlobals globals = display_list_globals();
+    if (!write_display_list_budget(rdram, batches)) {
         return;
     }
-    write_word(rdram, previous_players, -1);
+    write_word(rdram, globals.previous_players, -1);
     if (batches > 0) {
         std::fprintf(stderr,
                      "[custom-tracks] level %d draws up to %d batches; display lists sized for "
                      "%d commands with one player\n",
                      static_cast<int>(level), static_cast<int>(batches),
-                     static_cast<int>(read_word(rdram, table)));
+                     static_cast<int>(read_word(rdram, globals.table)));
     }
 }
 

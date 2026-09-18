@@ -256,8 +256,11 @@ display-list opcode some frames later, never the overflow itself.
 So the arena is measured before the load and the reservation sized to fit.
 `custom_tracks::measure_level_model_arena` walks the payload exactly as
 `track_init_collision` does, including the edge planes a neighbouring pair
-shares, and `load_level_game`'s entry hook leaves the result for a hook inside
-`generate_track`. That hook writes `s5`, the register holding the constant, at
+shares, and the `level_load` entry hook leaves the result for a hook inside
+`generate_track`. It has to be `level_load`: Track Select previews load through
+`load_level_for_menu`, never `load_level_game`, and a preview that kept the
+retail heap overflowed it and crashed in `obj_loop_texscroll` on a wild
+texture pointer. That hook writes `s5`, the register holding the constant, at
 the one instruction where it is complete and before anything has read it:
 
 ```
@@ -299,6 +302,19 @@ The log shows
 `level N draws up to B batches; display lists sized for C commands`. A track
 that ships no model of its own keeps the retail budget.
 
+Track Select previews draw into the menu's one-player list, and their path
+cannot resize it: the preview often loads on thread30 while the menu is still
+drawing. So the runtime sizes it at boot. `level_global_init` loads the header
+table, which publishes each course's level ID, just before
+`default_alloc_displaylist_heap` first allocates the lists. At that point the
+runtime takes the largest batch count among the `.dkrmap` courses Track Select
+offers. It grows the pool and raises every table entry to at least that
+course's one-player budget. Later loads keep that floor, so the heap a race
+leaves for the menu can still draw every preview. The log shows
+`Track Select previews draw up to B batches`. A course enabled after boot that
+needs more is named in the log at preview time; restart the game to size the
+lists for it.
+
 ## Verified end to end
 
 A smoke test installed one track whose payload is a byte copy of Ancient
@@ -323,6 +339,15 @@ when no legacy courses are enabled. Preview and race loads use each `.dkrmap`'s
 appended level ID. The native menu supports IDs below 128; higher IDs remain
 available through Track Lab. Hub, boss and special level types are not added
 to the normal-race grid.
+
+World `6` only files the course; the game never sees it. Retail indexes
+five-world arrays with `header->world - 1`. The post-race mosaic read past
+`gTracksMenuBgTextureIndices`, and `bgdraw_texture` then tiled a non-texture
+until its display list ran out of memory. A sixth world would also grow
+`gNumberOfWorlds`, and with it the save file's per-world fields. So when a
+header with world `6` is served, the runtime writes Dino Domain (`1`) in its
+place. That is the world whose background Track Select already draws for the
+category. The catalogue reads the world from the package itself.
 
 An explicit World selection in the addon overrides the default. Existing
 packages retain their exported world: select `WORLD_CUSTOM_TRACKS` and export
