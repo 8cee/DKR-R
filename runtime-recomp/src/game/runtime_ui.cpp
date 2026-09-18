@@ -114,10 +114,45 @@ int g_race_button_sidebar = 0;
 
 namespace ImGui {
 
+// Racing's periods nearly touch and a trailing "..." reads as an underscore.
+// `spread` em of tracking goes after each of its periods, less the last
+// (.play-ellipsis in the launcher study), after a .04 em lead-in.
+bool RaceLabelHasEllipsis(const char* begin, const char* end) {
+    return end - begin >= 3 && std::memcmp(end - 3, "...", 3U) == 0;
+}
+
+float RaceLabelWidth(ImFont* font, float size, const char* begin,
+                     const char* end, float spread) {
+    const float plain = font->CalcTextSizeA(size, FLT_MAX, 0.0F, begin, end).x;
+    if (spread <= 0.0F || !RaceLabelHasEllipsis(begin, end)) return plain;
+    return plain + size * (0.04F + spread * 2.0F);
+}
+
+void DrawRaceLabel(ImDrawList* draw, ImFont* font, float size, ImVec2 at,
+                   ImU32 colour, const char* begin, const char* end,
+                   float spread) {
+    if (spread <= 0.0F || !RaceLabelHasEllipsis(begin, end)) {
+        draw->AddText(font, size, at, colour, begin, end);
+        return;
+    }
+    const char* dots = end - 3;
+    draw->AddText(font, size, at, colour, begin, dots);
+    float x = at.x + font->CalcTextSizeA(size, FLT_MAX, 0.0F, begin, dots).x +
+              size * 0.04F;
+    const float advance = font->CalcTextSizeA(size, FLT_MAX, 0.0F, dots, dots + 1).x;
+    for (int dot = 0; dot < 3; ++dot) {
+        draw->AddText(font, size, {x, at.y}, colour, dots, dots + 1);
+        x += advance + size * spread;
+    }
+}
+
 // The checker, border and label plate of a hovered or focused race button.
 // `amount` fades the checker and plate in; `plate_scale` grows the plate.
+// The label uses `font` at `font_size` when given, else the current font.
 void DrawRaceButtonHover(const char* label, ImVec2 minimum, ImVec2 maximum,
-                         float amount, float plate_scale) {
+                         float amount, float plate_scale,
+                         ImFont* font = nullptr, float font_size = 0.0F,
+                         float ellipsis_spread = 0.0F) {
     if (amount <= 0.0F) return;
     ImDrawList* draw = GetWindowDrawList();
     const float width = maximum.x - minimum.x;
@@ -174,7 +209,11 @@ void DrawRaceButtonHover(const char* label, ImVec2 minimum, ImVec2 maximum,
     draw->AddRect(minimum, maximum, faded(255, 218, 99, 245),
                   rounding, 0, 1.5F);
     const char* rendered_end = FindRenderedTextEnd(label);
-    const ImVec2 text_size = CalcTextSize(label, rendered_end, true);
+    if (font == nullptr) font = GetFont();
+    if (font_size <= 0.0F) font_size = GetFontSize();
+    const ImVec2 text_size{
+        RaceLabelWidth(font, font_size, label, rendered_end, ellipsis_spread),
+        font->CalcTextSizeA(font_size, FLT_MAX, 0.0F, label, rendered_end).y};
     const ImVec2 text_position{
         minimum.x + (width - text_size.x) * GetStyle().ButtonTextAlign.x,
         minimum.y + (height - text_size.y) * GetStyle().ButtonTextAlign.y};
@@ -208,10 +247,12 @@ void DrawRaceButtonHover(const char* label, ImVec2 minimum, ImVec2 maximum,
                   plate_rounding, 0, 1.0F);
     draw->PushClipRect({minimum.x + 5.0F, minimum.y + 4.0F},
                        {maximum.x - 5.0F, maximum.y - 4.0F}, true);
-    draw->AddText({text_position.x + 1.0F, text_position.y + 1.0F},
-                  IM_COL32(0, 0, 0, 185), label, rendered_end);
-    draw->AddText(text_position, IM_COL32(255, 249, 222, 255), label,
-                  rendered_end);
+    DrawRaceLabel(draw, font, font_size,
+                  {text_position.x + 1.0F, text_position.y + 1.0F},
+                  IM_COL32(0, 0, 0, 185), label, rendered_end, ellipsis_spread);
+    DrawRaceLabel(draw, font, font_size, text_position,
+                  IM_COL32(255, 249, 222, 255), label, rendered_end,
+                  ellipsis_spread);
     draw->PopClipRect();
 }
 
@@ -503,6 +544,8 @@ bool g_open_host_friend_invites = false;
 bool g_online_code_keyboard_pending = false;
 std::atomic<bool> g_online_code_keyboard_visible{false};
 std::atomic<bool> g_online_code_keyboard_cancel_requested{false};
+// The frame the Online lobby panel drew the start countdown itself.
+int g_online_countdown_panel_frame = -1;
 int g_online_host_control = static_cast<int>(
     dkr::runtime::netplay::HostControlPolicy::GuidedUntilCharacterSelect);
 int g_online_maximum_players = 2;
@@ -1162,6 +1205,7 @@ void LoadLauncherFonts() {
         g_paddock_sign[index] = add_racing_font(kPaddockSignSizes[index]);
     }
     LoadPaddockReadingFonts(io.Fonts);
+    LoadPaddockMonoFonts(io.Fonts);
 
     const auto add_jumpman_font = [&](float size) -> ImFont* {
         ImFontConfig config{};
@@ -4400,20 +4444,6 @@ dkr::runtime::netplay::CompatibilityManifest BuildNetplayManifest(
     return manifest;
 }
 
-const char* OnlineStateName(dkr::runtime::netplay::ConnectionState state) {
-    using dkr::runtime::netplay::ConnectionState;
-    switch (state) {
-    case ConnectionState::Hosting: return "HOSTING";
-    case ConnectionState::Connecting: return "CONNECTING";
-    case ConnectionState::AwaitingApproval: return "WAITING FOR HOST APPROVAL";
-    case ConnectionState::Lobby: return "IN LOBBY";
-    case ConnectionState::Loading: return "LOADING";
-    case ConnectionState::Running: return "RACING ONLINE";
-    case ConnectionState::Failed: return "CONNECTION FAILED";
-    default: return "OFFLINE";
-    }
-}
-
 const char* OnlineRouteName(dkr::runtime::netplay::Route route) {
     using dkr::runtime::netplay::Route;
     switch (route) {
@@ -4422,11 +4452,6 @@ const char* OnlineRouteName(dkr::runtime::netplay::Route route) {
     case Route::Relay: return "RELAY";
     default: return "MEASURING";
     }
-}
-
-const char* OnlineMethodName(dkr::runtime::netplay::ConnectionMethod method) {
-    (void)method;
-    return "QUICK JOIN";
 }
 
 std::string NormalizeOnlineInvite(std::string_view invite) {
@@ -4581,109 +4606,6 @@ bool CreateOnlineLobby() {
     return true;
 }
 
-float OnlineControlWidth(float preferred_width) {
-    return std::max(
-        std::min(preferred_width, ImGui::GetContentRegionAvail().x), 1.0F);
-}
-
-bool OnlineCombo(const char* label, const char* id, int* value,
-                 const char* items, float preferred_width) {
-    ImGui::TextWrapped("%s", label);
-    ImGui::SetNextItemWidth(OnlineControlWidth(preferred_width));
-    return ControlCombo(id, value, items);
-}
-
-bool OnlineSliderInt(const char* label, const char* id, int* value,
-                     int minimum, int maximum, float preferred_width,
-                     const char* format = "%d",
-                     ImGuiSliderFlags flags = 0) {
-    ImGui::TextWrapped("%s", label);
-    ImGui::SetNextItemWidth(OnlineControlWidth(preferred_width));
-    return ImGui::SliderInt(id, value, minimum, maximum, format, flags);
-}
-
-void DrawOnlineOverlaySettings(float width) {
-    ImGui::SeparatorText("ONLINE OVERLAYS");
-    ImGui::TextWrapped(
-        "These presentation-only controls remain available in the launcher "
-        "and while a game is running. They never change synchronization or "
-        "the shared simulation.");
-    ImGui::Dummy({0.0F, 8.0F});
-    const float setting_width = std::min(width, 520.0F);
-    if (ImGui::Checkbox("Show networking overlay",
-                        &g_network_overlay_enabled)) {
-        SaveSettings();
-    }
-    if (g_network_overlay_enabled) {
-        if (OnlineCombo("Network overlay position",
-                        "##online-network-overlay-position",
-                        &g_network_overlay_position,
-                        "Top left\0Top right\0Bottom left\0Bottom right\0",
-                        setting_width)) {
-            SaveSettings();
-        }
-        if (OnlineCombo("Network overlay detail",
-                        "##online-network-overlay-detail",
-                        &g_network_overlay_detail,
-                        "Compact\0Standard\0Detailed\0", setting_width)) {
-            SaveSettings();
-        }
-        if (ImGui::Checkbox("Network details on one row",
-                            &g_network_overlay_single_row)) {
-            SaveSettings();
-        }
-    }
-    if (ImGui::Checkbox("Show controller input overlay",
-                        &g_controller_input_overlay_enabled)) {
-        SaveSettings();
-    }
-    if (g_controller_input_overlay_enabled) {
-        if (OnlineCombo("Controller overlay position",
-                        "##online-controller-overlay-position",
-                        &g_controller_input_overlay_position,
-                        "Top left\0Top right\0Bottom left\0Bottom right\0",
-                        setting_width)) {
-            SaveSettings();
-        }
-        ImGui::TextDisabled(
-            "Shows the local sample and Player 1's committed input lanes so you can verify exactly what the host received.");
-    }
-}
-
-void DrawOnlineInputProfile(float width, bool editable) {
-    if (editable) {
-        if (OnlineCombo("Local controls", "##online-local-controls",
-                        &g_online_input_profile,
-                        "Player 1 profile\0Player 2 profile\0"
-                        "Player 3 profile\0Player 4 profile\0",
-                        std::min(width, 520.0F))) {
-            g_online_input_profile = std::clamp(g_online_input_profile, 0, 3);
-            dkr::runtime::platform::set_online_input_profile(
-                static_cast<std::size_t>(g_online_input_profile));
-            SaveSettings();
-        }
-    } else {
-        ImGui::TextDisabled("Using Player %d controls. Change this in Online Profile.",
-                            g_online_input_profile + 1);
-    }
-
-    const auto controller =
-        dkr::runtime::platform::player_controller_status(
-            static_cast<std::size_t>(g_online_input_profile));
-    if (controller.connected) {
-        ImGui::TextColored(kAccent, "Ready: %s", controller.name.c_str());
-    } else if (dkr::runtime::input::keyboard_player() ==
-               g_online_input_profile) {
-        ImGui::TextColored(kAccent, "Ready: Keyboard");
-    } else {
-        ImGui::PushStyleColor(ImGuiCol_Text, kWarm);
-        ImGui::TextWrapped(
-            "This profile needs a controller or keyboard assignment in "
-            "CONTROLS before it can ready up.");
-        ImGui::PopStyleColor();
-    }
-}
-
 struct TextEntrySpec {
     char* value = nullptr;
     std::size_t capacity = 0U;
@@ -4734,25 +4656,6 @@ void RequestTextEntryKeyboard(TextEntryTarget target) {
     g_text_entry_edit[length] = '\0';
     g_text_entry_target = target;
     g_text_entry_keyboard_pending = true;
-}
-
-void DrawTextEntryButton(const char* label, TextEntryTarget target,
-                         float width) {
-    const TextEntrySpec spec = GetTextEntrySpec(target);
-    if (spec.value == nullptr) return;
-    ImGui::TextUnformatted(label);
-    ImGui::PushID(label);
-    const char* visible = spec.value[0] != '\0'
-        ? spec.value : "SELECT TO ENTER TEXT";
-    {
-        const ControlFontScope scope;
-        if (ImGui::Button(visible,
-                          {std::min(width, ImGui::GetContentRegionAvail().x),
-                           ImGui::GetFrameHeight()})) {
-            RequestTextEntryKeyboard(target);
-        }
-    }
-    ImGui::PopID();
 }
 
 void CommitTextEntry() {
@@ -4894,100 +4797,6 @@ void DrawTextEntryKeyboard() {
     ImGui::EndPopup();
 }
 
-void DrawOnlineLocalRacer(float width) {
-    ImGui::SeparatorText("YOUR RACER");
-    DrawTextEntryButton("Racer name", TextEntryTarget::RacerName,
-                        std::min(width, 520.0F));
-    DrawOnlineInputProfile(width, false);
-}
-
-void DrawOnlineRaceRules(float width) {
-    using namespace dkr::runtime::netplay;
-    ImGui::SeparatorText("HOST SETTINGS");
-    ImGui::TextWrapped(
-        "These settings are fixed when Player 1 creates the lobby. The "
-        "recommended defaults suit most connections.");
-    ImGui::Dummy({0.0F, 8.0F});
-
-    bool changed = false;
-    changed |= OnlineCombo(
-        "Menu ownership", "##online-menu-ownership", &g_online_host_control,
-        "HOST GUIDES MENUS UNTIL CHARACTER SELECT\0"
-        "HOST CONTROLS SHARED MENUS\0EVERY ASSIGNED PORT\0",
-        std::min(width, 620.0F));
-    int player_option = g_online_maximum_players - 2;
-    if (OnlineCombo("Maximum racers", "##online-maximum-racers", &player_option,
-                    "2 RACERS\0" "3 RACERS\0" "4 RACERS\0", std::min(width, 620.0F))) {
-        g_online_maximum_players = player_option + 2;
-        changed = true;
-    }
-    ImGui::TextWrapped(
-        "Normal races and minigames support two to four racers. Adventure remains a two-player mode.");
-    changed |= OnlineCombo(
-        "Synchronization", "##online-synchronization",
-        &g_online_synchronization,
-        "ROLLBACK - RECOMMENDED\0LOCKSTEP - LOW LATENCY ONLY\0",
-        std::min(width, 620.0F));
-
-    const bool rollback_mode =
-        static_cast<SynchronizationMode>(g_online_synchronization) ==
-        SynchronizationMode::Rollback;
-    if (rollback_mode) {
-        ImGui::TextWrapped(
-            "Prediction absorbs brief delays up to this window, then waits for real inputs. "
-            "Committed gameplay is never partially rewound.");
-        changed |= OnlineSliderInt(
-            "Rollback window (frames)", "##online-rollback-window",
-            &g_online_rollback_window, 2, 20, 240.0F);
-    } else {
-        ImGui::PushStyleColor(ImGuiCol_Text, kWarm);
-        ImGui::TextWrapped(
-            "Lockstep exposes connection variation as stalls. Use it only "
-            "between racers with a very stable, low-latency route.");
-        ImGui::PopStyleColor();
-    }
-    changed |= ImGui::Checkbox(
-        "Automatic input delay", &g_online_automatic_delay);
-    ImGui::BeginDisabled(g_online_automatic_delay);
-    changed |= OnlineSliderInt(
-        "Input delay (frames)", "##online-input-delay",
-        &g_online_manual_delay, 0, 9, 240.0F);
-    ImGui::EndDisabled();
-    if (!g_online_automatic_delay) {
-        ImGui::PushStyleColor(ImGuiCol_Text, kWarm);
-        ImGui::TextWrapped(
-            "A low manual delay can miss the input deadline on distant or unstable routes. "
-            "Use automatic delay to measure the slowest racer before launch. "
-            "The effective delay is shown in the lobby; it never changes mid-race.");
-        ImGui::PopStyleColor();
-        if (ImGui::Button("USE AUTOMATIC INPUT DELAY", {OnlineControlWidth(420.0F), 0.0F})) {
-            g_online_automatic_delay = true;
-            changed = true;
-        }
-    }
-    changed |= ImGui::Checkbox(
-        "Record deterministic replay", &g_online_record_replay);
-    if (changed) SaveSettings();
-}
-
-ImVec2 OnlineActionButtonSize(const char* label, float minimum_width,
-                              float minimum_height) {
-    const ImGuiStyle& style = ImGui::GetStyle();
-    const ImVec2 text_size = ImGui::CalcTextSize(label);
-    const float desired_width = std::max(
-        minimum_width,
-        std::ceil(text_size.x + style.FramePadding.x * 2.0F + 24.0F));
-    return {
-        OnlineControlWidth(desired_width),
-        std::max(minimum_height,
-                 std::ceil(text_size.y + style.FramePadding.y * 2.0F + 8.0F))};
-}
-
-bool OnlineButtonsFitOnOneLine(const ImVec2& first, const ImVec2& second) {
-    return first.x + ImGui::GetStyle().ItemSpacing.x + second.x <=
-        ImGui::GetContentRegionAvail().x;
-}
-
 void DrawOnlineCodeKeyboard() {
     constexpr const char* kPopupName = "ENTER QUICK JOIN CODE";
     constexpr std::string_view kCodeAlphabet =
@@ -5098,11 +4907,7 @@ void DrawOnlineCodeKeyboard() {
     ImGui::BeginDisabled(!complete);
     ImGui::PushStyleColor(ImGuiCol_Button, kRaceRed);
     if (ImGui::Button(accept_label, {action_width, action_height})) {
-        if (SetOnlineInvite(g_online_code_entry)) {
-            g_online_action_status = "Quick Join code " +
-                OnlineInviteLobbyToken(g_online_invite) +
-                " entered. Request host approval when ready.";
-        }
+        SetOnlineInvite(g_online_code_entry);
         ImGui::CloseCurrentPopup();
         g_online_code_keyboard_visible.store(false,
                                               std::memory_order_release);
@@ -5110,223 +4915,6 @@ void DrawOnlineCodeKeyboard() {
     ImGui::PopStyleColor();
     ImGui::EndDisabled();
     ImGui::EndPopup();
-}
-
-void DrawOnlineHostSetup(float width, bool rom_ready) {
-    using namespace dkr::runtime::netplay;
-    DrawOnlineLocalRacer(width);
-    ImGui::Dummy({0.0F, 14.0F});
-
-    ImGui::SeparatorText("CREATE A LOBBY");
-    ImGui::TextWrapped(
-        "Player 1 creates a private room, then shares its five-character "
-        "code with friends.");
-    DrawTextEntryButton("Lobby name", TextEntryTarget::LobbyName,
-                        std::min(width, 520.0F));
-    ImGui::Dummy({0.0F, 8.0F});
-    // Save validation can hit slow storage/antivirus. Keep one background read
-    // in flight and refresh the cache, never read the file at render frequency.
-    static std::future<dkr::runtime::saves::SaveInfo> previous_save_read;
-    static dkr::runtime::saves::SaveInfo previous_save_info;
-    static auto next_previous_save_read = std::chrono::steady_clock::time_point{};
-    const auto save_read_now = std::chrono::steady_clock::now();
-    if (previous_save_read.valid() && previous_save_read.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-        try { previous_save_info = previous_save_read.get(); } catch (...) { previous_save_info = {}; }
-        next_previous_save_read = save_read_now + std::chrono::seconds(2);
-    }
-    if (!previous_save_read.valid() && save_read_now >= next_previous_save_read)
-        previous_save_read = std::async(std::launch::async, [] { return dkr::runtime::saves::previous_online_adventure_info(); });
-    const bool previous_online_save = previous_save_info.valid;
-    if (OnlineCombo(
-            "Online Adventure save", "##online-save-seed-mode",
-            &g_online_save_seed_mode,
-            "Copy my single-player save\0Start with a fresh save\0Continue with previous session\0\0",
-            std::min(width, 520.0F))) {
-        SaveSettings();
-    }
-    const char* online_save_description = nullptr;
-    switch (static_cast<dkr::runtime::saves::OnlineSaveSeedMode>(
-        g_online_save_seed_mode)) {
-    case dkr::runtime::saves::OnlineSaveSeedMode::CopySinglePlayer:
-        online_save_description =
-            "Copies your current progress byte-for-byte into the online-only save. Your single-player file is never modified.";
-        break;
-    case dkr::runtime::saves::OnlineSaveSeedMode::Fresh:
-        online_save_description =
-            "Starts this online session with a new checksum-valid blank Adventure save.";
-        break;
-    case dkr::runtime::saves::OnlineSaveSeedMode::ContinuePreviousSession:
-        online_save_description = previous_online_save
-            ? "Continues the last host-owned online Adventure save."
-            : "No previous host-owned online session save is available yet.";
-        break;
-    }
-    ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
-    ImGui::TextWrapped("%s", online_save_description != nullptr
-        ? online_save_description : "Choose an online Adventure save.");
-    ImGui::PopStyleColor();
-    const bool continue_unavailable =
-        g_online_save_seed_mode == static_cast<int>(
-            dkr::runtime::saves::OnlineSaveSeedMode::ContinuePreviousSession) &&
-        !previous_online_save;
-    ImGui::BeginDisabled(!rom_ready || continue_unavailable);
-    ImGui::PushStyleColor(ImGuiCol_Button, kRaceRed);
-    constexpr const char* create_label = "CREATE QUICK JOIN LOBBY";
-    if (ImGui::Button(create_label,
-                      OnlineActionButtonSize(create_label, 420.0F, 48.0F))) {
-        CreateOnlineLobby();
-    }
-    ImGui::PopStyleColor();
-    ImGui::EndDisabled();
-}
-
-void DrawOnlineJoinSetup(float width, bool rom_ready) {
-    using namespace dkr::runtime::netplay;
-    DrawOnlineLocalRacer(width);
-    ImGui::Dummy({0.0F, 14.0F});
-    ImGui::SeparatorText("JOIN A FRIEND");
-    ImGui::TextWrapped(
-        "Enter the current code from Player 1. The host must approve every "
-        "join request.");
-    {
-        const ControlFontScope scope;
-        const char* code_text = g_online_invite[0] != '\0'
-            ? g_online_invite : "PRESS A TO ENTER CODE";
-        const float code_width = std::min(width, 360.0F);
-        ImGui::PushID("quick-join-code-entry");
-        if (ImGui::Button(code_text, {code_width, ImGui::GetFrameHeight()})) {
-            RequestOnlineCodeKeyboard();
-        }
-        ImGui::PopID();
-    }
-    ImGui::TextDisabled(
-        "Select the code box with a mouse or controller to open the on-screen keyboard.");
-    constexpr const char* paste_label = "PASTE CODE";
-    constexpr const char* request_label = "REQUEST TO JOIN";
-    const ImVec2 paste_size =
-        OnlineActionButtonSize(paste_label, 180.0F, 42.0F);
-    const ImVec2 request_size =
-        OnlineActionButtonSize(request_label, 210.0F, 42.0F);
-    const bool actions_share_line =
-        OnlineButtonsFitOnOneLine(paste_size, request_size);
-    if (ImGui::Button(paste_label, paste_size)) {
-        PasteOnlineInviteFromClipboard();
-    }
-    if (actions_share_line) ImGui::SameLine();
-    ImGui::BeginDisabled(!rom_ready || g_online_invite[0] == '\0');
-    if (ImGui::Button(request_label, request_size)) {
-        std::string error;
-        const std::string verified_invite =
-            NormalizeOnlineInvite(g_online_invite);
-        if (!SetOnlineInvite(verified_invite)) {
-            g_online_action_status =
-                "Enter the current five-character Quick Join code from Player 1.";
-        } else if (!session().join(verified_invite, g_online_player_name,
-                                   error)) {
-            g_online_action_status = error;
-        }
-    }
-    ImGui::EndDisabled();
-    DrawOnlineCodeKeyboard();
-}
-
-void DrawOnlineConnectionStatus(
-        const dkr::runtime::netplay::SessionView& view) {
-    using namespace dkr::runtime::netplay;
-    ImGui::SeparatorText("CONNECTION STATUS");
-    ImGui::TextWrapped("%s", view.status.c_str());
-    ImGui::TextDisabled(
-        "Encrypted Quick Join peer connection. Host is always Player 1.");
-
-    if (view.state == ConnectionState::Hosting ||
-        view.state == ConnectionState::Connecting ||
-        view.state == ConnectionState::AwaitingApproval) {
-        ImGui::Dummy({0.0F, 8.0F});
-        ImGui::SeparatorText("ADMISSION");
-        ImGui::TextDisabled(
-            "Sent %llu - received %llu - recognized %llu - accepted %llu.",
-            static_cast<unsigned long long>(view.packets_sent),
-            static_cast<unsigned long long>(view.packets_received),
-            static_cast<unsigned long long>(view.join_packets_recognized),
-            static_cast<unsigned long long>(view.join_packets_accepted));
-        ImGui::TextDisabled(
-            "Stale %llu - authentication rejected %llu - compatibility rejected %llu - queued %zu.",
-            static_cast<unsigned long long>(view.join_packets_stale),
-            static_cast<unsigned long long>(view.join_packets_auth_rejected),
-            static_cast<unsigned long long>(view.join_packets_manifest_rejected),
-            view.admission_packets_queued);
-    }
-
-    ImGui::Dummy({0.0F, 8.0F});
-    ImGui::SeparatorText("SYNCHRONIZATION");
-    ImGui::TextDisabled("Mode: %s.",
-        view.room.rules.synchronization == SynchronizationMode::Rollback
-            ? "ROLLBACK" : "LOCKSTEP");
-    ImGui::TextDisabled("Effective input delay: %u frame%s.",
-        view.input_delay_frames, view.input_delay_frames == 1U ? "" : "s");
-    if (!view.room.rules.automatic_input_delay && view.network_rtt_ms > 0U) {
-        const auto recommended = host_authoritative_input_delay_frames(
-            view.network_rtt_ms, view.network_jitter_ms, view.network_loss_percent,
-            view.method == ConnectionMethod::Lan);
-        if (view.input_delay_frames < recommended) {
-            ImGui::PushStyleColor(ImGuiCol_Text, kWarm);
-            ImGui::TextWrapped(
-                "Manual delay is below the current route estimate (%u frames). "
-                "This may cause prediction-limit waits or missed brief inputs. "
-                "Consider automatic delay in Host Settings before creating the next lobby.",
-                static_cast<unsigned>(recommended));
-            ImGui::PopStyleColor();
-        }
-    }
-    if (view.state == ConnectionState::Running) {
-        if (view.room.rules.synchronization ==
-            SynchronizationMode::Rollback) {
-            const auto rollback = rollback_metrics();
-            ImGui::TextDisabled(
-                "Rollback: frame %u - %u correction%s - %u replayed frame%s - largest %u frame%s.",
-                rollback.simulation_frame,
-                rollback.rollback_count,
-                rollback.rollback_count == 1U ? "" : "s",
-                rollback.replayed_frames,
-                rollback.replayed_frames == 1U ? "" : "s",
-                rollback.largest_rollback,
-                rollback.largest_rollback == 1U ? "" : "s");
-            ImGui::TextDisabled(
-                "Prediction lead: %.1f frame%s (window %u).",
-                rollback.frames_ahead,
-                rollback.frames_ahead == 1.0F ? "" : "s",
-                view.room.rules.rollback_window);
-        }
-        ImGui::TextDisabled(
-            "Network: %u ms app RTT - %u ms jitter - %.1f%% expired probes - %u input stall%s.",
-            view.network_rtt_ms, view.network_jitter_ms,
-            view.network_loss_percent, view.input_stalls,
-            view.input_stalls == 1U ? "" : "s");
-        if (view.input_stalls > 0U) {
-            ImGui::TextDisabled("Longest input wait: %u ms.",
-                                view.longest_input_stall_ms);
-        }
-        if (view.recovering) {
-            ImGui::PushStyleColor(ImGuiCol_Text, kWarm);
-            ImGui::TextWrapped(
-                "Connection variation detected. DKR-R is preparing a "
-                "synchronized recovery point; keep racing.");
-            ImGui::PopStyleColor();
-        }
-    }
-    if (view.rollback_certified) {
-        ImGui::TextDisabled(
-            "Determinism guard verified (%u synchronized correction%s).",
-            view.authoritative_corrections,
-            view.authoritative_corrections == 1U ? "" : "s");
-    } else if (view.state == ConnectionState::Running) {
-        ImGui::TextDisabled("Waiting for Player 1 authority validation...");
-    }
-    if (view.last_verified_frame > 0U) {
-        ImGui::TextDisabled(
-            "Determinism verified through simulation frame %u.",
-            view.last_verified_frame);
-    }
 }
 
 void CopyFriendCodeToClipboard(std::string_view code) {
@@ -5581,166 +5169,6 @@ void DrawFriendSearchKeyboard() {
     ImGui::EndPopup();
 }
 
-void DrawFriendInvitations(float width);
-
-void DrawOnlineProfile(float width) {
-    using namespace dkr::runtime::netplay;
-    FriendService& service = friend_service();
-    ImGui::SeparatorText("ONLINE PROFILE");
-    ImGui::TextWrapped(
-        "Your display name and private identity stay on this device and are "
-        "retained between DKR-R updates.");
-    DrawTextEntryButton("Display name", TextEntryTarget::OnlineProfileName,
-                        std::min(width, 520.0F));
-    constexpr const char* save_label = "SAVE ONLINE PROFILE";
-    if (ImGui::Button(save_label,
-                      OnlineActionButtonSize(save_label, 260.0F, 44.0F))) {
-        std::string error;
-        if (service.set_display_name(g_online_profile_name, error)) {
-            std::memcpy(g_online_player_name, g_online_profile_name,
-                        sizeof(g_online_player_name));
-            g_online_player_name[sizeof(g_online_player_name) - 1U] = '\0';
-            SaveSettings();
-            g_online_action_status = "Online Profile saved.";
-        } else {
-            g_online_action_status = error;
-        }
-    }
-    ImGui::Dummy({0.0F, 12.0F});
-    ImGui::SeparatorText("PRIVACY");
-    bool appear_offline = service.appear_offline();
-    if (ImGui::Checkbox("Appear offline", &appear_offline)) {
-        std::string error;
-        if (service.set_appear_offline(appear_offline, error)) {
-            g_online_action_status = appear_offline
-                ? "You now appear offline. Your hosted lobby is hidden from friends."
-                : "You now appear online to friends.";
-        } else {
-            g_online_action_status = error;
-        }
-    }
-    ImGui::TextDisabled(
-        "Appearing offline hides your status and hosted lobby. Manual Quick Join still works.");
-    bool allow_lobby_invites = service.allow_lobby_invites();
-    if (ImGui::Checkbox("Allow friend lobby invites", &allow_lobby_invites)) {
-        std::string error;
-        if (service.set_allow_lobby_invites(allow_lobby_invites, error)) {
-            g_online_action_status = allow_lobby_invites
-                ? "Friend lobby invitations are enabled."
-                : "Friend lobby invitations are disabled.";
-        } else {
-            g_online_action_status = error;
-        }
-    }
-    ImGui::TextDisabled(
-        "When disabled, incoming one-click lobby invitations are declined. Quick Join remains available.");
-    ImGui::Dummy({0.0F, 12.0F});
-    ImGui::SeparatorText("DEVICE IDENTITY");
-    ImGui::TextDisabled("%s", service.identity_label().c_str());
-    ImGui::TextWrapped(
-        "This short label helps distinguish duplicate names. DKR-R never "
-        "shows controller serial numbers, operating-system paths or hardware IDs.");
-    ImGui::TextColored(service.presence_available() ? kAccent : kWarm, "%s",
-                       service.status().c_str());
-    ImGui::Dummy({0.0F, 14.0F});
-    ImGui::SeparatorText("LOCAL CONTROLS");
-    ImGui::TextWrapped(
-        "Choose which local controller profile is sent when you host or join an online race.");
-    DrawOnlineInputProfile(width, true);
-    ImGui::Dummy({0.0F, 14.0F});
-    ImGui::SeparatorText("FRIEND NOTIFICATIONS");
-    if (ImGui::Checkbox("Tell me when a friend comes online",
-                        &g_friend_online_notifications)) {
-        SaveSettings();
-    }
-    if (OnlineCombo("Online alert position", "##online-alert-position",
-                    &g_friend_online_notification_position,
-                    "TOP LEFT\0TOP RIGHT\0BOTTOM LEFT\0BOTTOM RIGHT\0",
-                    std::min(width, 420.0F))) {
-        g_friend_online_notification_position = std::clamp(
-            g_friend_online_notification_position, 0, 3);
-        SaveSettings();
-    }
-    ImGui::TextDisabled(
-        "Friend presence alerts respect the option above. Lobby invitations "
-        "always use this corner so an invitation cannot be missed.");
-    ImGui::Dummy({0.0F, 10.0F});
-    if (ImGui::Button("READ THE ONLINE MP GUIDE",
-                      {std::min(width, 340.0F), 44.0F})) {
-        g_online_guide_reopen_requested = true;
-    }
-    ImGui::Dummy({0.0F, 14.0F});
-    DrawFriendInvitations(width);
-}
-
-void DrawFriendInvitations(float width) {
-    using namespace dkr::runtime::netplay;
-    FriendService& service = friend_service();
-    ImGui::SeparatorText("SHARE A FRIEND CODE");
-    ImGui::TextWrapped(
-        "Friend Codes establish a trusted connection. They do not bypass "
-        "the host approval prompt used when joining a lobby.");
-    OnlineCombo("Code lifetime", "##online-friend-code-lifetime",
-                &g_friend_invite_lifetime,
-                "PERMANENT\0ONE USE\0TIMED\0", std::min(width, 420.0F));
-    if (g_friend_invite_lifetime == 2) {
-        OnlineSliderInt("Active minutes", "##online-friend-code-minutes",
-                        &g_friend_invite_minutes, 1, 60 * 24 * 30, 260.0F,
-                        "%d", ImGuiSliderFlags_AlwaysClamp);
-    }
-    constexpr const char* generate_label = "GENERATE FRIEND CODE";
-    if (ImGui::Button(generate_label,
-                      OnlineActionButtonSize(generate_label, 260.0F, 44.0F))) {
-        FriendInviteView invite{};
-        std::string error;
-        const FriendInviteLifetime lifetime =
-            static_cast<FriendInviteLifetime>(
-                std::clamp(g_friend_invite_lifetime, 0, 2));
-        if (service.create_invite(lifetime,
-                                  std::chrono::minutes(g_friend_invite_minutes),
-                                  invite, error)) {
-            CopyFriendCodeToClipboard(invite.code);
-        } else {
-            g_online_action_status = error;
-        }
-    }
-    const auto code_snapshot = service.snapshot();
-    for (const FriendInviteView& invite : code_snapshot->invitations) {
-        ImGui::PushID(static_cast<int>(invite.invite_id & 0x7FFFFFFFU));
-        ImGui::PushStyleColor(ImGuiCol_ChildBg,
-                              {0.045F, 0.18F, 0.25F, 0.96F});
-        const float route_status_height = ImGui::CalcTextSize(invite.connection_status.c_str(), nullptr, false,
-            std::max(1.0F, width - 32.0F)).y;
-        BeginPaddedChild("friend-invite", {width, 158.0F + route_status_height}, true,
-                         ImGuiWindowFlags_NoScrollbar, {16.0F, 14.0F});
-        ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x);
-        ImGui::TextWrapped("%s", invite.code.c_str());
-        ImGui::PopTextWrapPos();
-        const char* lifetime = invite.lifetime == FriendInviteLifetime::Permanent
-            ? "PERMANENT" : invite.lifetime == FriendInviteLifetime::SingleUse
-                ? "ONE USE" : "TIMED";
-        ImGui::TextDisabled("%s", lifetime);
-        DrawDisabledWrapped(invite.connection_status);
-        if (ImGui::Button("COPY", {120.0F, 36.0F})) {
-            CopyFriendCodeToClipboard(invite.code);
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("REVOKE", {130.0F, 36.0F})) {
-            std::string error;
-            if (!service.revoke_invite(invite.invite_id, error)) {
-                g_online_action_status = error;
-            }
-        }
-        ImGui::EndChild();
-        ImGui::PopStyleColor();
-        ImGui::PopID();
-    }
-    if (ImGui::Button("COPY FRIEND CONNECTION DIAGNOSTICS", {ImGui::GetContentRegionAvail().x, 44.0F})) {
-        ImGui::SetClipboardText(service.diagnostics().c_str());
-        g_online_action_status = "Connection diagnostics copied. No friend codes, names, keys or addresses are included.";
-    }
-}
-
 std::string FriendDisplayLabel(const dkr::runtime::netplay::FriendView& racer) {
     return racer.nickname.empty() ? racer.display_name : racer.nickname;
 }
@@ -5787,551 +5215,6 @@ dkr::runtime::netplay::FriendLobbyAdvertisement FriendLobbyFromSession(
         if (player.occupied) ++advertisement.players;
     }
     return advertisement;
-}
-
-void DrawFriends(float width) {
-    using namespace dkr::runtime::netplay;
-    FriendService& service = friend_service();
-    const auto snapshot = service.snapshot();
-    const auto& requests = snapshot->requests;
-    const bool have_incoming = std::any_of(
-        requests.begin(), requests.end(),
-        [](const FriendRequestView& request) { return request.incoming; });
-    if (have_incoming) {
-        ImGui::Dummy({0.0F, 14.0F});
-        ImGui::SeparatorText("FRIEND REQUESTS");
-        for (const FriendRequestView& request : requests) {
-            if (!request.incoming) continue;
-            ImGui::PushID(static_cast<int>(request.request_id & 0x7FFFFFFFU));
-            ImGui::TextWrapped("%s", request.display_name.c_str());
-            DrawDisabledWrapped(request.delivery_status);
-            const bool stack = ImGui::GetContentRegionAvail().x < 410.0F;
-            const float action_width = stack ? ImGui::GetContentRegionAvail().x : 130.0F;
-            if (ImGui::Button("ACCEPT", {action_width, 38.0F})) {
-                std::string error;
-                if (!service.accept_request(request.request_id, error))
-                    g_online_action_status = error;
-            }
-            if (!stack) ImGui::SameLine();
-            if (ImGui::Button("DECLINE", {action_width, 38.0F})) {
-                std::string error;
-                if (!service.reject_request(request.request_id, false, error))
-                    g_online_action_status = error;
-            }
-            if (!stack) ImGui::SameLine();
-            if (ImGui::Button("BLOCK", {action_width, 38.0F})) {
-                std::string error;
-                if (!service.reject_request(request.request_id, true, error))
-                    g_online_action_status = error;
-            }
-            ImGui::Separator();
-            ImGui::PopID();
-        }
-    }
-
-    if (std::any_of(requests.begin(), requests.end(), [](const auto& request) { return !request.incoming; })) {
-        ImGui::SeparatorText("OUTGOING REQUESTS");
-        DrawDisabledWrapped("Requests are kept on this device until both racers are reachable. Adding several codes does not require waiting for each one to finish.");
-        for (const auto& request : requests) {
-            if (request.incoming) continue;
-            ImGui::PushID(static_cast<int>(request.request_id & 0x7FFFFFFFU));
-            ImGui::TextWrapped("%s", request.display_name.c_str());
-            DrawDisabledWrapped(request.delivery_status);
-            ImGui::BeginDisabled(!request.can_retry);
-            if (ImGui::Button("RETRY NOW", {ImGui::GetContentRegionAvail().x, 38.0F})) {
-                std::string error;
-                if (!service.retry_request(request.request_id, error)) g_online_action_status = error;
-            }
-            ImGui::EndDisabled();
-            if (ImGui::Button("CANCEL REQUEST", {ImGui::GetContentRegionAvail().x, 38.0F})) {
-                std::string error;
-                if (!service.reject_request(request.request_id, false, error)) {
-                    g_online_action_status = error;
-                } else {
-                    g_online_action_status = "Friend request cancelled locally. Saving and notification to the other racer continue in the background.";
-                }
-            }
-            ImGui::Separator();
-            ImGui::PopID();
-        }
-    }
-    ImGui::SeparatorText("FRIENDS");
-    const float friends_width = std::max(
-        std::min(width, ImGui::GetContentRegionAvail().x), 1.0F);
-    constexpr const char* add_label = "ADD FRIEND";
-    if (ImGui::Button(add_label, {friends_width, 44.0F})) {
-        if (g_friend_code_entry[0] == '\0') {
-            std::memcpy(g_friend_code_entry, "DKR-", 5U);
-        }
-        g_friend_code_keyboard_pending = true;
-    }
-    DrawFriendCodeKeyboard();
-    ImGui::Dummy({0.0F, 6.0F});
-    const int toolbar_columns = friends_width >= 720.0F ? 3 : 1;
-    if (ImGui::BeginTable("friends-toolbar", toolbar_columns,
-                          ImGuiTableFlags_SizingStretchSame,
-                          {friends_width, 0.0F})) {
-        ImGui::TableNextColumn();
-        {
-            const ControlFontScope scope;
-            const char* search_text = g_friend_search[0] != '\0'
-                ? g_friend_search : "SEARCH FRIENDS...";
-            if (ImGui::Button(search_text,
-                              {-1.0F, ImGui::GetFrameHeight()})) {
-                RequestFriendSearchKeyboard();
-            }
-        }
-        ImGui::TableNextColumn();
-        ImGui::SetNextItemWidth(-1.0F);
-        ControlCombo("##friend-filter", &g_friend_filter,
-                     "ALL FRIENDS\0ONLINE\0OFFLINE\0BLOCKED\0");
-        ImGui::TableNextColumn();
-        ImGui::SetNextItemWidth(-1.0F);
-        ControlCombo("##friend-sort", &g_friend_sort,
-                     "ONLINE FIRST\0NAME A-Z\0NAME Z-A\0RECENTLY SEEN\0");
-        ImGui::EndTable();
-    }
-    DrawFriendSearchKeyboard();
-
-    const std::string query = LowerAscii(g_friend_search);
-    static std::shared_ptr<const FriendServiceSnapshot> cached_snapshot;
-    static std::string cached_query;
-    static int cached_filter = -1, cached_sort = -1;
-    static std::vector<FriendView> racers;
-    if (snapshot != cached_snapshot || query != cached_query ||
-        g_friend_filter != cached_filter || g_friend_sort != cached_sort) {
-    cached_snapshot = snapshot;
-    cached_query = query;
-    cached_filter = g_friend_filter;
-    cached_sort = g_friend_sort;
-    racers = snapshot->friends;
-    racers.erase(std::remove_if(racers.begin(), racers.end(),
-        [&](const FriendView& racer) {
-            const bool filter_match = g_friend_filter == 0 ||
-                (g_friend_filter == 1 && racer.online && !racer.blocked) ||
-                (g_friend_filter == 2 && !racer.online && !racer.blocked) ||
-                (g_friend_filter == 3 && racer.blocked);
-            if (!filter_match) return true;
-            if (query.empty()) return false;
-            const std::string searchable = LowerAscii(
-                FriendDisplayLabel(racer) + " " + racer.display_name + " " +
-                racer.identity);
-            return searchable.find(query) == std::string::npos;
-        }), racers.end());
-    const auto name_less = [](const FriendView& left, const FriendView& right) {
-        return LowerAscii(FriendDisplayLabel(left)) <
-               LowerAscii(FriendDisplayLabel(right));
-    };
-    if (g_friend_sort == 1) {
-        std::stable_sort(racers.begin(), racers.end(), name_less);
-    } else if (g_friend_sort == 2) {
-        std::stable_sort(racers.begin(), racers.end(),
-            [&](const FriendView& left, const FriendView& right) {
-                return name_less(right, left);
-            });
-    } else if (g_friend_sort == 3) {
-        std::stable_sort(racers.begin(), racers.end(),
-            [](const FriendView& left, const FriendView& right) {
-                return left.last_seen_unix > right.last_seen_unix;
-            });
-    } else {
-        std::stable_sort(racers.begin(), racers.end(),
-            [&](const FriendView& left, const FriendView& right) {
-                if (left.blocked != right.blocked) return !left.blocked;
-                if (left.online != right.online) return left.online;
-                return name_less(left, right);
-            });
-    }
-
-    }
-    if (racers.empty()) {
-        ImGui::TextDisabled(query.empty()
-            ? "No friends match this filter."
-            : "No friends match that search.");
-    }
-    const int card_columns = friends_width >= 840.0F
-        ? 3 : friends_width >= 560.0F ? 2 : 1;
-    if (!racers.empty() &&
-        ImGui::BeginTable("friend-card-grid", card_columns,
-                          ImGuiTableFlags_SizingStretchSame,
-                          {friends_width, 0.0F})) {
-        for (const FriendView& racer : racers) {
-            ImGui::TableNextColumn();
-            ImGui::PushID(racer.identity.c_str());
-            ImGui::PushStyleColor(ImGuiCol_ChildBg,
-                                  {0.045F, 0.18F, 0.25F, 0.96F});
-            constexpr ImVec2 kFriendCardPadding{16.0F, 16.0F};
-            const float friend_card_width = std::max(
-                ImGui::GetContentRegionAvail().x, 1.0F);
-            const float friend_card_inner_width = std::max(
-                friend_card_width - kFriendCardPadding.x * 2.0F, 1.0F);
-            const std::string label = FriendDisplayLabel(racer);
-            const std::string secondary = !racer.nickname.empty()
-                ? "Racer: " + racer.display_name : racer.identity;
-            const float friend_card_height = std::max(
-                248.0F,
-                PaddedCardHeight(
-                    {WrappedTextHeight(label, friend_card_inner_width),
-                     WrappedTextHeight(secondary, friend_card_inner_width),
-                     ImGui::GetTextLineHeight(), 36.0F, 36.0F},
-                    kFriendCardPadding));
-            if (BeginPaddedChild("friend-card",
-                    {0.0F, friend_card_height}, true,
-                    ImGuiWindowFlags_NoScrollbar |
-                        ImGuiWindowFlags_NoScrollWithMouse,
-                    kFriendCardPadding)) {
-                ImGui::TextWrapped("%s", label.c_str());
-                DrawDisabledWrapped(secondary);
-                if (racer.blocked) {
-                    ImGui::TextColored(kRaceRed, "BLOCKED");
-                } else {
-                    ImGui::TextColored(racer.online ? kAccent : kMuted,
-                                       "%s", racer.online ? "ONLINE" : "OFFLINE");
-                }
-                if (ImGui::Button("SET NICKNAME", {-1.0F, 36.0F})) {
-                    g_friend_action_identity = racer.identity;
-                    const std::size_t length = std::min(
-                        racer.nickname.size(), sizeof(g_friend_nickname) - 1U);
-                    std::memcpy(g_friend_nickname, racer.nickname.data(), length);
-                    g_friend_nickname[length] = '\0';
-                    RequestTextEntryKeyboard(TextEntryTarget::FriendNickname);
-                }
-                if (racer.blocked) {
-                    if (ImGui::Button("UNBLOCK", {-1.0F, 36.0F})) {
-                        std::string error;
-                        if (!service.unblock_friend(racer.identity, error))
-                            g_online_action_status = error;
-                    }
-                } else {
-                    const float action_gap = ImGui::GetStyle().ItemSpacing.x;
-                    const float action_width = std::max(
-                        (ImGui::GetContentRegionAvail().x - action_gap) * 0.5F,
-                        1.0F);
-                    if (ImGui::Button("REMOVE", {action_width, 36.0F})) {
-                        g_friend_action_identity = racer.identity;
-                        g_friend_remove_pending = true;
-                    }
-                    ImGui::SameLine(0.0F, action_gap);
-                    if (ImGui::Button("BLOCK", {action_width, 36.0F})) {
-                        g_friend_action_identity = racer.identity;
-                        g_friend_block_pending = true;
-                    }
-                }
-            }
-            ImGui::EndChild();
-            ImGui::PopStyleColor();
-            ImGui::PopID();
-        }
-        ImGui::EndTable();
-    }
-    if (g_friend_remove_pending) {
-        ImGui::OpenPopup("Remove DKR-R friend?");
-        g_friend_remove_pending = false;
-    }
-    if (g_friend_block_pending) {
-        ImGui::OpenPopup("Block DKR-R racer?");
-        g_friend_block_pending = false;
-    }
-    if (BeginPaddedModal("Remove DKR-R friend?",
-                         ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::TextWrapped(
-            "Remove this racer? They must exchange another Friend Code to return.");
-        if (ImGui::Button("CANCEL", {130.0F, 40.0F}))
-            ImGui::CloseCurrentPopup();
-        ImGui::SameLine();
-        if (ImGui::Button("REMOVE", {140.0F, 40.0F})) {
-            std::string error;
-            if (!service.remove_friend(g_friend_action_identity, error))
-                g_online_action_status = error;
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndPopup();
-    }
-    if (BeginPaddedModal("Block DKR-R racer?",
-                         ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::TextWrapped(
-            "Block this racer? Their presence and hosted lobbies will be hidden.");
-        if (ImGui::Button("CANCEL", {130.0F, 40.0F}))
-            ImGui::CloseCurrentPopup();
-        ImGui::SameLine();
-        ImGui::PushStyleColor(ImGuiCol_Button, kRaceRed);
-        if (ImGui::Button("BLOCK", {140.0F, 40.0F})) {
-            std::string error;
-            if (!service.block_friend(g_friend_action_identity, error))
-                g_online_action_status = error;
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::PopStyleColor();
-        ImGui::EndPopup();
-    }
-}
-
-void DrawOpenFriendLobbies(float width, bool launcher, bool rom_ready,
-                           bool session_active) {
-    using namespace dkr::runtime::netplay;
-    ImGui::SeparatorText("OPEN LOBBIES");
-    ImGui::TextWrapped(
-        "Invitations appear first. Other lobbies hosted by online friends "
-        "remain available as ordinary join requests.");
-    const auto lobby_snapshot = friend_service().snapshot();
-    const auto& incoming = lobby_snapshot->incoming_lobby_invites;
-    for (const FriendLobbyInviteView& invite : incoming) {
-        if (invite.status == FriendLobbyInviteStatus::Expired ||
-            invite.status == FriendLobbyInviteStatus::Cancelled) continue;
-        ImGui::PushID(static_cast<int>(invite.invite_id & 0x7FFFFFFFU));
-        ImGui::PushStyleColor(ImGuiCol_ChildBg,
-                              {0.12F, 0.12F, 0.025F, 0.98F});
-        constexpr ImVec2 kLobbyCardPadding{16.0F, 14.0F};
-        const float invite_card_width = std::max(
-            std::min(width, ImGui::GetContentRegionAvail().x), 1.0F);
-        const float invite_inner_width = std::max(
-            invite_card_width - kLobbyCardPadding.x * 2.0F, 1.0F);
-        const std::string invite_heading =
-            "INVITED BY " + invite.friend_display_name;
-        std::ostringstream invite_summary_stream;
-        invite_summary_stream << invite.lobby_code << "  -  "
-                              << invite.players << " / "
-                              << invite.maximum_players << " racers  -  "
-                              << invite.synchronization;
-        const std::string invite_summary = invite_summary_stream.str();
-        const bool compatible =
-            invite.compatibility == DKR_NETWORK_RELEASE_VERSION;
-        constexpr std::string_view kIncompatibleInvite =
-            "This invitation was created by a different DKR-R network build.";
-        const bool delivered =
-            invite.status == FriendLobbyInviteStatus::Delivered;
-        const float invite_action_gap = ImGui::GetStyle().ItemSpacing.x;
-        const bool stack_invite_actions = invite_inner_width < 370.0F;
-        const float invite_action_height = delivered
-            ? (stack_invite_actions
-                   ? 40.0F * 2.0F + ImGui::GetStyle().ItemSpacing.y
-                   : 40.0F)
-            : ImGui::GetTextLineHeight();
-        const float invite_card_height = std::max(
-            154.0F,
-            PaddedCardHeight(
-                {WrappedTextHeight(invite_heading, invite_inner_width),
-                 WrappedTextHeight(invite_summary, invite_inner_width),
-                 compatible ? 0.0F
-                            : WrappedTextHeight(kIncompatibleInvite,
-                                                invite_inner_width),
-                 invite_action_height},
-                kLobbyCardPadding));
-        BeginPaddedChild("friend-lobby-invitation",
-                         {invite_card_width, invite_card_height}, true,
-                         ImGuiWindowFlags_NoScrollbar |
-                             ImGuiWindowFlags_NoScrollWithMouse,
-                         kLobbyCardPadding);
-        DrawColoredWrapped(kWarm, invite_heading);
-        DrawDisabledWrapped(invite_summary);
-        if (!compatible) {
-            DrawColoredWrapped(kRaceRed, kIncompatibleInvite);
-        }
-        if (delivered) {
-            std::string error;
-            const float invite_action_region =
-                ImGui::GetContentRegionAvail().x;
-            const float accept_width = stack_invite_actions
-                ? invite_action_region
-                : std::max((invite_action_region - invite_action_gap) * 0.60F,
-                           1.0F);
-            const float decline_width = stack_invite_actions
-                ? invite_action_region
-                : std::max(invite_action_region - invite_action_gap -
-                               accept_width,
-                           1.0F);
-            ImGui::BeginDisabled(!launcher || !rom_ready || session_active ||
-                                 !compatible);
-            if (ImGui::Button("ACCEPT AND JOIN", {accept_width, 40.0F})) {
-                if (session().join_friend_invite(
-                        invite.lobby_code, g_online_player_name,
-                        invite.admission, error)) {
-                    g_joining_friend_invite = invite;
-                } else {
-                    g_online_action_status = error;
-                }
-            }
-            ImGui::EndDisabled();
-            if (!stack_invite_actions) {
-                ImGui::SameLine(0.0F, invite_action_gap);
-            }
-            if (ImGui::Button("DECLINE", {decline_width, 40.0F})) {
-                FriendLobbyInviteView declined{};
-                if (!friend_service().respond_lobby_invite(
-                        invite.invite_id, false, declined, error)) {
-                    g_online_action_status = error;
-                }
-            }
-        } else {
-            DrawDisabledWrapped(FriendLobbyInviteStatusLabel(invite.status));
-        }
-        ImGui::EndChild();
-        ImGui::PopStyleColor();
-        ImGui::PopID();
-    }
-    const auto& racers = lobby_snapshot->friends;
-    std::size_t visible = 0U;
-    for (const FriendView& racer : racers) {
-        if (racer.blocked || !racer.online || !racer.hosting || racer.lobby_code.empty()) continue;
-        ++visible;
-        ImGui::PushID(racer.identity.c_str());
-        ImGui::PushStyleColor(ImGuiCol_ChildBg,
-                              {0.045F, 0.18F, 0.25F, 0.96F});
-        constexpr ImVec2 kOpenLobbyPadding{16.0F, 14.0F};
-        const float open_lobby_width = std::max(
-            std::min(width, ImGui::GetContentRegionAvail().x), 1.0F);
-        const float open_lobby_inner_width = std::max(
-            open_lobby_width - kOpenLobbyPadding.x * 2.0F, 1.0F);
-        const std::string racer_label = FriendDisplayLabel(racer);
-        std::ostringstream lobby_summary_stream;
-        if (racer.ping_ms > 0U) {
-            lobby_summary_stream << racer.players << " / "
-                                 << racer.maximum_players << " racers  -  "
-                                 << racer.ping_ms << " ms";
-        } else {
-            lobby_summary_stream << racer.players << " / "
-                                 << racer.maximum_players << " racers";
-        }
-        const std::string lobby_summary = lobby_summary_stream.str();
-        const float open_lobby_height = std::max(
-            132.0F,
-            PaddedCardHeight(
-                {WrappedTextHeight(racer_label, open_lobby_inner_width),
-                 WrappedTextHeight(lobby_summary, open_lobby_inner_width),
-                 40.0F},
-                kOpenLobbyPadding));
-        BeginPaddedChild("open-friend-lobby",
-                         {open_lobby_width, open_lobby_height}, true,
-                         ImGuiWindowFlags_NoScrollbar |
-                             ImGuiWindowFlags_NoScrollWithMouse,
-                         kOpenLobbyPadding);
-        ImGui::TextWrapped("%s", racer_label.c_str());
-        DrawDisabledWrapped(lobby_summary);
-        ImGui::BeginDisabled(!launcher || !rom_ready || session_active);
-        if (ImGui::Button("REQUEST TO JOIN", {-1.0F, 40.0F})) {
-            std::string error;
-            if (!session().join(racer.lobby_code, g_online_player_name, error))
-                g_online_action_status = error;
-        }
-        ImGui::EndDisabled();
-        ImGui::EndChild();
-        ImGui::PopStyleColor();
-        ImGui::PopID();
-    }
-    if (visible == 0U) {
-        ImGui::TextDisabled(
-            "No friends are hosting an open DKR-R lobby right now.");
-    }
-    if (!launcher) {
-        ImGui::TextDisabled(
-            "Return to the launcher before joining another lobby.");
-    }
-}
-
-void DrawHostFriendInvites(float width,
-                           const dkr::runtime::netplay::SessionView& view) {
-    using namespace dkr::runtime::netplay;
-    FriendService& service = friend_service();
-    DirectSession& online = session();
-    const FriendLobbyAdvertisement lobby = FriendLobbyFromSession(view);
-    ImGui::SeparatorText("INVITE FRIENDS");
-    ImGui::TextWrapped(
-        "Invite an online friend directly to this lobby. Their invitation is "
-        "encrypted, expires after five minutes, and grants one admission to "
-        "this exact Quick Join code.");
-
-    std::map<std::string, FriendLobbyInviteView> latest;
-    const auto host_snapshot = service.snapshot();
-    for (const FriendLobbyInviteView& invite :
-         host_snapshot->outgoing_lobby_invites) {
-        if (!latest.contains(invite.friend_identity))
-            latest[invite.friend_identity] = invite;
-    }
-    const auto& friends = host_snapshot->friends;
-    std::size_t visible = 0U;
-    for (const FriendView& racer : friends) {
-        if (!racer.online || racer.blocked) continue;
-        ++visible;
-        ImGui::PushID(racer.identity.c_str());
-        ImGui::PushStyleColor(ImGuiCol_ChildBg,
-                              {0.045F, 0.18F, 0.25F, 0.96F});
-        const auto existing = latest.find(racer.identity);
-        const bool pending = existing != latest.end() &&
-            (existing->second.status == FriendLobbyInviteStatus::Sent ||
-             existing->second.status == FriendLobbyInviteStatus::Delivered);
-        constexpr ImVec2 kHostInvitePadding{16.0F, 14.0F};
-        const float host_invite_width = std::max(
-            std::min(width, ImGui::GetContentRegionAvail().x), 1.0F);
-        const float host_invite_inner_width = std::max(
-            host_invite_width - kHostInvitePadding.x * 2.0F, 1.0F);
-        const std::string racer_label = FriendDisplayLabel(racer);
-        const std::string online_summary = "ONLINE  -  LATENCY NOT MEASURED";
-        const std::string invitation_summary = existing != latest.end()
-            ? std::string("INVITATION ") +
-                  FriendLobbyInviteStatusLabel(existing->second.status)
-            : std::string{};
-        const float host_invite_height = std::max(
-            132.0F,
-            PaddedCardHeight(
-                {WrappedTextHeight(racer_label, host_invite_inner_width),
-                 WrappedTextHeight(online_summary, host_invite_inner_width),
-                 WrappedTextHeight(invitation_summary,
-                                   host_invite_inner_width),
-                 38.0F},
-                kHostInvitePadding));
-        BeginPaddedChild("host-friend-invite",
-                         {host_invite_width, host_invite_height}, true,
-                         ImGuiWindowFlags_NoScrollbar |
-                             ImGuiWindowFlags_NoScrollWithMouse,
-                         kHostInvitePadding);
-        ImGui::TextWrapped("%s", racer_label.c_str());
-        DrawDisabledWrapped(online_summary);
-        if (existing != latest.end()) {
-            DrawDisabledWrapped(invitation_summary);
-        }
-        std::string error;
-        if (pending) {
-            if (ImGui::Button("CANCEL INVITE", {-1.0F, 38.0F})) {
-                online.revoke_friend_admission(existing->second.admission);
-                if (!service.cancel_lobby_invite(
-                        existing->second.invite_id, error)) {
-                    g_online_action_status = error;
-                }
-            }
-        } else {
-            ImGui::BeginDisabled(!lobby.hosting ||
-                                 lobby.players >= lobby.maximum_players);
-            if (ImGui::Button("INVITE TO LOBBY", {-1.0F, 38.0F})) {
-                secure::Key admission{};
-                if (!online.create_friend_admission(
-                        admission, std::chrono::minutes(5), error)) {
-                    g_online_action_status = error;
-                } else {
-                    FriendLobbyInviteView sent{};
-                    if (!service.send_lobby_invite(
-                            racer.identity, lobby, admission, sent, error)) {
-                        online.revoke_friend_admission(admission);
-                        g_online_action_status = error;
-                    } else {
-                        g_online_action_status = "Invitation sent to " +
-                            FriendDisplayLabel(racer) + ".";
-                    }
-                }
-            }
-            ImGui::EndDisabled();
-        }
-        ImGui::EndChild();
-        ImGui::PopStyleColor();
-        ImGui::PopID();
-    }
-    if (visible == 0U) {
-        ImGui::TextDisabled(
-            "No friends are online on their secure presence channel right now.");
-    }
-    if (!lobby.hosting) {
-        ImGui::TextColored(kWarm,
-            "Unlock the lobby and keep at least one racer slot open to invite friends.");
-    }
 }
 
 void UpdateFriendPresenceNotification() {
@@ -6421,623 +5304,6 @@ void PumpDirectSessionIfDue() {
     next_pump = now + std::chrono::milliseconds{50};
     dkr::runtime::netplay::session().pump();
 }
-
-void DrawOnlineGuideModal() {
-    constexpr const char* kPopupName = "WELCOME TO DKR-R ONLINE";
-    const bool first_visit =
-        g_online_guide_acknowledged_version < kOnlineGuideVersion &&
-        !g_online_guide_opened_this_run;
-    if (first_visit || g_online_guide_reopen_requested) {
-        g_online_guide_opened_this_run = true;
-        g_online_guide_reopen_requested = false;
-        g_online_guide_do_not_show_again = true;
-        ImGui::OpenPopup(kPopupName);
-    }
-
-    const ImVec2 display = ImGui::GetIO().DisplaySize;
-    ImGui::SetNextWindowSize(
-        {std::min(900.0F, std::max(display.x - 48.0F, 1.0F)),
-         std::min(690.0F, std::max(display.y - 48.0F, 1.0F))},
-        ImGuiCond_Always);
-    if (!BeginPaddedModal(kPopupName,
-                          ImGuiWindowFlags_NoResize |
-                              ImGuiWindowFlags_NoSavedSettings,
-                          {28.0F, 24.0F})) {
-        return;
-    }
-
-    // The guide is longer than some supported viewports. Only its explanatory
-    // copy may scroll; the acknowledgement controls below must remain pinned
-    // and reachable so opening Online MP can never softlock the launcher.
-    constexpr float kGuideActionHeight = 48.0F;
-    const float footer_height = ImGui::GetFrameHeight() +
-        kGuideActionHeight + (ImGui::GetStyle().ItemSpacing.y * 3.0F) + 2.0F;
-    const float guide_height = std::max(
-        1.0F, ImGui::GetContentRegionAvail().y - footer_height);
-    ImGui::BeginChild("##online-guide-scroll", {0.0F, guide_height}, false,
-                      ImGuiWindowFlags_None);
-
-    DrawPageHeading("DKR-R ONLINE IS HERE!");
-    ImGui::TextWrapped(
-        "Thank you for downloading and choosing DKR-R. You can now race "
-        "with friends across DKR-R Online.");
-    ImGui::Dummy({0.0F, 8.0F});
-
-    const int guide_columns =
-        ImGui::GetContentRegionAvail().x >= 700.0F ? 2 : 1;
-    if (ImGui::BeginTable("online-guide-columns", guide_columns,
-                          ImGuiTableFlags_SizingStretchSame |
-                              ImGuiTableFlags_BordersInnerV)) {
-        ImGui::TableNextColumn();
-        ImGui::PushStyleColor(ImGuiCol_Text, kWarm);
-        ImGui::TextUnformatted("GETTING ON THE GRID");
-        ImGui::PopStyleColor();
-        ImGui::TextWrapped(
-            "HOST creates a private five-character Quick Join code. Share it "
-            "with racers you trust, approve their request, then mark everyone "
-            "ready before Player 1 starts the game.");
-        ImGui::Dummy({0.0F, 6.0F});
-        ImGui::TextWrapped(
-            "QUICK JOIN lets a friend enter that code. OPEN LOBBIES lists "
-            "available lobbies hosted by racers already on your Friends list.");
-        ImGui::Dummy({0.0F, 6.0F});
-        ImGui::TextWrapped(
-            "FRIENDS uses short Friend Codes. Add trusted racers once, then "
-            "see their presence, lobby invitations and open lobbies in DKR-R.");
-
-        ImGui::TableNextColumn();
-        ImGui::PushStyleColor(ImGuiCol_Text, kWarm);
-        ImGui::TextUnformatted("HOST SETTINGS");
-        ImGui::PopStyleColor();
-        ImGui::TextWrapped(
-            "Choose the racer limit, host menu control and synchronization "
-            "mode. Rollback is recommended for internet play; Lockstep suits "
-            "very stable, low-latency connections. Automatic input delay is "
-            "the safest default.");
-        ImGui::Dummy({0.0F, 6.0F});
-        ImGui::PushStyleColor(ImGuiCol_Text, kRaceRed);
-        ImGui::TextWrapped(
-            "ONLINE BETA: these features are experimental. Crashes or other "
-            "issues may occur. Please report them to ThatGuyMcd on GitHub or "
-            "Discord with the details needed to reproduce them.");
-        ImGui::PopStyleColor();
-        ImGui::Dummy({0.0F, 6.0F});
-        ImGui::TextWrapped(
-            "Minimum connection: 50 Mbps download and 5 Mbps upload. Unstable "
-            "Wi-Fi, high ping and distance between Player 1 and clients can add "
-            "input delay. DKR-R continuously works to keep that delay low.");
-        ImGui::EndTable();
-    }
-
-    ImGui::Dummy({0.0F, 10.0F});
-    ImGui::TextWrapped(
-        "Thank you, and have fun playing DKR-R Online!\nThatGuyMcd");
-    ImGui::EndChild();
-    ImGui::Separator();
-    ImGui::Checkbox("Do not show this guide again",
-                    &g_online_guide_do_not_show_again);
-    ImGui::PushStyleColor(ImGuiCol_Button, kAccent);
-    if (ImGui::Button(
-            "LET'S GO!",
-            {std::max(ImGui::GetContentRegionAvail().x, 1.0F),
-             kGuideActionHeight})) {
-        g_online_guide_acknowledged_version =
-            g_online_guide_do_not_show_again ? kOnlineGuideVersion : 0;
-        SaveSettings();
-        ImGui::CloseCurrentPopup();
-    }
-    ImGui::PopStyleColor();
-    ImGui::EndPopup();
-}
-
-bool BeginOnlineSectionLayout(const char* id, const char* const* labels,
-                              std::size_t count, int& selected, float width) {
-    if (count == 0U) return false;
-    selected = std::clamp(selected, 0, static_cast<int>(count - 1U));
-    const float available_width = std::max(
-        std::min(width, ImGui::GetContentRegionAvail().x), 1.0F);
-    const bool vertical_rail = available_width >= 620.0F;
-    const int button_columns = vertical_rail ? 1 : 2;
-    bool outer_table_open = false;
-    if (vertical_rail) {
-        outer_table_open = ImGui::BeginTable(
-            id, 2, ImGuiTableFlags_SizingStretchProp |
-                       ImGuiTableFlags_BordersInnerV,
-            {available_width, 0.0F});
-        if (!outer_table_open) return false;
-        ImGui::TableSetupColumn("navigation", ImGuiTableColumnFlags_WidthFixed,
-                                205.0F);
-        ImGui::TableSetupColumn("content", ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableNextRow();
-        ImGui::TableSetColumnIndex(0);
-    } else if (!ImGui::BeginTable(
-                   id, button_columns, ImGuiTableFlags_SizingStretchSame,
-                   {available_width, 0.0F})) {
-        return false;
-    }
-
-    for (std::size_t index = 0; index < count; ++index) {
-        if (!vertical_rail) ImGui::TableNextColumn();
-        const bool is_selected = selected == static_cast<int>(index);
-        if (is_selected) {
-            ImGui::PushStyleColor(ImGuiCol_Button, kWarm);
-            ImGui::PushStyleColor(ImGuiCol_Text, kBackground);
-        }
-        ImGui::PushID(static_cast<int>(index));
-        if (ImGui::Button(labels[index],
-                          {ImGui::GetContentRegionAvail().x, 43.0F})) {
-            selected = static_cast<int>(index);
-        }
-        ImGui::PopID();
-        if (is_selected) ImGui::PopStyleColor(2);
-    }
-
-    if (vertical_rail) {
-        ImGui::TableSetColumnIndex(1);
-        ImGui::Indent(8.0F);
-        const std::string content_id = std::string("##") + id + "-content";
-        constexpr float kOnlinePageFooterReserve = 72.0F;
-        const float content_height =
-            std::max(ImGui::GetContentRegionAvail().y -
-                         kOnlinePageFooterReserve,
-                     1.0F);
-        // Borderless children ignore style.WindowPadding unless this child
-        // flag is explicit. Keep the Online viewport inset by exactly 10 px
-        // on every edge, including at the bottom of its scroll range.
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {10.0F, 10.0F});
-        ImGui::BeginChild(
-            content_id.c_str(), {0.0F, content_height},
-            ImGuiChildFlags_AlwaysUseWindowPadding,
-            ImGuiWindowFlags_NavFlattened);
-        ImGui::PopStyleVar();
-        // Text wrapping is window-local in ImGui. The page-level wrap position
-        // does not apply to this nested scrolling pane, so establish a boundary
-        // at the pane's own work area for every text style, including disabled
-        // status text and dynamic lobby/profile values.
-        ImGui::PushTextWrapPos(0.0F);
-        ImGui::PushItemWidth(-1.0F);
-    } else {
-        ImGui::EndTable();
-        ImGui::Dummy({0.0F, 8.0F});
-    }
-    return outer_table_open;
-}
-
-void EndOnlineSectionLayout(bool table_open) {
-    if (!table_open) return;
-    ImGui::PopItemWidth();
-    ImGui::PopTextWrapPos();
-    ImGui::EndChild();
-    ImGui::Unindent(8.0F);
-    ImGui::EndTable();
-}
-
-
-void DrawOnlinePage(float width, bool launcher, bool rom_ready) {
-    using namespace dkr::runtime::netplay;
-    DrawPageHeading("DKR-R ONLINE");
-    ImGui::TextDisabled(
-        "Secure player-hosted racing for two to four players.");
-    ImGui::Dummy({0.0F, 12.0F});
-    DrawOnlineGuideModal();
-
-    DirectSession& online = session();
-    PumpDirectSessionIfDue();
-    const SessionView view = online.presentation_view();
-
-    if (!online.presentation_active()) {
-        if (view.state == ConnectionState::Failed) {
-            ImGui::PushStyleColor(ImGuiCol_Text, kRaceRed);
-            ImGui::TextWrapped("%s", view.status.c_str());
-            ImGui::PopStyleColor();
-            constexpr const char* clear_error_label =
-                "CLEAR CONNECTION ERROR";
-            if (ImGui::Button(
-                    clear_error_label,
-                    OnlineActionButtonSize(clear_error_label, 260.0F, 42.0F))) {
-                online.disconnect();
-            }
-            ImGui::Dummy({0.0F, 12.0F});
-        }
-        if (!rom_ready) {
-            ImGui::PushStyleColor(ImGuiCol_Text, kWarm);
-            ImGui::TextWrapped(
-                "Choose a supported Game Pak on PLAY first. Every racer must use the same revision and gameplay settings; Player 1 supplies a separate online-only Adventure save after approval.");
-            ImGui::PopStyleColor();
-        }
-
-        constexpr std::array<const char*, 7> sections{{
-            "OPEN LOBBIES", "HOST", "HOST SETTINGS", "QUICK JOIN",
-            "ONLINE PROFILE", "FRIENDS", "OVERLAYS",
-        }};
-        const bool online_table_open = BeginOnlineSectionLayout(
-            "online-offline-sections", sections.data(), sections.size(),
-            g_online_offline_section, width);
-        const float online_content_width =
-            std::max(ImGui::GetContentRegionAvail().x, 1.0F);
-        switch (g_online_offline_section) {
-        case 0:
-            DrawOpenFriendLobbies(
-                online_content_width, launcher, rom_ready, false);
-            break;
-        case 1:
-            if (launcher) {
-                DrawOnlineHostSetup(online_content_width, rom_ready);
-            } else {
-                ImGui::SeparatorText("HOST FROM THE LAUNCHER");
-                ImGui::TextWrapped(
-                    "Finish the current game and return to the launcher to create a lobby safely.");
-            }
-            break;
-        case 2:
-            DrawOnlineRaceRules(online_content_width);
-            break;
-        case 3:
-            if (launcher) {
-                DrawOnlineJoinSetup(online_content_width, rom_ready);
-            } else {
-                ImGui::SeparatorText("QUICK JOIN FROM THE LAUNCHER");
-                ImGui::TextWrapped(
-                    "Finish the current game and return to the launcher before joining another racer.");
-            }
-            break;
-        case 4:
-            DrawOnlineProfile(online_content_width);
-            break;
-        case 5:
-            DrawFriends(online_content_width);
-            break;
-        case 6:
-            DrawOnlineOverlaySettings(online_content_width);
-            break;
-        default:
-            break;
-        }
-        if (!g_online_action_status.empty()) {
-            ImGui::Dummy({0.0F, 12.0F});
-            ImGui::PushStyleColor(ImGuiCol_Text, kWarm);
-            ImGui::TextWrapped("%s", g_online_action_status.c_str());
-            ImGui::PopStyleColor();
-        }
-        EndOnlineSectionLayout(online_table_open);
-
-        return;
-    }
-
-    constexpr std::array<const char*, 4> host_sections{{
-        "LOBBY", "INVITE FRIENDS", "CONNECTION", "OVERLAYS",
-    }};
-    constexpr std::array<const char*, 3> client_sections{{
-        "LOBBY", "CONNECTION", "OVERLAYS",
-    }};
-    if (view.host && g_open_host_friend_invites) {
-        g_online_active_section = 1;
-        g_open_host_friend_invites = false;
-    }
-    const char* const* active_labels = view.host
-        ? host_sections.data() : client_sections.data();
-    const std::size_t active_count = view.host
-        ? host_sections.size() : client_sections.size();
-    const bool active_table_open = BeginOnlineSectionLayout(
-        "online-active-sections", active_labels, active_count,
-        g_online_active_section, width);
-    const float online_content_width =
-        std::max(ImGui::GetContentRegionAvail().x, 1.0F);
-    const bool show_lobby = g_online_active_section == 0;
-    const bool show_invites = view.host && g_online_active_section == 1;
-    const bool show_connection = g_online_active_section == (view.host ? 2 : 1);
-    const bool show_overlays = g_online_active_section == (view.host ? 3 : 2);
-
-    if (show_lobby) {
-    ImGui::PushStyleColor(ImGuiCol_Text, kWarm);
-    ImGui::Text("%s - %s", OnlineStateName(view.state), OnlineMethodName(view.method));
-    ImGui::PopStyleColor();
-    ImGui::TextWrapped("%s", view.status.c_str());
-    if (view.state == ConnectionState::AwaitingApproval) {
-        ImGui::TextWrapped("The host must approve this device before it receives a player slot or lobby state.");
-    }
-
-    if (view.host && !view.pending_joins.empty()) {
-        ImGui::Dummy({0.0F, 14.0F});
-        ImGui::SeparatorText("JOIN REQUESTS");
-        for (const PendingJoinView& pending : view.pending_joins) {
-            ImGui::PushID(static_cast<int>(pending.request_id & 0x7FFFFFFFU));
-            ImGui::Text("%s", pending.display_name.c_str());
-            ImGui::SameLine();
-            ImGui::TextColored(pending.compatible ? ImVec4{0.12F, 0.88F, 0.42F, 1.0F}
-                                                   : kRaceRed,
-                               "%s", pending.compatibility.c_str());
-            std::string error;
-            constexpr const char* approve_label = "APPROVE";
-            constexpr const char* decline_label = "DECLINE";
-            constexpr const char* block_label = "BLOCK FOR SESSION";
-            const ImVec2 approve_size =
-                OnlineActionButtonSize(approve_label, 130.0F, 38.0F);
-            const ImVec2 decline_size =
-                OnlineActionButtonSize(decline_label, 130.0F, 38.0F);
-            const ImVec2 block_size =
-                OnlineActionButtonSize(block_label, 200.0F, 38.0F);
-            const bool admission_actions_share_line =
-                approve_size.x + decline_size.x + block_size.x +
-                    ImGui::GetStyle().ItemSpacing.x * 2.0F <=
-                ImGui::GetContentRegionAvail().x;
-            ImGui::BeginDisabled(!pending.compatible || view.lobby_locked);
-            if (ImGui::Button(approve_label, approve_size) &&
-                !online.approve_join(pending.request_id, error)) {
-                g_online_action_status = error;
-            }
-            ImGui::EndDisabled();
-            if (admission_actions_share_line) ImGui::SameLine();
-            if (ImGui::Button(decline_label, decline_size) &&
-                !online.reject_join(pending.request_id, false, error)) {
-                g_online_action_status = error;
-            }
-            if (admission_actions_share_line) ImGui::SameLine();
-            if (ImGui::Button(block_label, block_size) &&
-                !online.reject_join(pending.request_id, true, error)) {
-                g_online_action_status = error;
-            }
-            ImGui::PopID();
-            ImGui::Dummy({0.0F, 8.0F});
-        }
-    }
-
-    if (view.host && !view.invite.empty()) {
-        ImGui::Dummy({0.0F, 12.0F});
-        ImGui::SeparatorText("QUICK JOIN CODE");
-        ImGui::TextWrapped("Share this only with racers you trust. Every request still requires host approval.");
-        ImGui::SetWindowFontScale(1.55F);
-        ImGui::TextColored(kWarm, "%s", view.invite.c_str());
-        ImGui::SetWindowFontScale(1.0F);
-        constexpr const char* copy_code_label = "COPY FIVE-CHARACTER CODE";
-        constexpr const char* rekey_code_label = "REKEY CODE";
-        const ImVec2 copy_code_size =
-            OnlineActionButtonSize(copy_code_label, 250.0F, 42.0F);
-        const ImVec2 rekey_code_size =
-            OnlineActionButtonSize(rekey_code_label, 180.0F, 42.0F);
-        const bool code_actions_share_line =
-            OnlineButtonsFitOnOneLine(copy_code_size, rekey_code_size);
-        if (ImGui::Button(copy_code_label, copy_code_size)) {
-            CopyOnlineInviteToClipboard(view.invite);
-        }
-        if (code_actions_share_line) ImGui::SameLine();
-        if (ImGui::Button(rekey_code_label, rekey_code_size)) {
-            std::string error;
-            if (!online.revoke_invitation(error)) g_online_action_status = error;
-        }
-        if (!view.lobby_locked) {
-            ImGui::Dummy({0.0F, 6.0F});
-            if (ImGui::Button("INVITE FRIENDS", {210.0F, 42.0F})) {
-                g_open_host_friend_invites = true;
-                g_online_active_section = 1;
-            }
-        }
-        bool locked = view.lobby_locked;
-        ImGui::BeginDisabled(view.connection_test_active);
-        if (ImGui::Checkbox("Lock lobby to new join requests", &locked)) {
-            std::string error;
-            if (!online.set_lobby_locked(locked, error)) g_online_action_status = error;
-        }
-        ImGui::EndDisabled();
-    }
-
-    ImGui::Dummy({0.0F, 14.0F});
-    ImGui::SeparatorText("STARTING GRID");
-    for (std::size_t slot = 0; slot < view.room.players.size(); ++slot) {
-        const Player& player = view.room.players[slot];
-        ImGui::Text("PLAYER %zu", slot + 1U);
-        ImGui::SameLine(150.0F);
-        ImGui::TextUnformatted(player.occupied ? player.display_name.c_str() : "OPEN");
-        if (player.occupied) {
-            if (online_content_width >= 640.0F)
-                ImGui::SameLine(online_content_width - 155.0F);
-            ImGui::TextColored(player.ready ? ImVec4{0.12F, 0.88F, 0.42F, 1.0F}
-                                            : kWarm,
-                               "%s", player.loaded ? "LOADED" :
-                               (player.ready ? "READY" : "NOT READY"));
-            ImGui::TextColored(
-                view.online_save_ready[slot]
-                    ? ImVec4{0.12F, 0.88F, 0.42F, 1.0F} : kWarm,
-                "%s", view.online_save_ready[slot]
-                    ? "ONLINE SAVE VERIFIED" : "VERIFYING ONLINE SAVE...");
-            if (!player.host) {
-                ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
-                ImGui::TextWrapped("%s - app RTT %u ms - jitter %u ms - expired probes %.1f%%",
-                    OnlineRouteName(player.route), player.ping_ms, player.jitter_ms,
-                    player.packet_loss_percent);
-                ImGui::PopStyleColor();
-                if (view.host && view.state != ConnectionState::Running &&
-                    view.state != ConnectionState::Loading &&
-                    !view.connection_test_active) {
-                    if (online_content_width >= 640.0F) ImGui::SameLine();
-                    ImGui::PushID(static_cast<int>(slot));
-                    if (ImGui::SmallButton("REMOVE")) {
-                        std::string error;
-                        if (!online.kick_player(static_cast<std::uint8_t>(slot), error)) {
-                            g_online_action_status = error;
-                        }
-                    }
-                    ImGui::PopID();
-                }
-            } else {
-                ImGui::TextDisabled("HOST - PLAYER 1");
-            }
-        }
-        ImGui::Separator();
-    }
-
-    if (view.host && (view.state == ConnectionState::Hosting ||
-                      view.state == ConnectionState::Lobby)) {
-        ImGui::Dummy({0.0F, 8.0F});
-        constexpr const char* test_label = "TEST SESSION CONNECTION";
-        ImGui::BeginDisabled(view.connection_test_active ||
-                             view.launch_stage != LaunchStage::Idle);
-        if (ImGui::Button(test_label, {online_content_width, 46.0F})) {
-            std::string error;
-            if (!online.request_connection_test(error)) {
-                g_online_action_status = error;
-            }
-        }
-        ImGui::EndDisabled();
-        ImGui::TextDisabled(
-            "Runs a seven-second pre-flight over the same control, input, authority and replica lanes used in-game.");
-    }
-    if (view.connection_test_active) {
-        const float seconds = static_cast<float>(
-            view.connection_test_remaining_ms) / 1000.0F;
-        ImGui::PushStyleColor(ImGuiCol_Text, kWarm);
-        ImGui::Text("TESTING REAL SESSION LOAD... %.1f SECONDS", seconds);
-        ImGui::PopStyleColor();
-        ImGui::TextWrapped(
-            "Keep this window open. Ready, Start and lobby changes are paused until every traffic lane drains.");
-    }
-
-    if ((view.state == ConnectionState::Hosting || view.state == ConnectionState::Lobby) &&
-        view.local_slot < view.room.players.size() &&
-        view.room.players[view.local_slot].occupied) {
-        const Player& local = view.room.players[view.local_slot];
-        const std::size_t local_profile =
-            dkr::runtime::platform::online_input_profile();
-        const auto controller =
-            dkr::runtime::platform::player_controller_status(local_profile);
-        const bool keyboard_available =
-            dkr::runtime::input::keyboard_player() ==
-            static_cast<int>(local_profile);
-        const bool local_input_available =
-            controller.connected || keyboard_available;
-        std::string error;
-        const char* ready_label = local.ready ? "CANCEL READY" : "READY TO RACE";
-        constexpr const char* start_label = "START FOR EVERYONE";
-        const ImVec2 ready_size =
-            OnlineActionButtonSize(ready_label, 240.0F, 48.0F);
-        const ImVec2 start_size =
-            OnlineActionButtonSize(start_label, 270.0F, 48.0F);
-        const bool race_actions_share_line = view.host &&
-            OnlineButtonsFitOnOneLine(ready_size, start_size);
-        ImGui::BeginDisabled(view.connection_test_active ||
-                             !view.local_online_save_ready ||
-                             (!local.ready && !local_input_available));
-        if (ImGui::Button(ready_label, ready_size) &&
-            !online.set_ready(!local.ready, error)) {
-            g_online_action_status = error;
-        }
-        ImGui::EndDisabled();
-        if (!local_input_available) {
-            ImGui::TextColored(
-                kWarm,
-                "Connect a controller or assign the keyboard to Player %zu before readying.",
-                local_profile + 1U);
-        }
-        if (view.host) {
-            bool all_ready = true;
-            bool all_saves_ready = true;
-            std::size_t racers = 0U;
-            for (std::size_t slot = 0U; slot < view.room.players.size(); ++slot) {
-                const Player& player = view.room.players[slot];
-                if (!player.occupied) continue;
-                ++racers;
-                all_ready = all_ready && player.ready;
-                all_saves_ready = all_saves_ready &&
-                                  view.online_save_ready[slot];
-            }
-            if (race_actions_share_line) ImGui::SameLine();
-            ImGui::BeginDisabled(view.connection_test_active ||
-                                 racers < 2U || !all_ready ||
-                                 !all_saves_ready);
-            ImGui::PushStyleColor(ImGuiCol_Button, kRaceRed);
-            if (ImGui::Button(start_label, start_size) &&
-                !online.request_start(error)) {
-                g_online_action_status = error;
-            }
-            ImGui::PopStyleColor();
-            ImGui::EndDisabled();
-        }
-    }
-    ImGui::Dummy({0.0F, 12.0F});
-    ImGui::PushStyleColor(ImGuiCol_Button, {0.45F, 0.09F, 0.10F, 1.0F});
-    constexpr const char* leave_label = "LEAVE ONLINE LOBBY";
-    if (ImGui::Button(
-            leave_label,
-            OnlineActionButtonSize(leave_label, 260.0F, 44.0F))) {
-        online.disconnect("You left the online lobby.");
-    }
-    ImGui::PopStyleColor();
-    if (!g_online_action_status.empty()) {
-        ImGui::PushStyleColor(ImGuiCol_Text, kWarm);
-        ImGui::TextWrapped("%s", g_online_action_status.c_str());
-        ImGui::PopStyleColor();
-    }
-    static std::uint32_t observed_connection_test_generation = 0U;
-    if (view.connection_test_result_generation != 0U &&
-        view.connection_test_result_generation !=
-            observed_connection_test_generation) {
-        observed_connection_test_generation =
-            view.connection_test_result_generation;
-        ImGui::OpenPopup("SESSION PRE-FLIGHT RESULTS");
-    }
-    if (BeginPaddedModal("SESSION PRE-FLIGHT RESULTS",
-                         ImGuiWindowFlags_AlwaysAutoResize)) {
-        std::uint8_t overall = 10U;
-        bool any = false;
-        for (const auto& result : view.connection_test_results) {
-            if (!result.valid) continue;
-            overall = (std::min)(overall, result.score);
-            any = true;
-        }
-        const ImVec4 band = !any || overall <= 4U
-            ? ImVec4{0.95F, 0.18F, 0.12F, 1.0F}
-            : overall <= 7U ? ImVec4{1.0F, 0.58F, 0.08F, 1.0F}
-                            : ImVec4{0.12F, 0.88F, 0.42F, 1.0F};
-        const char* experience = !any || overall <= 4U
-            ? "BAD - EXPECT AN UNSTABLE ONLINE EXPERIENCE"
-            : overall <= 7U ? "AVERAGE - PLAYABLE, BUT HITCHES MAY OCCUR"
-                            : "EXCELLENT - BEST ONLINE EXPERIENCE";
-        ImGui::PushStyleColor(ImGuiCol_Text, band);
-        ImGui::Text("OVERALL CONNECTION: %u / 10", overall);
-        ImGui::TextUnformatted(experience);
-        ImGui::PopStyleColor();
-        ImGui::Separator();
-        for (std::size_t slot = 0U; slot < view.room.players.size(); ++slot) {
-            const auto& result = view.connection_test_results[slot];
-            if (!result.valid || !view.room.players[slot].occupied) continue;
-            const ImVec4 racer_band = result.score <= 4U
-                ? ImVec4{0.95F, 0.18F, 0.12F, 1.0F}
-                : result.score <= 7U ? ImVec4{1.0F, 0.58F, 0.08F, 1.0F}
-                                     : ImVec4{0.12F, 0.88F, 0.42F, 1.0F};
-            ImGui::PushStyleColor(ImGuiCol_Text, racer_band);
-            ImGui::Text("PLAYER %zu - %s: %u / 10", slot + 1U,
-                        view.room.players[slot].display_name.c_str(),
-                        result.score);
-            ImGui::PopStyleColor();
-            if (view.room.players[slot].host) {
-                ImGui::TextDisabled("LOCAL HOST");
-            } else {
-                ImGui::TextDisabled(
-                    "P95 %u ms  |  JITTER %u ms  |  LOSS %.1f%%  |  LATE %.1f%%  |  QUEUES %s",
-                    result.p95_rtt_ms, result.jitter_ms,
-                    result.loss_percent, result.late_percent,
-                    result.queues_drained ? "DRAINED" : "BACKED UP");
-            }
-            ImGui::Separator();
-        }
-        ImGui::TextWrapped(
-            "This predicts network and transport stability under representative game traffic. It is not a CPU or GPU benchmark.");
-        if (ImGui::Button("CLOSE", {180.0F, 42.0F})) {
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndPopup();
-    }
-    } else if (show_invites) {
-        g_open_host_friend_invites = false;
-        DrawHostFriendInvites(online_content_width, view);
-    } else if (show_connection) {
-        DrawOnlineConnectionStatus(view);
-    } else if (show_overlays) {
-        DrawOnlineOverlaySettings(online_content_width);
-    }
-    EndOnlineSectionLayout(active_table_open);
-}
-
 
 bool DrawGraphicsSettings(bool live) {
     GraphicsConfig config = ultramodern::renderer::get_graphics_config();
@@ -8158,6 +6424,7 @@ void DrawOnlineStartCountdown() {
         }
     }
 
+    if (g_online_countdown_panel_frame == ImGui::GetFrameCount()) return;
     const ImVec2 display = ImGui::GetIO().DisplaySize;
     const float maximum_width = std::max(280.0F, display.x - 32.0F);
     const float width = std::min(
@@ -10087,14 +8354,29 @@ void DrawModsLibrarySection(float width, const dkr::mods::ModLibraryView& mods,
                 "mods to include them. Track Lab is for development and testing.", width);
 }
 
+// Card caches follow the library snapshots; PLAY reads them too.
+void RefreshModBrowserCards(const dkr::mods::ModLibraryView& mods) {
+    for (const bool characters : {false, true}) {
+        auto& browser = g_mod_browsers[characters ? 1 : 0];
+        const auto snapshot = characters ? mods.characters : mods.tracks;
+        if (browser.snapshot != snapshot) {
+            browser.snapshot = snapshot;
+            browser.all = snapshot != nullptr
+                ? dkr::mods::browser::cards(*snapshot, characters)
+                : std::vector<dkr::mods::browser::Card>{};
+            browser.filter_key.clear();
+        }
+    }
+}
+
 void DrawModsHacks(float available_width, bool game_running = false) {
     namespace tracks_ns = dkr::runtime::custom_tracks;
-    // Each visit starts with every section closed.
+    // Each visit starts with every section closed, unless a link asked for one.
     const int frame = ImGui::GetFrameCount();
     if (g_mods_page.context != ImGui::GetCurrentContext() ||
         g_mods_page.last_frame != frame - 1) {
         g_mods_page.context = ImGui::GetCurrentContext();
-        g_mods_page.section = -1;
+        g_mods_page.section = std::exchange(g_mods_page.entry_section, -1);
         g_mods_page.filters_open = false;
         g_mods_page.disclosures.clear();
     }
@@ -10115,17 +8397,7 @@ void DrawModsHacks(float available_width, bool game_running = false) {
     const std::string armed = tracks_ns::armed_track_id();
     const auto go_to_play = [] { g_page_navigation_request = kPagePlay; };
     // Card caches follow the library snapshots even while My mods is closed.
-    for (const bool characters : {false, true}) {
-        auto& browser = g_mod_browsers[characters ? 1 : 0];
-        const auto snapshot = characters ? mods.characters : mods.tracks;
-        if (browser.snapshot != snapshot) {
-            browser.snapshot = snapshot;
-            browser.all = snapshot != nullptr
-                ? dkr::mods::browser::cards(*snapshot, characters)
-                : std::vector<dkr::mods::browser::Card>{};
-            browser.filter_key.clear();
-        }
-    }
+    RefreshModBrowserCards(mods);
 
     // Header: the page title and the import sign.
     {
@@ -10365,6 +8637,9 @@ void DrawModsHacks(float available_width, bool game_running = false) {
     DrawSharedTexturePackModal();
     --g_paddock_modal_windows;
 }
+
+#include "runtime_play_ui.inl"
+#include "runtime_online_ui.inl"
 
 void DrawTextures(float width) {
     DrawPageHeading("TEXTURES");
@@ -12531,13 +10806,11 @@ dkr::runtime::ui::StartupResult dkr::runtime::ui::run_startup_screen(
 
     std::filesystem::path selected_rom;
     g_mod_browser_revision=0;
-    std::filesystem::path selected_rom_key_path;
-    std::string selected_rom_key;
     std::filesystem::path online_manifest_rom;
     dkr::runtime::rom::Identity online_manifest_identity{};
     std::optional<dkr::runtime::netplay::CompatibilityManifest>
         online_manifest;
-    std::string rom_status = "Choose your legally obtained Diddy Kong Racing Game Pak.";
+    std::string rom_status = kRomChoosePrompt;
     bool rom_ready = false;
     const auto rom_catalog_started_at =
         dkr::runtime::startup_performance::Clock::now();
@@ -13093,115 +11366,9 @@ dkr::runtime::ui::StartupResult dkr::runtime::ui::run_startup_screen(
             focus_content = false;
         }
         if (page == 0) {
-            DrawPageHeading("PLAY");
-            ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
-            ImGui::TextWrapped(rom_ready
-                ? "The starting lights are green. DKR-R is ready."
-                : "Choose your legally obtained Game Pak and join the race to stop Wizpig.");
-            ImGui::PopStyleColor();
-            ImGui::Dummy({0.0F, 16.0F});
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, kCream);
-            ImGui::PushStyleColor(ImGuiCol_Border, rom_ready ? kAccent : kRaceRed);
-            BeginPaddedChild("race-pass", {right_inner_width, 316.0F}, true, 0,
-                             {24.0F, 20.0F});
-            ImGui::PushTextWrapPos(right_inner_width - 24.0F);
-            ImGui::BeginGroup();
-            DrawStartingLights(rom_ready);
-            ImGui::SameLine(0.0F, 18.0F);
-            ImGui::BeginGroup();
-            ImGui::PushStyleColor(ImGuiCol_Text, rom_ready
-                ? ImVec4{0.01F, 0.48F, 0.28F, 1.0F} : kRaceRed);
-            ImGui::TextUnformatted(rom_ready ? "ENTRY CLEARED" : "GAME DATA NEEDED");
-            ImGui::PopStyleColor();
-            ImGui::PushStyleColor(ImGuiCol_Text, {0.035F, 0.105F, 0.14F, 1.0F});
-            ImGui::TextWrapped("%s", rom_status.c_str());
-            ImGui::PopStyleColor();
-            ImGui::EndGroup();
-            if (!selected_rom.empty()) {
-                ImGui::PushStyleColor(ImGuiCol_Text, {0.18F, 0.31F, 0.34F, 1.0F});
-                ImGui::TextWrapped("%s", PathUtf8(selected_rom).c_str());
-                ImGui::PopStyleColor();
-            }
-            ImGui::Dummy({0.0F, 6.0F});
-            const float rom_row_width =
-                std::max(right_inner_width - 48.0F, 1.0F);
-            const float rom_row_spacing = ImGui::GetStyle().ItemSpacing.x;
-            const char* choose_label =
-                rom_ready ? "CHOOSE ANOTHER GAME PAK" : "CHOOSE YOUR GAME PAK";
-            const float desired_choose_width = std::ceil(
-                ImGui::CalcTextSize(choose_label).x +
-                ImGui::GetStyle().FramePadding.x * 2.0F + 24.0F);
-            const float maximum_choose_width = std::max(
-                rom_row_width - rom_row_spacing - 180.0F, 175.0F);
-            const float choose_width = std::min(
-                std::max(desired_choose_width, 260.0F), maximum_choose_width);
-            const float catalog_width = std::max(
-                rom_row_width - choose_width - rom_row_spacing, 120.0F);
-            if (ImGui::Button(choose_label, {choose_width, 46.0F})) {
-                OpenRomBrowser(selected_rom);
-            }
-            ImGui::SameLine();
-            // Canonicalising a path can touch the filesystem. Selection and
-            // launch still validate the ROM; drawing only needs its identity.
-            if (selected_rom_key_path != selected_rom) {
-                selected_rom_key_path = selected_rom;
-                selected_rom_key = RomPathKey(selected_rom);
-            }
-            const std::string& selected_key = selected_rom_key;
-            const auto selected_entry = std::find_if(
-                rom_catalog.begin(), rom_catalog.end(),
-                [&selected_key](const RomCatalogEntry& entry) {
-                    return entry.key == selected_key;
-                });
-            const char* catalog_preview = rom_catalog.empty()
-                ? "ROM CATALOG EMPTY"
-                : (selected_entry != rom_catalog.end()
-                       ? selected_entry->label.c_str()
-                       : "SELECT GAME PAK");
-            ImGui::BeginDisabled(rom_catalog.empty());
-            ImGui::SetNextItemWidth(catalog_width);
-            {
-                const ControlFontScope catalog_combo_scope(true);
-                if (ImGui::BeginCombo("##rom-catalog", catalog_preview,
-                                      ImGuiComboFlags_HeightLarge)) {
-                    for (std::size_t index = 0; index < rom_catalog.size(); ++index) {
-                        const RomCatalogEntry entry = rom_catalog[index];
-                        const bool selected = entry.key == selected_key;
-                        const std::string label = entry.label + "##rom-catalog-" +
-                                                  std::to_string(index);
-                        if (ImGui::Selectable(label.c_str(), selected)) {
-                            if (SelectCatalogRom(entry, selected_rom, rom_catalog,
-                                                 rom_status)) {
-                                rom_ready = true;
-                            }
-                        }
-                        if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip("%s", PathUtf8(entry.path).c_str());
-                        }
-                        if (selected) {
-                            ImGui::SetItemDefaultFocus();
-                        }
-                    }
-                    ImGui::EndCombo();
-                }
-            }
-            ImGui::EndDisabled();
-            ImGui::EndGroup();
-            ImGui::PopTextWrapPos();
-            ImGui::EndChild();
-            ImGui::PopStyleColor(2);
-            ImGui::Dummy({0.0F, 20.0F});
-            ImGui::BeginDisabled(!rom_ready || g_legacy_imports.snapshot().busy || g_mod_launch.snapshot().modal);
-            ImGui::PushStyleColor(ImGuiCol_Button, kRaceRed);
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kWarm);
-            if (ImGui::Button("START Diddy Kong Racing - Recompiled",
-                              {right_inner_width, 68.0F})) {
-                launch_requested = true;
-            }
-            ImGui::PopStyleColor(2);
-            ImGui::EndDisabled();
-            ImGui::Dummy({0.0F, 22.0F});
-            DrawSupportSummary(right_inner_width);
+            DrawPlayPage(right_inner_width,
+                         {selected_rom, rom_status, rom_ready, rom_catalog,
+                          launch_requested});
         } else if (page == 1) {
             DrawPageHeading("GRAPHICS");
             ImGui::TextDisabled("Tune the view and presentation for your machine.");
@@ -13230,6 +11397,9 @@ dkr::runtime::ui::StartupResult dkr::runtime::ui::run_startup_screen(
             DrawTextures(right_inner_width);
         } else {
             DrawAboutDkrR(right_inner_width);
+            // Support tools live with the rest of DKR-R's details.
+            ImGui::Dummy({0.0F, 22.0F});
+            DrawSupportSummary(right_inner_width);
         }
         ImGui::Dummy({0.0F, 54.0F});
         ImGui::EndGroup();

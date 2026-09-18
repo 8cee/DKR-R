@@ -20,6 +20,7 @@ struct DkrLibraryTrack {
 
 struct ModsPageState {
     int section = -1;            // -1 closed, then kModsSection*
+    int entry_section = -1;      // opened on the next entry (links from other pages)
     int category = 0;            // 0 tracks, 1 characters
     bool filters_open = false;
     std::set<std::string> disclosures;

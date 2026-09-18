@@ -109,18 +109,28 @@ inline void PaddockScaleVertices(ImDrawList* draw, int first_vertex,
 
 // ------------------------------------------------------------------ faces
 
-constexpr std::array<float, 4> kPaddockReadingSizes{{11.0F, 12.0F, 13.0F, 14.0F}};
+constexpr std::array<float, 7> kPaddockReadingSizes{{
+    11.0F, 12.0F, 13.0F, 14.0F, 15.0F, 16.0F, 20.0F}};
 // Index 0 is the regular face, 1 semibold.
 std::array<std::array<ImFont*, kPaddockReadingSizes.size()>, 2>
     g_paddock_reading{};
 float g_paddock_reading_scale = 1.33F;
 // The launcher lettering (Racing Banana with Jumpman digits) at sign sizes.
 // The launcher's 19 px body font covers the size in between.
-constexpr std::array<float, 5> kPaddockSignSizes{{12.0F, 15.0F, 20.0F, 24.0F, 30.0F}};
+constexpr std::array<float, 7> kPaddockSignSizes{{
+    12.0F, 15.0F, 20.0F, 24.0F, 30.0F, 34.0F, 38.0F}};
 std::array<ImFont*, kPaddockSignSizes.size()> g_paddock_sign{};
+// Codes (Quick Join, Friend Codes) in a monospaced face; index 0 regular,
+// 1 bold. Empty where the system has no such face.
+constexpr std::array<float, 3> kPaddockMonoSizes{{12.0F, 16.0F, 32.0F}};
+std::array<std::array<ImFont*, kPaddockMonoSizes.size()>, 2> g_paddock_mono{};
+float g_paddock_mono_scale = 1.0F;
+float g_paddock_mono_ascent = 0.8F;
 
-// (ascent - descent) / unitsPerEm from the hhea and head tables.
-inline float PaddockFaceScale(const unsigned char* data, std::size_t size) {
+// (ascent - descent) / unitsPerEm from the hhea and head tables; `ascent`
+// receives ascent / unitsPerEm.
+inline float PaddockFaceScale(const unsigned char* data, std::size_t size,
+                              float* ascent = nullptr) {
     const auto u16 = [&](std::size_t at) -> unsigned {
         return at + 2U <= size
             ? (static_cast<unsigned>(data[at]) << 8U) | data[at + 1U] : 0U;
@@ -147,32 +157,38 @@ inline float PaddockFaceScale(const unsigned char* data, std::size_t size) {
     }
     const unsigned units = head != 0U ? u16(head + 18U) : 0U;
     if (hhea == 0U || units == 0U) return 1.0F;
+    if (ascent != nullptr) {
+        *ascent = static_cast<float>(s16(hhea + 4U)) / static_cast<float>(units);
+    }
     const int extent = s16(hhea + 4U) - s16(hhea + 6U);
     return extent > 0 ? static_cast<float>(extent) / static_cast<float>(units)
                       : 1.0F;
 }
 
 #if defined(_WIN32)
-// Segoe UI is read from the copy Windows installed; it is never redistributed.
-inline const std::vector<char>& PaddockSystemFace(bool semibold) {
-    static std::array<std::vector<char>, 2> faces;
-    static std::array<bool, 2> attempted{};
-    const std::size_t index = semibold ? 1U : 0U;
-    if (!attempted[index]) {
-        attempted[index] = true;
+// System faces are read from the copies Windows installed; they are never
+// redistributed.
+inline const std::vector<char>& PaddockSystemFont(const char* file) {
+    static std::map<std::string, std::vector<char>> faces;
+    auto [found, added] = faces.try_emplace(file);
+    if (added) {
         const char* windows = std::getenv("WINDIR");
         std::filesystem::path path = std::filesystem::u8path(
             windows != nullptr && *windows != '\0' ? windows : "C:\\Windows");
         path /= "Fonts";
-        path /= semibold ? "seguisb.ttf" : "segoeui.ttf";
+        path /= file;
         std::ifstream input(path, std::ios::binary);
         std::vector<char> bytes((std::istreambuf_iterator<char>(input)),
                                 std::istreambuf_iterator<char>());
         const bool truetype = bytes.size() > 12U &&
             std::memcmp(bytes.data(), "\x00\x01\x00\x00", 4U) == 0;
-        if (truetype) faces[index] = std::move(bytes);
+        if (truetype) found->second = std::move(bytes);
     }
-    return faces[index];
+    return found->second;
+}
+
+inline const std::vector<char>& PaddockSystemFace(bool semibold) {
+    return PaddockSystemFont(semibold ? "seguisb.ttf" : "segoeui.ttf");
 }
 #endif
 
@@ -183,6 +199,7 @@ inline void LoadPaddockReadingFonts(ImFontAtlas* atlas) {
         0x0020, 0x00FF,  // Basic Latin and Latin-1 Supplement.
         0x2010, 0x2027,  // Dashes, quotes, bullet and ellipsis.
         0x2030, 0x203A,
+        0x2190, 0x2193,  // Arrows.
         0,
     };
     for (auto& face : g_paddock_reading) face.fill(nullptr);
@@ -218,6 +235,46 @@ inline void LoadPaddockReadingFonts(ImFontAtlas* atlas) {
                 kPaddockReadingSizes[index] * scale, &config, kRanges);
         }
     }
+}
+
+// Consolas where Windows has it. Elsewhere codes fall back to the reading face.
+inline void LoadPaddockMonoFonts(ImFontAtlas* atlas) {
+    for (auto& face : g_paddock_mono) face.fill(nullptr);
+#if defined(_WIN32)
+    static constexpr ImWchar kRanges[] = {
+        0x0020, 0x007E,
+        0x00B7, 0x00B7,  // Middle dot.
+        0x2190, 0x2193,  // Arrows.
+        0,
+    };
+    for (std::size_t weight = 0U; weight < 2U; ++weight) {
+        const std::vector<char>& face = PaddockSystemFont(weight == 1U ? "consolab.ttf" : "consola.ttf");
+        if (face.empty()) continue;
+        float ascent = 0.8F;
+        const float scale = PaddockFaceScale(
+            static_cast<const unsigned char*>(static_cast<const void*>(face.data())),
+            face.size(), &ascent);
+        if (weight == 0U) {
+            g_paddock_mono_scale = scale;
+            g_paddock_mono_ascent = ascent;
+        }
+        for (std::size_t index = 0U; index < kPaddockMonoSizes.size(); ++index) {
+            // Regular codes only ever appear small; 32 px tiles are bold.
+            if (weight == 0U && kPaddockMonoSizes[index] > 16.0F) continue;
+            ImFontConfig config{};
+            config.FontDataOwnedByAtlas = false;
+            config.OversampleH = 2;
+            config.OversampleV = 1;
+            config.PixelSnapH = false;
+            config.GlyphRanges = kRanges;
+            g_paddock_mono[weight][index] = atlas->AddFontFromMemoryTTF(
+                const_cast<char*>(face.data()), static_cast<int>(face.size()),
+                kPaddockMonoSizes[index] * scale, &config, kRanges);
+        }
+    }
+#else
+    (void)atlas;
+#endif
 }
 
 // ------------------------------------------------------------------ type
@@ -278,6 +335,35 @@ inline PaddockType PaddockSign(float px, float line_height = 1.2F,
     type.ascent = px;
     type.content = px;
     type.line = px * line_height;
+    type.tracking = px * tracking_em;
+    return type;
+}
+
+// A code face (Cascadia Mono / Consolas in the launcher study). Falls back to
+// the semibold reading face when no monospaced face was loaded.
+inline PaddockType PaddockMono(float px, bool bold = false, float line_height = 1.5F,
+                               float tracking_em = 0.0F) {
+    const auto& faces = g_paddock_mono[bold ? 1U : 0U];
+    std::size_t best = kPaddockMonoSizes.size();
+    for (std::size_t index = 0U; index < kPaddockMonoSizes.size(); ++index) {
+        if (faces[index] == nullptr) continue;
+        if (best == kPaddockMonoSizes.size() ||
+            std::abs(kPaddockMonoSizes[index] - px) <
+                std::abs(kPaddockMonoSizes[best] - px)) {
+            best = index;
+        }
+    }
+    if (best == kPaddockMonoSizes.size()) {
+        PaddockType type = PaddockReading(px, true, line_height);
+        type.tracking = px * tracking_em;
+        return type;
+    }
+    PaddockType type;
+    type.font = faces[best];
+    type.size = px * g_paddock_mono_scale;
+    type.ascent = px * g_paddock_mono_ascent;
+    type.content = px * g_paddock_mono_scale;
+    type.line = std::round(px * line_height * 100.0F) / 100.0F;
     type.tracking = px * tracking_em;
     return type;
 }
