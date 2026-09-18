@@ -1228,6 +1228,144 @@ def test_geometry_vertex_edit():
           "and the header bounds it recomputed")
 
 
+def test_geometry_colour_edit():
+    """Repaint one vertex: the colour reaches the file without a rebuild.
+
+    The baked lighting multiplies into the texture, so losing it is not a
+    subtle shading difference - it draws the track black. The in-place patch
+    used to write positions, flags and surface types and quietly drop colour,
+    which meant an author could repaint, export, see every other edit land, and
+    have no way to tell the lighting had not.
+    """
+    print("repainting a vertex")
+    from dkr_track_editor import level_model, level_model_encoder
+    from dkr_track_editor.operators import geometry as geometry_ops
+    from dkr_track_editor.operators import geometry_export
+
+    path, obj = _import_lake(include_hidden=True)
+    if path is None:
+        print("  skip: no extracted level models")
+        return
+
+    mesh = obj.data
+    base_model = level_model.load(path)
+    painted_at = 11
+    segment_index, vertex_index = _identity(mesh)[painted_at]
+    was = base_model.segments[segment_index].colours[vertex_index]
+    now = tuple(0 if channel == 255 else 255 for channel in was)
+
+    for channel, name in enumerate(geometry_ops.ATTR_COLOUR_CHANNELS):
+        attribute = mesh.attributes[name]
+        values = [0] * len(attribute.data)
+        attribute.data.foreach_get("value", values)
+        values[painted_at] = now[channel]
+        attribute.data.foreach_set("value", values)
+
+    edit = geometry_export.build_edited_model(bpy.context)
+    check(not edit.rebuilt,
+          "nothing was added or removed, so the file keeps its layout")
+    check(edit.summary.painted == 1,
+          "exactly one vertex is reported repainted (got %d)" % edit.summary.painted)
+
+    differing = [
+        (s, v)
+        for s, segment in enumerate(base_model.segments)
+        for v in range(len(segment.colours))
+        if tuple(segment.colours[v]) != tuple(edit.model.segments[s].colours[v])
+    ]
+    check(differing == [(segment_index, vertex_index)],
+          "exactly the repainted vertex differs in the file (got %r)" % (differing,))
+    check(tuple(edit.model.segments[segment_index].colours[vertex_index]) == now,
+          "and it carries the colour that was painted (%r -> %r)" % (was, now))
+
+    reparsed = level_model.parse(
+        level_model.decompress(level_model_encoder.pack(edit.model))
+    )
+    check(tuple(reparsed.segments[segment_index].colours[vertex_index]) == now,
+          "which reads back from the encoded model")
+
+
+def test_unpainted_colour_layer():
+    """An all-zero colour layer is not a black track, and it says so.
+
+    Blender starts a new colour attribute white, so an all-zero layer does not
+    come from Blender - it comes from carrying already-black vertices through
+    a mesh. Testing only that a layer exists let one through and built a track
+    black everywhere, with nothing anywhere saying why. Testing whether the
+    layer carries anything keeps the fallback and leaves a deliberate black
+    alone.
+    """
+    print("reading an all-zero colour layer")
+    from dkr_track_editor.operators import geometry as geometry_ops
+    from dkr_track_editor.operators import new_track
+
+    def mesh_with(layers):
+        fresh()
+        bpy.ops.mesh.primitive_plane_add()
+        mesh = bpy.context.active_object.data
+        for name, domain, colour in layers:
+            layer = mesh.color_attributes.new(name, "FLOAT_COLOR", domain)
+            if colour is not None:
+                layer.data.foreach_set(
+                    "color", list(colour) * len(layer.data))
+        return mesh
+
+    white = (255, 255, 255, 255)
+    name = geometry_ops.COLOUR_ATTRIBUTE
+
+    stats = {}
+    mesh = mesh_with([(name, "POINT", (0.0, 0.0, 0.0, 0.0))])
+    colours = new_track._read_colours(mesh, stats)
+    check(set(colours) == {white},
+          "an all-zero layer builds white, not black (got %r)" % (set(colours),))
+    check(stats.get("colour_pristine") == name,
+          "and the reason is recorded for the author (got %r)"
+          % (stats.get("colour_pristine"),))
+
+    # Black with an opaque alpha is a choice, and it survives.
+    stats = {}
+    mesh = mesh_with([(name, "POINT", (0.0, 0.0, 0.0, 1.0))])
+    colours = new_track._read_colours(mesh, stats)
+    check(set(colours) == {(0, 0, 0, 255)},
+          "black painted on purpose is kept (got %r)" % (set(colours),))
+    check("colour_pristine" not in stats,
+          "and is not reported as unpainted")
+
+    # Paint on one channel only is still paint.
+    stats = {}
+    mesh = mesh_with([(name, "POINT", (0.0, 0.0, 1.0, 0.0))])
+    colours = new_track._read_colours(mesh, stats)
+    check(set(colours) == {(0, 0, 255, 0)},
+          "a single painted channel counts as painted (got %r)" % (set(colours),))
+
+    # The layer the author did paint is named rather than guessed at.
+    stats = {}
+    mesh = mesh_with([(name, "POINT", (0.0, 0.0, 0.0, 0.0)),
+                      ("Color", "CORNER", (1.0, 0.5, 0.25, 1.0))])
+    colours = new_track._read_colours(mesh, stats)
+    check(set(colours) == {white}, "an all-zero layer still builds white")
+    check(stats.get("colour_elsewhere") == ["Color"],
+          "and the painted layer is named, not chosen (got %r)"
+          % (stats.get("colour_elsewhere"),))
+
+    # A layer Blender just created is white, which is real lighting.
+    stats = {}
+    mesh = mesh_with([(name, "POINT", None)])
+    colours = new_track._read_colours(mesh, stats)
+    check(set(colours) == {white},
+          "a freshly created layer is white and is kept (got %r)" % (set(colours),))
+    check("colour_pristine" not in stats,
+          "and is not reported as unpainted, because Blender starts it white")
+
+    # A baked layer on the wrong domain is reported as such.
+    stats = {}
+    mesh = mesh_with([(name, "CORNER", (1.0, 1.0, 1.0, 1.0))])
+    colours = new_track._read_colours(mesh, stats)
+    check(set(colours) == {white}, "a CORNER baked layer builds white")
+    check(str(stats.get("colour_domain")) == "CORNER",
+          "and its domain is reported (got %r)" % (stats.get("colour_domain"),))
+
+
 def test_geometry_refuses_orphans():
     """A vertex with no segment and no face has nowhere to go, and says so.
 
@@ -4388,6 +4526,8 @@ def main():
         test_balloon_variants()
         test_slots()
         test_partial_export_is_safe()
+        test_geometry_colour_edit()
+        test_unpainted_colour_layer()
     finally:
         dkr_track_editor.unregister()
 

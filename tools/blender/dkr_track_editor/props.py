@@ -220,6 +220,8 @@ def _redraw_update(self, context):
 class DKR_SceneSettings(bpy.types.PropertyGroup):
     """Everything the sidebar needs to remember between clicks."""
 
+    waterfall_object: StringProperty(name="Waterfall", default="")
+
     source_path: StringProperty(
         name="Source",
         description="The object map this scene was imported from",
@@ -722,12 +724,16 @@ CLASSES = (
 
 
 def register_pointers():
+    from .operators.waterfall import DKR_ScrollSettings
+    bpy.types.Object.dkr_scroll = PointerProperty(type=DKR_ScrollSettings)
     bpy.types.Scene.dkr = PointerProperty(type=DKR_SceneSettings)
     bpy.types.Scene.dkr_ai = PointerProperty(type=DKR_RaceAiSettings)
     bpy.types.Scene.dkr_water = PointerProperty(type=DKR_WaterSettings)
 
 
 def unregister_pointers():
+    if hasattr(bpy.types.Object, "dkr_scroll"):
+        del bpy.types.Object.dkr_scroll
     for name in ("dkr_water", "dkr_ai", "dkr"):
         if hasattr(bpy.types.Scene, name):
             delattr(bpy.types.Scene, name)

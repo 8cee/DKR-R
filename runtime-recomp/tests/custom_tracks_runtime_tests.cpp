@@ -15,7 +15,9 @@
 
 extern "C" void dkr_custom_tracks_auto_boot(std::uint8_t*, recomp_context*);
 extern "C" void dkr_custom_tracks_prepare_memory(std::uint8_t*, recomp_context*);
+extern "C" void dkr_custom_tracks_prepare_level(std::uint8_t*, recomp_context*);
 extern "C" void dkr_custom_tracks_prepare_vehicle(std::uint8_t*, recomp_context*);
+extern "C" void dkr_custom_tracks_track_heap(std::uint8_t*, recomp_context*);
 
 namespace tracks = dkr::runtime::custom_tracks;
 namespace addresses = dkr::runtime::revision_addresses;
@@ -86,11 +88,23 @@ int main() {
     const auto folder = root / "tracks" / "test.dkrmap";
     std::filesystem::create_directories(folder);
     std::ofstream(folder / "manifest.json") <<
-        R"({"schemaVersion":1,"id":"test","name":"Test","adds":[{"section":"LEVEL_HEADERS","file":"header.bin"}]})";
+        R"({"schemaVersion":1,"id":"test","name":"Test","adds":[{"section":"LEVEL_HEADERS","file":"header.bin"},)"
+        R"({"section":"LEVEL_MODELS","file":"model.bin"}]})";
     std::string header(196, '\0');
     header[0x37] = 73; // Inherit Ancient Lake's retail object maps.
     header[0xBB] = 5;
     std::ofstream(folder / "header.bin", std::ios::binary) << header;
+    // Two segments drawing 3 and 4 batches, in one stored DEFLATE block.
+    std::string model(0x4C + 2 * 0x44, '\0');
+    model[7] = 0x4C;
+    model[0x1B] = 2;
+    model[0x4C + 0x21] = 3;
+    model[0x4C + 0x44 + 0x21] = 4;
+    const auto length = static_cast<std::uint16_t>(model.size());
+    std::string container{static_cast<char>(length & 0xFF), static_cast<char>(length >> 8), 0, 0, 0x09,
+                          0x01, static_cast<char>(length & 0xFF), static_cast<char>(length >> 8),
+                          static_cast<char>(~length & 0xFF), static_cast<char>((~length >> 8) & 0xFF)};
+    std::ofstream(folder / "model.bin", std::ios::binary) << container << model;
     tracks::scan(root / "tracks");
     const std::int32_t retail[] = {0, 196, -1};
     assert(!tracks::build_extended_table(tracks::Section::LevelHeaders, retail).empty());
@@ -258,7 +272,186 @@ int main() {
         untouched = memory;
         prepare(custom);
         assert(memory == untouched);
+
+        // load_level_game's entry sizes the display lists for the custom
+        // model in every viewport, and hands retail levels the retail table.
+        const std::uint32_t table = rev80() ? 0x800DD920 : 0x800DD3B0;
+        const std::uint32_t previous_players = rev80() ? 0x80123A8C : 0x8012350C;
+        const auto commands = [&](int players) { return MEM_W(players * 4, addr(table)); };
+        const auto load_level = [&](std::int32_t level) {
+            recomp_context level_context{};
+            level_context.r4 = level;
+            level_context.r5 = 0;
+            level_context.r7 = 1;
+            auto registers = level_context;
+            MEM_W(0, addr(previous_players)) = 0;
+            dkr_custom_tracks_prepare_level(rdram, &level_context);
+            assert(std::memcmp(&level_context, &registers, sizeof(level_context)) == 0);
+        };
+        assert(tracks::level_model_batches(custom) == 7);
+        const std::int32_t retail_commands[] = {4500, 7000, 11000, 11000};
+        for (int players = 0; players < 4; ++players) MEM_W(players * 4, addr(table)) = retail_commands[players];
+        make_pool(0x80400000, true, 2);
+        load_level(custom);
+        for (int players = 0; players < 4; ++players)
+            assert(commands(players) == retail_commands[players] + 7 * 10 * (players + 1));
+        assert(MEM_W(0, addr(previous_players)) == -1); // the heap is rebuilt now
+        assert(MEM_W(4, slot(1)) == 0x6CAE00);            // with the pool grown first
+        load_level(custom); // L+Z: the heap already fits
+        assert(MEM_W(0, addr(previous_players)) == 0);
+        load_level(0);
+        for (int players = 0; players < 4; ++players) assert(commands(players) == retail_commands[players]);
+        assert(MEM_W(0, addr(previous_players)) == -1);
+        load_level(0);
+        assert(MEM_W(0, addr(previous_players)) == 0);
     }
+    // -----------------------------------------------------------------------
+    // The level model heap generate_track reserves
+    // -----------------------------------------------------------------------
+    // Outside the revision loop because it replaces the scanned track list, and
+    // because nothing here is revision specific: only the policy's hook address
+    // differs between the two, and that is not reachable from a host test.
+    {
+        const auto be32_into = [](std::string& bytes, std::size_t at, std::uint32_t value) {
+            for (int shift = 24; shift >= 0; shift -= 8)
+                bytes[at++] = static_cast<char>((value >> shift) & 0xFF);
+        };
+        const auto be16_into = [](std::string& bytes, std::size_t at, std::uint16_t value) {
+            bytes[at] = static_cast<char>(value >> 8);
+            bytes[at + 1] = static_cast<char>(value & 0xFF);
+        };
+        // Little-endian inflated size, the 0x09 container tag, then raw DEFLATE.
+        // A stored block caps at 65535 bytes, so a large model needs several.
+        const auto container_for = [](const std::string& model) {
+            std::string out;
+            const auto size = static_cast<std::uint32_t>(model.size());
+            for (int shift = 0; shift < 32; shift += 8)
+                out.push_back(static_cast<char>((size >> shift) & 0xFF));
+            out.push_back(0x09);
+            for (std::size_t at = 0; at < model.size();) {
+                const std::size_t chunk = std::min<std::size_t>(0xFFFF, model.size() - at);
+                const bool last = at + chunk == model.size();
+                out.push_back(last ? 0x01 : 0x00);
+                out.push_back(static_cast<char>(chunk & 0xFF));
+                out.push_back(static_cast<char>((chunk >> 8) & 0xFF));
+                out.push_back(static_cast<char>(~chunk & 0xFF));
+                out.push_back(static_cast<char>((~chunk >> 8) & 0xFF));
+                out.append(model, at, chunk);
+                at += chunk;
+            }
+            return out;
+        };
+        const auto measure = [](const std::string& container) {
+            return tracks::measure_level_model_arena(
+                reinterpret_cast<const std::uint8_t*>(container.data()), container.size());
+        };
+
+        // One segment, one batch, two collidable triangles sharing an edge.
+        std::string small(0x200, '\0');
+        be32_into(small, 0x04, 0x4C);          // segments
+        be16_into(small, 0x1A, 1);             // one of them
+        be32_into(small, 0x48, 0x200);         // modelSize: where the arena starts
+        be32_into(small, 0x4C + 0x04, 0x90);   // triangles
+        be32_into(small, 0x4C + 0x0C, 0xB0);   // batches
+        be32_into(small, 0x4C + 0x14, 0xC8);   // collision facets
+        be16_into(small, 0x4C + 0x1E, 2);      // two triangles
+        be16_into(small, 0x4C + 0x20, 1);      // one batch
+        be16_into(small, 0xB0 + 4, 0);         // drawing triangles [0, 2)
+        be16_into(small, 0xBC + 4, 2);         // as its sentinel says
+        // An edge with no neighbour names its own triangle's plane, which is
+        // how retail spells "put a wall straight up from this edge". Edge 1 of
+        // each triangle names the other, so that pair shares one plane.
+        be16_into(small, 0xC8 + 0, 0); be16_into(small, 0xC8 + 2, 0);
+        be16_into(small, 0xC8 + 4, 1); be16_into(small, 0xC8 + 6, 0);
+        be16_into(small, 0xD0 + 0, 1); be16_into(small, 0xD0 + 2, 1);
+        be16_into(small, 0xD0 + 4, 0); be16_into(small, 0xD0 + 6, 1);
+        // Two base planes, then five edge planes rather than six: the shared
+        // edge is built once. align16(0x200 + 2 * 2) + 7 * 16 = 640.
+        assert(measure(container_for(small)) == 640);
+
+        // A batch that opts out of collision still draws, so its triangles keep
+        // a base plane each, and it builds no edge planes at all: 2, not 7.
+        // That gap - 80 bytes on two triangles - is the whole lever an author
+        // has over the arena.
+        std::string decorative = small;
+        be32_into(decorative, 0xB0 + 8, 0x200); // RENDER_NO_COLLISION
+        assert(measure(container_for(decorative)) == 528 + 2 * 16);
+        // A triangle retail skips entirely gets no plane at all, not even a
+        // base one. Here only triangle 1 survives, with three edges of its own.
+        std::string skipped = small;
+        skipped[0x90] = static_cast<char>(0x80); // TRI_FLAG_80 on triangle 0
+        be16_into(skipped, 0xD0 + 0, 0);         // renumbered onto the one base
+        be16_into(skipped, 0xD0 + 2, 0);
+        be16_into(skipped, 0xD0 + 4, 0);
+        be16_into(skipped, 0xD0 + 6, 0);
+        assert(measure(container_for(skipped)) == 528 + 4 * 16);
+
+        // Malformed payloads are declined rather than guessed at, so the heap
+        // stays retail when a track cannot be measured.
+        std::string headless = small;
+        be32_into(headless, 0x48, 0); // no modelSize
+        assert(measure(container_for(headless)) == -1);
+        assert(tracks::measure_level_model_arena(nullptr, 0) == -1);
+
+        // A blob that alone overruns the retail heap, with no collision at all.
+        constexpr std::uint32_t kBig = 0x83000;
+        std::string big(kBig, '\0');
+        be32_into(big, 0x04, 0x4C);
+        be16_into(big, 0x1A, 1);
+        be32_into(big, 0x48, kBig);
+        assert(measure(container_for(big)) == static_cast<std::int32_t>(kBig));
+
+        const auto grown = root / "grown";
+        const auto folder = grown / "big.dkrmap";
+        std::filesystem::create_directories(folder);
+        std::ofstream(folder / "manifest.json") <<
+            R"({"schemaVersion":1,"id":"big","name":"Big","adds":[{"section":"LEVEL_HEADERS","file":"header.bin"},)"
+            R"({"section":"LEVEL_MODELS","file":"model.bin"}]})";
+        std::string big_header(196, '\0');
+        big_header[0x37] = 73;
+        big_header[0xBB] = 5;
+        std::ofstream(folder / "header.bin", std::ios::binary) << big_header;
+        std::ofstream(folder / "model.bin", std::ios::binary) << container_for(big);
+        tracks::scan(grown);
+        const std::int32_t retail_headers[] = {0, 196, -1};
+        assert(!tracks::build_extended_table(tracks::Section::LevelHeaders, retail_headers).empty());
+        const std::int32_t big_level = tracks::resolved_level_id("big");
+        assert(big_level > 0 && tracks::owns_level_id(big_level));
+        assert(tracks::level_model_arena_bytes(big_level) == static_cast<std::int32_t>(kBig));
+
+        constexpr std::int32_t kRetailHeap = tracks::kRetailTrackHeap;
+        constexpr std::int32_t kGrownHeap = 0x84000; // align16(0x83000 + 0x1000)
+        const auto heap_for = [&](std::int32_t level, std::int32_t held) {
+            recomp_context level_context{};
+            level_context.r4 = level;
+            dkr_custom_tracks_prepare_level(rdram, &level_context);
+            recomp_context inside{};
+            inside.r21 = held;
+            dkr_custom_tracks_track_heap(rdram, &inside);
+            return static_cast<std::int32_t>(inside.r21);
+        };
+        assert(heap_for(big_level, kRetailHeap) == kGrownHeap);
+        // Every retail level keeps the retail reservation byte for byte.
+        assert(heap_for(0, kRetailHeap) == kRetailHeap);
+        // A register that is not holding the retail constant is never written:
+        // a revision whose prologue differs keeps the retail heap.
+        assert(heap_for(big_level, 0x1234) == 0x1234);
+
+        // Taking the size clears it, so a generate_track reached without a
+        // level_load of its own cannot inherit the previous level's heap.
+        recomp_context prepared{};
+        prepared.r4 = big_level;
+        dkr_custom_tracks_prepare_level(rdram, &prepared);
+        recomp_context once{};
+        once.r21 = kRetailHeap;
+        dkr_custom_tracks_track_heap(rdram, &once);
+        assert(static_cast<std::int32_t>(once.r21) == kGrownHeap);
+        recomp_context twice{};
+        twice.r21 = kRetailHeap;
+        dkr_custom_tracks_track_heap(rdram, &twice);
+        assert(static_cast<std::int32_t>(twice.r21) == kRetailHeap);
+    }
+
     tracks::set_auto_boot(false);
     tracks::arm_track_override("");
     std::filesystem::remove_all(root);

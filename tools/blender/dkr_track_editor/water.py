@@ -510,7 +510,7 @@ class Laid:
 
 
 def lay_water(model, wavy: bool, level, rect, texture, tile: int = 0,
-              skip_dry: bool = True) -> Laid:
+              skip_dry: bool = True, reserved=()) -> Laid:
     """Lay water over ``rect`` at ``level``, and cut the model to fit. In place.
 
     ``rect`` is ``(x1, z1, x2, z2)`` and ``level`` a height, both in map space.
@@ -563,7 +563,7 @@ def lay_water(model, wavy: bool, level, rect, texture, tile: int = 0,
     try:
         index = level_model_edit.add_texture(
             model, texture.index, texture.width, texture.height,
-            texture.format, 0)
+            texture.format, 0, reserved=reserved)
     except level_model_edit.EditError as error:
         raise WaterError(str(error))
     laid.texture_index = index

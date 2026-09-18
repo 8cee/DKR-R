@@ -47,6 +47,7 @@ which mesh is holding on and what to do about it.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import tempfile
@@ -1003,6 +1004,19 @@ def _renumber(context, going: int) -> int:
                 moved += 1
         if changed:
             geometry.set_extra_textures(obj, extras)
+    from . import waterfall
+    from .. import texture_scroll
+    for obj in waterfall.scroll_objects(context):
+        if texture_scroll.PROP_ENTRY not in obj:
+            continue
+        try:
+            ref = waterfall.read_reference(obj)
+            identifier = int(ref.get("id", 0))
+            if texture_module.is_custom_id(identifier) and identifier > going:
+                ref["id"] = identifier - 1
+                obj[texture_scroll.PROP_ENTRY] = json.dumps(ref)
+        except (texture_scroll.ScrollError, TypeError, ValueError, AttributeError):
+            continue  # A broken reference remains a validation error.
     return moved
 
 

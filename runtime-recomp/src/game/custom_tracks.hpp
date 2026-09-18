@@ -236,6 +236,36 @@ void reload();
 [[nodiscard]] std::int32_t resolved_level_id(const std::string& track_id);
 [[nodiscard]] bool owns_level_id(std::int32_t level_id);
 
+// Triangle batches in the level model the track at `level_id` ships, summed
+// over its segments. render_level_segment spends several display-list
+// commands on each one, so this sizes the game's display-list heap before the
+// level loads. -1 when the level is not a .dkrmap track, ships no model of its
+// own, or the model cannot be read.
+[[nodiscard]] std::int32_t level_model_batches(std::int32_t level_id);
+// The same count for one compressed LEVEL_MODELS payload.
+[[nodiscard]] std::int32_t count_level_model_batches(const std::uint8_t* bytes,
+                                                     std::size_t size);
+
+// The retail size of gTrackModelHeap: LEVEL_MODEL_MAX_SIZE in tracks.c. It
+// covers the inflated blob AND the scratch arena the loader appends past
+// modelSize, so a model well under it can still overflow on collision alone.
+inline constexpr std::int32_t kRetailTrackHeap = 0x82A00;
+
+// Bytes generate_track will have constructed by the time track_init_collision
+// finishes: the inflated blob plus, per segment, two bytes a triangle, sixteen
+// per collision plane and two per special batch, each 16-aligned. Retail only
+// reports an overflow through a stubbed rmonPrintf and then writes past the
+// heap, so this is measured before the load and the heap sized to match.
+//
+// The plane bookkeeping mirrors track_init_collision (tracks.c:3064). The same
+// walk lives in mods/legacy_mod_geometry.cpp, which *rejects* what overflows
+// rather than measuring it; keep the two in step. -1 when the level is not a
+// .dkrmap track, ships no model of its own, or the payload cannot be read.
+[[nodiscard]] std::int32_t level_model_arena_bytes(std::int32_t level_id);
+// The same measurement for one compressed LEVEL_MODELS payload.
+[[nodiscard]] std::int32_t measure_level_model_arena(const std::uint8_t* bytes,
+                                                      std::size_t size);
+
 // ---------------------------------------------------------------------------
 // A track's high-resolution texture pack
 // ---------------------------------------------------------------------------

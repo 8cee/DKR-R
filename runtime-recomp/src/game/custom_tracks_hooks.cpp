@@ -6,6 +6,7 @@
 
 #include "recomp.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -153,6 +154,22 @@ void write_word(std::uint8_t* rdram, std::uint32_t address,
                 std::int32_t value) {
     MEM_W(0, rdram_address(address)) = static_cast<std::uint32_t>(value);
 }
+
+// The level model heap generate_track is about to reserve, or 0 for the retail
+// size. Written at load_level_game's entry, where the level id is known, and
+// taken by the generate_track hook, which only sees a model index. Consuming
+// it clears it, so a value prepared for one load can never reach a second.
+std::int32_t g_track_heap_bytes = 0;
+
+// Leaves most of the four megabytes dkr_custom_tracks_prepare_memory adds for
+// the textures, objects and particles that come after the model. Two megabytes
+// is nearly four times the retail heap and still a quarter of the growth.
+constexpr std::int32_t kTrackHeapCeiling = 0x200000;
+
+// The loader 16-aligns as it walks the segments, and measure_level_model_arena
+// accounts for that exactly; this only keeps a rounding difference from ever
+// being the thing that overflows.
+constexpr std::int32_t kTrackHeapSlack = 0x1000;
 
 } // namespace
 
@@ -473,6 +490,149 @@ extern "C" void dkr_custom_tracks_prepare_memory(std::uint8_t* rdram,
     std::fprintf(stderr,
                  "[custom-tracks] main memory pool grown into expansion RAM for level %d (+%u KB)\n",
                  static_cast<int>(static_cast<std::int32_t>(context->r4)), extra / 1024U);
+}
+
+// Decides the level model heap for the level about to load, and leaves it for
+// the generate_track hook below.
+//
+// generate_track reserves LEVEL_MODEL_MAX_SIZE (0x82A00) for the inflated blob
+// AND the arena track_init_collision appends past modelSize - sixteen bytes per
+// collision plane, which is where most of a large track's memory goes. Retail
+// checks the total only to report it through rmonPrintf, which this build
+// stubs, and then writes past the heap regardless: straight over
+// gCollisionCandidates, gCollisionSurfaces and the pool slot list behind them.
+// The symptom is a wild pointer several frames later, never the overflow.
+//
+// A .dkrmap track can exceed it honestly - Bluey, retail's largest, is near 80%
+// of the budget with a fraction of the triangles an exported track carries. So
+// the arena is measured from the payload here and the heap sized to fit. Every
+// other level leaves this at zero and keeps the retail heap byte for byte.
+static void prepare_track_heap(std::int32_t level) {
+    namespace custom_tracks = dkr::runtime::custom_tracks;
+    g_track_heap_bytes = 0;
+    if (!custom_tracks::owns_level_id(level)) {
+        return;
+    }
+    const std::int32_t arena = custom_tracks::level_model_arena_bytes(level);
+    if (arena <= custom_tracks::kRetailTrackHeap) {
+        return; // Fits retail, or the payload could not be measured.
+    }
+    const std::int64_t wanted =
+        (std::int64_t(arena) + kTrackHeapSlack + 15) & ~std::int64_t(15);
+    if (wanted > kTrackHeapCeiling) {
+        // Saying so is the whole point: past here the track corrupts memory the
+        // same way it did before, and nothing else in the log would name it.
+        std::fprintf(stderr,
+                     "[custom-tracks] level %d needs %d bytes of level model and "
+                     "collision data, over the %d this runtime can reserve; it "
+                     "will overflow. Reduce collidable triangles or geometry\n",
+                     static_cast<int>(level), static_cast<int>(arena),
+                     static_cast<int>(kTrackHeapCeiling));
+        g_track_heap_bytes = kTrackHeapCeiling;
+        return;
+    }
+    g_track_heap_bytes = static_cast<std::int32_t>(wanted);
+    // Only the measurement is reported here. The line that says the heap was
+    // raised belongs to the hook that raises it, so a payload built without
+    // that hook - which is easy to do, since the call lives in regenerated
+    // code - shows this line and not that one, instead of claiming both.
+    std::fprintf(stderr,
+                 "[custom-tracks] level %d builds %d bytes of level model and "
+                 "collision data, over the retail %d\n",
+                 static_cast<int>(level), static_cast<int>(arena),
+                 static_cast<int>(custom_tracks::kRetailTrackHeap));
+}
+
+// Called inside generate_track, on the instruction after the one that finishes
+// materialising LEVEL_MODEL_MAX_SIZE into s5. That register carries the
+// constant to both of the places that matter in the same function:
+//
+//   8002c0f4  lui   s5, 0x0008
+//   8002c0f8  ori   s5, s5, 0x2a00    <- the constant is complete here
+//   8002c104  jal   mempool_alloc_safe
+//   8002c108  or    a0, s5, zero      <- delay slot: the heap's size
+//   8002c1c0  addu  t6, s0, s5        <- where the compressed blob is landed,
+//                                        at the heap's tail, before inflating
+//
+// so one write moves the reservation and keeps the compressed payload at the
+// tail of the larger heap, which is what guarantees the inflate cannot overrun
+// its own source. The third use, the overflow test, only feeds the stubbed
+// rmonPrintf. Anything other than the retail constant in s5 means this is not
+// the instruction this code believes it is - a revision whose prologue differs
+// keeps the retail heap instead of having a register it misread overwritten.
+extern "C" void dkr_custom_tracks_track_heap(std::uint8_t*,
+                                             recomp_context* context) {
+    const std::int32_t wanted = g_track_heap_bytes;
+    g_track_heap_bytes = 0;
+    if (wanted <= dkr::runtime::custom_tracks::kRetailTrackHeap) {
+        return;
+    }
+    if (static_cast<std::int32_t>(context->r21) !=
+        dkr::runtime::custom_tracks::kRetailTrackHeap) {
+        std::fprintf(stderr,
+                     "[custom-tracks] generate_track does not hold the retail "
+                     "track heap size where it was expected; leaving it alone\n");
+        return;
+    }
+    context->r21 = static_cast<gpr>(wanted);
+    std::fprintf(stderr,
+                 "[custom-tracks] track heap raised from %d to %d bytes\n",
+                 static_cast<int>(dkr::runtime::custom_tracks::kRetailTrackHeap),
+                 static_cast<int>(wanted));
+}
+
+// Called at load_level_game's entry, before alloc_displaylist_heap. DKR sizes
+// each frame's display list from gNumF3dCmdsPerPlayer (4500 commands for one
+// player), and the matrix heap follows it directly. render_level_segment spends
+// three to ten commands on every visible batch, and a .dkrmap model can have
+// far more batches than a retail one (1214 in a 68-segment export whose PVS
+// sees everything). Past the budget the list runs into the matrices the same
+// frame writes, and the renderer receives garbage. So a custom level gets a
+// budget for its whole model in every viewport, and every other level gets the
+// retail table back. A changed table invalidates gPrevPlayerCount, and that
+// makes the retail allocator rebuild the heap in this same call.
+extern "C" void dkr_custom_tracks_prepare_level(std::uint8_t* rdram,
+                                                recomp_context* context) {
+    // gNumF3dCmdsPerPlayer in thread3_main.c, identical in both revisions.
+    constexpr std::int32_t kRetailCommands[4] = {4500, 7000, 11000, 11000};
+    constexpr std::int32_t kCommandsPerBatch = 10;
+    constexpr std::int32_t kCommandLimit = 0x20000;
+    dkr_custom_tracks_prepare_memory(rdram, context);
+
+    const auto level = static_cast<std::int32_t>(context->r4);
+    prepare_track_heap(level);
+    const std::int32_t batches = dkr::runtime::custom_tracks::level_model_batches(level);
+    // gNumF3dCmdsPerPlayer and gPrevPlayerCount, verified against
+    // ver/symbols/symbol_addrs.us.v{77,80}.txt.
+    const bool rev_a = dkr::runtime::revision_addresses::gSelectedRevision ==
+                       dkr::runtime::rom::Revision::UsV80;
+    const std::uint32_t table = rev_a ? 0x800DD920U : 0x800DD3B0U;
+    const std::uint32_t previous_players = rev_a ? 0x80123A8CU : 0x8012350CU;
+    bool changed = false;
+    for (int players = 0; players < 4; ++players) {
+        std::int32_t commands = kRetailCommands[players];
+        if (batches > 0) {
+            const std::int64_t budget = std::int64_t(commands) +
+                                        std::int64_t(batches) * kCommandsPerBatch * (players + 1);
+            commands = static_cast<std::int32_t>(std::min<std::int64_t>(budget, kCommandLimit));
+        }
+        const std::uint32_t entry = table + static_cast<std::uint32_t>(players) * 4U;
+        if (read_word(rdram, entry) != commands) {
+            write_word(rdram, entry, commands);
+            changed = true;
+        }
+    }
+    if (!changed) {
+        return;
+    }
+    write_word(rdram, previous_players, -1);
+    if (batches > 0) {
+        std::fprintf(stderr,
+                     "[custom-tracks] level %d draws up to %d batches; display lists sized for "
+                     "%d commands with one player\n",
+                     static_cast<int>(level), static_cast<int>(batches),
+                     static_cast<int>(read_word(rdram, table)));
+    }
 }
 
 // Called by the existing level_load scene-reset hook before retail consumes

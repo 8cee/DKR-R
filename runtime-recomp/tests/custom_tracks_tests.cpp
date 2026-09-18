@@ -150,6 +150,43 @@ std::string model_payload(const std::vector<std::int32_t>& texture_ids,
     return payload;
 }
 
+// A whole level model with the given batch count in each segment, compressed
+// with Huffman-coded DEFLATE the way the retail assets are.
+std::string batch_model_payload(const std::vector<std::int16_t>& batches,
+                                std::uint8_t tag = 0x09) {
+    const std::uint32_t segments = 0x4C;
+    std::string model(segments + batches.size() * 0x44U + 32U, '\0');
+    model[4] = static_cast<char>((segments >> 24) & 0xFF);
+    model[5] = static_cast<char>((segments >> 16) & 0xFF);
+    model[6] = static_cast<char>((segments >> 8) & 0xFF);
+    model[7] = static_cast<char>(segments & 0xFF);
+    model[0x1A] = static_cast<char>((batches.size() >> 8) & 0xFF);
+    model[0x1B] = static_cast<char>(batches.size() & 0xFF);
+    for (std::size_t segment = 0; segment < batches.size(); ++segment) {
+        const std::size_t at = segments + segment * 0x44U + 0x20U;
+        model[at] = static_cast<char>((batches[segment] >> 8) & 0xFF);
+        model[at + 1] = static_cast<char>(batches[segment] & 0xFF);
+    }
+    std::size_t compressed_size = 0;
+    void* compressed = tdefl_compress_mem_to_heap(model.data(), model.size(),
+                                                  &compressed_size, TDEFL_DEFAULT_MAX_PROBES);
+    assert(compressed != nullptr);
+    const auto size = static_cast<std::uint32_t>(model.size());
+    std::string payload;
+    for (int byte = 0; byte < 4; ++byte) {
+        payload += static_cast<char>((size >> (byte * 8)) & 0xFF);
+    }
+    payload += static_cast<char>(tag);
+    payload.append(static_cast<const char*>(compressed), compressed_size);
+    mz_free(compressed);
+    return payload;
+}
+
+std::int32_t count_batches(const std::string& payload) {
+    return count_level_model_batches(
+        reinterpret_cast<const std::uint8_t*>(payload.data()), payload.size());
+}
+
 // The texture ids a served model payload now names.
 std::vector<std::int32_t> served_texture_ids(Section section,
                                             std::uint32_t offset,
@@ -931,6 +968,35 @@ int main() {
         std::filesystem::remove(installed / "link.dkrmap");
     }
     set_working_directory({});
+
+    // The display-list budget reads every segment's batch count out of the
+    // inflated model; anything it cannot read counts as unknown.
+    {
+        assert(count_batches(batch_model_payload({14, 0, 23, -5, 27})) == 64);
+        assert(count_batches(batch_model_payload({})) == 0);
+        assert(count_batches(batch_model_payload({3}, 0x08)) == -1);
+        std::string truncated = batch_model_payload({3, 4});
+        truncated.resize(truncated.size() / 2);
+        assert(count_batches(truncated) == -1);
+        std::string oversized = batch_model_payload({3, 4});
+        oversized[0] = static_cast<char>(oversized[0] + 1); // declared size lies
+        assert(count_batches(oversized) == -1);
+        // numberOfSegments claims more than the inflated blob holds.
+        std::string bogus(0x4C, '\0');
+        bogus[7] = 0x4C;
+        bogus[0x1B] = 9;
+        std::size_t length = 0;
+        void* deflated = tdefl_compress_mem_to_heap(bogus.data(), bogus.size(), &length,
+                                                    TDEFL_DEFAULT_MAX_PROBES);
+        const std::string past_end = std::string("\x4C\0\0\0\x09", 5) +
+                                     std::string(static_cast<const char*>(deflated), length);
+        mz_free(deflated);
+        assert(count_batches(past_end) == -1);
+        assert(count_level_model_batches(nullptr, 0) == -1);
+        // Retail levels and tracks without a model have no count.
+        assert(level_model_batches(0) == -1);
+    }
+
     std::filesystem::remove_all(root);
     std::printf("custom_tracks_tests: ok\n");
     return 0;

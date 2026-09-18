@@ -538,6 +538,242 @@ bool owns_level_id(std::int32_t level_id) {
         [level_id](const auto& entry){return entry.second==level_id;});
 }
 
+std::int32_t count_level_model_batches(const std::uint8_t* bytes, std::size_t size) {
+    // LevelModel and LevelModelSegment offsets, docs/LEVEL_MODEL_FORMAT.md.
+    constexpr std::size_t kContainerHeader = 5U;
+    constexpr std::uint32_t kModelHeaderSize = 0x4CU;
+    constexpr std::uint32_t kInflatedLimit = 0x100000U;
+    constexpr std::size_t kSegmentsPointer = 0x04U;
+    constexpr std::size_t kSegmentCount = 0x1AU;
+    constexpr std::uint32_t kSegmentSize = 0x44U;
+    constexpr std::size_t kSegmentBatchCount = 0x20U;
+    if (bytes == nullptr || size <= kContainerHeader || bytes[4] != kContainerTag) {
+        return -1;
+    }
+    const std::uint32_t inflated_size =
+        static_cast<std::uint32_t>(bytes[0]) | (static_cast<std::uint32_t>(bytes[1]) << 8) |
+        (static_cast<std::uint32_t>(bytes[2]) << 16) | (static_cast<std::uint32_t>(bytes[3]) << 24);
+    if (inflated_size < kModelHeaderSize || inflated_size > kInflatedLimit) {
+        return -1;
+    }
+    std::vector<std::uint8_t> model(inflated_size);
+    // No TINFL_FLAG_PARSE_ZLIB_HEADER: the container holds raw DEFLATE.
+    if (tinfl_decompress_mem_to_mem(model.data(), model.size(), bytes + kContainerHeader,
+                                    size - kContainerHeader, 0) != model.size()) {
+        return -1;
+    }
+    const auto be16 = [&](std::size_t at) {
+        return static_cast<std::int16_t>((model[at] << 8) | model[at + 1U]);
+    };
+    const std::uint32_t segments = read_be32(model.data() + kSegmentsPointer);
+    const std::int16_t count = be16(kSegmentCount);
+    if (count < 0 ||
+        std::uint64_t(segments) + std::uint64_t(count) * kSegmentSize > model.size()) {
+        return -1;
+    }
+    std::int32_t batches = 0;
+    for (std::int16_t segment = 0; segment < count; ++segment) {
+        batches += std::max<std::int16_t>(
+            0, be16(segments + std::size_t(segment) * kSegmentSize + kSegmentBatchCount));
+    }
+    return batches;
+}
+
+std::int32_t level_model_batches(std::int32_t level_id) {
+    std::scoped_lock lock(g_mutex);
+    for (const auto& [track_id, resolved] : g_resolved_level_ids) {
+        if (resolved != level_id) {
+            continue;
+        }
+        for (const Track& track : g_tracks) {
+            if (track.id != track_id) {
+                continue;
+            }
+            for (const Entry& entry : track.entries) {
+                if (entry.section == Section::LevelModels) {
+                    return count_level_model_batches(entry.bytes.data(), entry.bytes.size());
+                }
+            }
+        }
+    }
+    return -1;
+}
+
+std::int32_t measure_level_model_arena(const std::uint8_t* bytes, std::size_t size) {
+    // LevelModel and LevelModelSegment offsets, docs/LEVEL_MODEL_FORMAT.md.
+    constexpr std::size_t kContainerHeader = 5U;
+    constexpr std::uint32_t kModelHeaderSize = 0x4CU;
+    constexpr std::uint32_t kInflatedLimit = 0x100000U;
+    constexpr std::size_t kModelSizeField = 0x48U;
+    constexpr std::size_t kSegmentsPointer = 0x04U;
+    constexpr std::size_t kSegmentCount = 0x1AU;
+    constexpr std::uint32_t kSegmentSize = 0x44U;
+    constexpr std::size_t kSegmentTriangles = 0x04U;
+    constexpr std::size_t kSegmentBatches = 0x0CU;
+    constexpr std::size_t kSegmentFacets = 0x14U;
+    constexpr std::size_t kSegmentTriangleCount = 0x1EU;
+    constexpr std::size_t kSegmentBatchCount = 0x20U;
+    constexpr std::size_t kTriangleStride = 16U;
+    constexpr std::size_t kBatchStride = 12U;
+    constexpr std::size_t kFacetStride = 8U;
+    // TRI_FLAG_80 skips a triangle entirely; RENDER_NO_COLLISION (1 << 9) is
+    // the batch opting out of collision; 0x2000 is the batch func_8002C71C
+    // records into segment->unk34.
+    constexpr std::uint8_t kTriangleSkipped = 0x80U;
+    constexpr std::uint32_t kBatchNoCollision = 0x200U;
+    constexpr std::uint32_t kBatchSpecial = 0x2000U;
+    // track_init_collision packs a shared plane as `index | 0x8000`, so a plane
+    // index only has fifteen bits. That is a format ceiling, not a memory one:
+    // no larger heap lifts it, which is why it is refused here rather than
+    // measured and handed on.
+    constexpr std::uint32_t kPlaneLimit = 0x8000U;
+    // Nothing this side of a corrupt payload reaches a megabyte of arena per
+    // segment; the cap only keeps the accumulator honest.
+    constexpr std::uint64_t kArenaLimit = 0x800000U;
+
+    if (bytes == nullptr || size <= kContainerHeader || bytes[4] != kContainerTag) {
+        return -1;
+    }
+    const std::uint32_t inflated_size =
+        static_cast<std::uint32_t>(bytes[0]) | (static_cast<std::uint32_t>(bytes[1]) << 8) |
+        (static_cast<std::uint32_t>(bytes[2]) << 16) | (static_cast<std::uint32_t>(bytes[3]) << 24);
+    if (inflated_size < kModelHeaderSize || inflated_size > kInflatedLimit) {
+        return -1;
+    }
+    std::vector<std::uint8_t> model(inflated_size);
+    // No TINFL_FLAG_PARSE_ZLIB_HEADER: the container holds raw DEFLATE.
+    if (tinfl_decompress_mem_to_mem(model.data(), model.size(), bytes + kContainerHeader,
+                                    size - kContainerHeader, 0) != model.size()) {
+        return -1;
+    }
+    const auto fits = [&](std::uint64_t at, std::uint64_t length) {
+        return at + length <= model.size();
+    };
+    const auto be16 = [&](std::size_t at) -> std::uint32_t {
+        return static_cast<std::uint32_t>(model[at] << 8) | model[at + 1U];
+    };
+    const auto align16 = [](std::uint64_t value) { return (value + 15U) & ~std::uint64_t(15U); };
+
+    const std::uint32_t model_size = read_be32(model.data() + kModelSizeField);
+    const std::uint32_t segments = read_be32(model.data() + kSegmentsPointer);
+    const std::int16_t count = static_cast<std::int16_t>(be16(kSegmentCount));
+    if (model_size < kModelHeaderSize || model_size > inflated_size || count <= 0 ||
+        !fits(segments, std::uint64_t(count) * kSegmentSize)) {
+        return -1;
+    }
+
+    // The loader grows its arena from modelSize, not from the end of the file.
+    std::uint64_t constructed = model_size;
+    for (std::int16_t index = 0; index < count; ++index) {
+        const std::size_t segment = segments + std::size_t(index) * kSegmentSize;
+        const std::uint32_t triangles = read_be32(model.data() + segment + kSegmentTriangles);
+        const std::uint32_t batches = read_be32(model.data() + segment + kSegmentBatches);
+        const std::uint32_t facets = read_be32(model.data() + segment + kSegmentFacets);
+        const std::uint32_t triangle_count = be16(segment + kSegmentTriangleCount);
+        const std::uint32_t batch_count = be16(segment + kSegmentBatchCount);
+        // The batch array carries a sentinel entry past the last batch; the
+        // triangle window of batch n is read from n and n + 1 alike.
+        if (!fits(triangles, std::uint64_t(triangle_count) * kTriangleStride) ||
+            !fits(facets, std::uint64_t(triangle_count) * kFacetStride) ||
+            !fits(batches, (std::uint64_t(batch_count) + 1U) * kBatchStride)) {
+            return -1;
+        }
+
+        // One plane per drawn triangle first, so an edge plane built later can
+        // be told apart from a neighbour's base plane by its index alone.
+        std::vector<bool> collidable(triangle_count, false);
+        std::uint32_t planes = 0;
+        std::uint32_t special = 0;
+        for (std::uint32_t batch = 0; batch < batch_count; ++batch) {
+            const std::size_t entry = batches + std::size_t(batch) * kBatchStride;
+            const std::uint32_t first = be16(entry + 4U);
+            const std::uint32_t last = be16(entry + kBatchStride + 4U);
+            const std::uint32_t flags = read_be32(model.data() + entry + 8U);
+            if (flags & kBatchSpecial) {
+                ++special;
+            }
+            if (first > last || last > triangle_count) {
+                return -1;
+            }
+            for (std::uint32_t triangle = first; triangle < last; ++triangle) {
+                if (model[triangles + std::size_t(triangle) * kTriangleStride] & kTriangleSkipped) {
+                    continue;
+                }
+                ++planes;
+                collidable[triangle] = (flags & kBatchNoCollision) == 0;
+            }
+        }
+
+        const std::uint32_t base_planes = planes;
+        std::vector<std::array<std::uint32_t, 3>> edges(triangle_count);
+        for (std::uint32_t triangle = 0; triangle < triangle_count; ++triangle) {
+            for (unsigned edge = 0; edge < 3; ++edge) {
+                edges[triangle][edge] = be16(facets + std::size_t(triangle) * kFacetStride +
+                                             2U + std::size_t(edge) * 2U);
+            }
+        }
+        // An edge still naming a base plane has not been built yet: build one,
+        // and mark the neighbour's matching entry so the pair shares it.
+        for (std::uint32_t triangle = 0; triangle < triangle_count; ++triangle) {
+            if (!collidable[triangle]) {
+                continue;
+            }
+            const std::uint32_t base = be16(facets + std::size_t(triangle) * kFacetStride);
+            if (base >= base_planes) {
+                return -1;
+            }
+            for (unsigned edge = 0; edge < 3; ++edge) {
+                const std::uint32_t next = edges[triangle][edge];
+                if (next >= base_planes) {
+                    continue; // Already built, or shared by the neighbour.
+                }
+                if (next >= triangle_count) {
+                    return -1;
+                }
+                if (next != base) {
+                    for (std::uint32_t& reciprocal : edges[next]) {
+                        if (reciprocal == base) {
+                            reciprocal = planes | 0x8000U;
+                        }
+                    }
+                }
+                edges[triangle][edge] = planes++;
+            }
+        }
+        if (planes >= kPlaneLimit) {
+            return -1;
+        }
+
+        constructed = align16(constructed + std::uint64_t(triangle_count) * 2U); // unk10
+        constructed += std::uint64_t(planes) * 16U;                              // collisionPlanes
+        constructed = align16(constructed + std::uint64_t(special) * 2U);        // unk34
+        if (constructed > kArenaLimit) {
+            return -1;
+        }
+    }
+    return static_cast<std::int32_t>(constructed);
+}
+
+std::int32_t level_model_arena_bytes(std::int32_t level_id) {
+    std::scoped_lock lock(g_mutex);
+    for (const auto& [track_id, resolved] : g_resolved_level_ids) {
+        if (resolved != level_id) {
+            continue;
+        }
+        for (const Track& track : g_tracks) {
+            if (track.id != track_id) {
+                continue;
+            }
+            for (const Entry& entry : track.entries) {
+                if (entry.section == Section::LevelModels) {
+                    return measure_level_model_arena(entry.bytes.data(), entry.bytes.size());
+                }
+            }
+        }
+    }
+    return -1;
+}
+
 std::vector<std::int32_t> build_extended_table(
     Section section, const std::int32_t* retail_table) {
     std::scoped_lock lock(g_mutex);

@@ -994,7 +994,9 @@ def replace_base(context, obj, model, include_hidden=None):
     """
     from .. import level_model_encoder  # noqa: PLC0415
     from . import custom_textures  # noqa: PLC0415 - it imports this module
+    from . import waterfall
 
+    previous_textures = texture_table(obj)
     payload = level_model_encoder.pack(model)
     stem = os.path.splitext(os.path.basename(bpy.data.filepath))[0]
     target = os.path.join(os.path.dirname(bpy.data.filepath),
@@ -1019,6 +1021,7 @@ def replace_base(context, obj, model, include_hidden=None):
     rebuilt[PROP_AUTHORED_BASE] = True
     rebuilt.hide_select = locked
     record_budget(rebuilt, model)
+    waterfall.refresh_rebuilt(context, previous_textures, texture_table(rebuilt))
     context.scene.dkr.geometry_path = target
     return rebuilt, target, stats
 
@@ -1340,6 +1343,8 @@ class DKR_OT_import_geometry(bpy.types.Operator, ImportHelper):
         )
         obj[PROP_MODEL_PATH] = path
         record_budget(obj, model)
+        from . import waterfall
+        waterfall.bind_imported(context)
         if self.make_unselectable:
             obj.hide_select = True
 

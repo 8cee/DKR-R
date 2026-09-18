@@ -778,6 +778,64 @@ class DKR_PT_water(DkrPanel, bpy.types.Panel):
                            "the water flat.", icon="INFO")
 
 
+def _draw_scroll(layout, context, obj):
+    from .. import texture_scroll
+    from ..operators import waterfall, textures as texture_ops
+    try:
+        texture, index = waterfall.description(context, obj)
+        if texture:
+            layout.template_icon(icon_value=texture_ops.icon_for(texture), scale=3)
+        layout.label(text=texture.name if texture else "Texture entry %d" % index)
+        _dim_label(layout, "Entry %d" % index)
+    except texture_scroll.ScrollError as error:
+        info_box(layout, context, str(error), icon="ERROR", alert=True)
+    if texture_scroll.PROP_ENTRY not in obj:
+        info_box(layout, context, "No texture reference. Select a face in Edit Mode and pick its texture.")
+    layout.prop(obj.dkr_scroll, "speed")
+    layout.prop(obj.dkr_scroll, "direction")
+    if int(obj.get("unkA", 0)) or context.scene.dkr.show_raw:
+        layout.prop(obj.dkr_scroll, "horizontal")
+    layout.operator("dkr.pick_scroll_face", icon="EYEDROPPER").object_name = obj.name
+
+
+class DKR_PT_waterfalls(DkrPanel, bpy.types.Panel):
+    bl_label = "Waterfalls"
+    bl_idname = "DKR_PT_waterfalls"
+    bl_parent_id = "DKR_PT_water"
+
+    def draw(self, context):
+        from .. import texture_scroll
+        from ..operators import waterfall
+        layout = self.layout
+        layout.operator("dkr.add_waterfall", icon="ADD")
+        objects = waterfall.scroll_objects(context)
+        if not objects:
+            lines(layout, context, "Select the faces of the fall in Edit Mode, then Add Waterfall.", icon="INFO")
+            return
+        current = waterfall.chosen(context)
+        for obj in objects:
+            box = layout.box()
+            box.label(text=obj.name, icon="FORCE_TEXTURE")
+            try:
+                texture, index = waterfall.description(context, obj)
+                label = texture.name if texture else "Texture %d" % index
+                box.label(text="%s · %.2f texels/s" % (label,
+                    texture_scroll.texels_per_second(obj.get("unkB", 0))))
+            except texture_scroll.ScrollError as error:
+                lines(box, context, str(error), icon="ERROR", tight=True)
+            if texture_scroll.PROP_ENTRY not in obj:
+                box.label(text="No texture reference", icon="ERROR")
+            row = box.row(align=True)
+            row.operator("dkr.select_waterfall", text="Select Faces", icon="RESTRICT_SELECT_OFF").object_name = obj.name
+            row.operator("dkr.remove_waterfall", text="Remove", icon="X").object_name = obj.name
+            # The pick button also works for a broken link, when Select Faces
+            # cannot resolve it. The author selects the intended face manually.
+            if obj == current or len(objects) == 1:
+                _draw_scroll(box, context, obj)
+            else:
+                box.operator("dkr.pick_scroll_face", icon="EYEDROPPER").object_name = obj.name
+
+
 def _counts(context):
     counts = {}
     for obj in scene.iter_dkr_objects(context):
@@ -949,9 +1007,15 @@ class DKR_PT_object(LevelPanel, bpy.types.Panel):
             note.label(text="Rotate in the viewport to set %s" % angle_field.name,
                        icon="DRIVER_ROTATIONAL_DIFFERENCE")
 
+        from .. import texture_scroll
+        is_scroll = object_id == texture_scroll.OBJECT_ID
+        if is_scroll:
+            _draw_scroll(layout, context, obj)
         column = layout.column()
-        drawn = 0
+        drawn = 3 if is_scroll else 0
         for field in object_type.fields:
+            if is_scroll and field.name in ("textureIndex", "unkA", "unkB") and not settings.show_raw:
+                continue
             if field.unused:
                 continue
             if is_hidden_raw(field, settings.show_raw):
@@ -1565,6 +1629,7 @@ CLASSES = (
     DKR_PT_geometry,
     DKR_PT_textures,
     DKR_PT_water,
+    DKR_PT_waterfalls,
     DKR_PT_place,
     DKR_PT_minimap,
     DKR_PT_object,

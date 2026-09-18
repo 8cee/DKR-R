@@ -39,7 +39,7 @@ def _module_classes():
     from .operators import (ai, checks, custom_textures, edit, geometry,
                             header, io_objects, level_type, new_track, pack,
                             placeholders, race_ai, skybox, start_grid, textures,
-                            water)
+                            water, waterfall)
     from .ui import panels
 
     classes = []
@@ -54,6 +54,7 @@ def _module_classes():
     classes += list(textures.CLASSES)
     classes += list(custom_textures.CLASSES)
     classes += list(water.CLASSES)
+    classes += list(waterfall.CLASSES)
     classes += list(edit.CLASSES)
     classes += list(ai.CLASSES)
     classes += list(race_ai.CLASSES)

@@ -32,6 +32,29 @@ extension or as a legacy addon.
 
 ## Use
 
+**Waterfalls.** Select sloping or vertical track faces in Edit Mode, then use
+**DKR > Water > Waterfalls > Add Waterfall**. Choose a game preset or **Use
+Selected Texture** to use the image picked in Textures, including a custom PNG.
+Set speed in texels/s (default 44.53), Down/Up and the repetitions over the
+selected height. Under Appearance, choose Blended or Cutout, Pass-through
+(on by default) and Double-sided (on by default). Opaque artwork stays opaque.
+
+Each waterfall gets a dedicated texture-table entry and a TexScroll object;
+using the same picture elsewhere does not make that surface move. The image
+must wrap vertically and be no taller than 64 texels. Flat horizontal faces
+have no fall direction and are refused. Select Faces finds the affected
+geometry; Remove stops its movement and keeps its faces and texture. Speed can
+be edited in Waterfalls or on the TexScroll's DKR Object panel. Pick From Active
+Face repairs a missing link or links a manually placed TexScroll to an entry;
+every face using that entry then moves.
+
+Validate Track checks missing references, invalid indices, unsafe UV ranges,
+triangle flags that prevent scrolling, duplicate controllers and incompatible
+wrap modes. Re-segment and Add Water preserve the links. Motion uses the game's
+TexScroll; animated viewport preview is not included yet. Custom-texture motion,
+Modern/Accurate interpolation, HD replacements and Track Lab reloads still need
+manual verification in game.
+
 **Choose the Level Type first.** A new scene shows one panel, *Level Type*,
 asking what kind of level this is: Race, Boss Race, Challenge (Battle, Bananas
 or Eggs), Hub, or the advanced *Special* group (Cutscene, Menu Backdrop, Test

@@ -226,7 +226,7 @@ def read_source_mesh(obj, textures, own=None, borrowed=None, stats=None,
                 )
         positions.append(rounded)
 
-    colours = _read_colours(mesh)
+    colours = _read_colours(mesh, stats)
 
     faces = []
     for polygon in mesh.polygons:
@@ -279,15 +279,56 @@ def table_looks(textures, tree=None, own=()) -> dict:
     return found
 
 
-def _read_colours(mesh) -> list:
+def _written(layer) -> bool:
+    """True when this colour layer carries anything usable as lighting.
+
+    An all-zero layer is not something Blender produces: measured on 5.2, a new
+    colour attribute starts **white** in every domain and storage type, and
+    painting writes an opaque alpha. What does produce one is carrying a model
+    whose vertices are already black through a mesh and back, which is exactly
+    the case that needs catching.
+
+    Alpha is part of the test, and it is what keeps a deliberate black: black
+    painted on purpose has alpha 1, while an all-zero layer is also fully
+    transparent, which is not lighting anyone asked for.
+    """
+    try:
+        values = [0.0] * (len(layer.data) * 4)
+        layer.data.foreach_get("color", values)
+    except (RuntimeError, TypeError):
+        return False
+    return any(values)
+
+
+def _read_colours(mesh, stats=None) -> list:
     """The baked lighting, white where the author painted none.
 
     White rather than black: the colours are multiplied into the texture, so
     black would render the whole track unlit and look like a broken import.
+
+    A layer counts as lighting only if it carries something - see
+    :func:`_written`. An all-zero layer used to defeat this fallback, because
+    the fallback tested only whether a layer existed, and the track it produced
+    was black everywhere with no diagnostic anywhere. Painting black on purpose
+    still reaches the file.
     """
     white = (255, 255, 255, 255)
+    stats = {} if stats is None else stats
     layer = mesh.color_attributes.get(geometry.COLOUR_ATTRIBUTE)
-    if layer is None or layer.domain != "POINT":
+    if layer is not None and layer.domain != "POINT":
+        stats["colour_domain"] = layer.domain
+        layer = None
+    if layer is not None and not _written(layer):
+        stats["colour_pristine"] = layer.name
+        layer = None
+    if layer is None:
+        # Name the layers that do carry paint. Which of them the author meant
+        # is theirs to say - choosing here would swap one silent guess for
+        # another - so this only reports what is there.
+        stats["colour_elsewhere"] = sorted(
+            other.name for other in mesh.color_attributes
+            if other.name != geometry.COLOUR_ATTRIBUTE and _written(other)
+        )
         return [white] * len(mesh.vertices)
 
     values = [0.0] * (len(layer.data) * 4)
@@ -793,6 +834,32 @@ def _texture_warnings(adopted, stats, uv_layers) -> list:
             "single texel of its texture. Unwrap them, or select them and use "
             "Project Flat in the Textures panel" % stats["uv_unmapped"]
         )
+    # Saying so is the point. The track still builds, and a white track looks
+    # plausible enough that an author can ship it without ever learning that
+    # the lighting they painted is not in it.
+    if stats.get("colour_pristine") or stats.get("colour_domain"):
+        if stats.get("colour_pristine"):
+            reason = ("the '%s' colour layer has never been painted"
+                      % stats["colour_pristine"])
+        else:
+            reason = ("the '%s' colour layer is on the %s domain, and the "
+                      "baked lighting is read from Vertex"
+                      % (geometry.COLOUR_ATTRIBUTE,
+                         str(stats["colour_domain"]).title()))
+        message = (
+            "%s, so the track was built with white lighting. Vertex colour is "
+            "multiplied into the texture, so this is what keeps a track from "
+            "being drawn black" % reason
+        )
+        elsewhere = stats.get("colour_elsewhere") or []
+        if elsewhere:
+            message += (
+                ". This mesh does carry paint in %s - convert it to the Vertex "
+                "domain and name it '%s' to use it instead"
+                % (", ".join("'%s'" % name for name in elsewhere),
+                   geometry.COLOUR_ATTRIBUTE)
+            )
+        messages.append(message)
     if stats.get("uv_clamped"):
         messages.append(
             "%d face(s) stretch their texture across more repeats than the s16 "

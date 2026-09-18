@@ -325,6 +325,12 @@ model, lands around 80% of the budget; the median track is near 34%. Triangle
 count, not file size, is what runs a track out of memory, and
 `track_load_model` only reports it as `ERROR!! TrackMem overflow`.
 
+That is retail's ceiling. For a `.dkrmap` track DKR-R measures the same total
+before the level loads and enlarges the reservation to match — see "The level
+model heap" in `docs/CUSTOM_TRACKS.md`. The format ceilings behind it do not
+move: a segment still cannot build more than 32,767 collision planes, because a
+shared one is written as `index | 0x8000`.
+
 ## What an encoder actually has to do
 
 | Task | Notes |
@@ -342,6 +348,14 @@ Two limits bound a batch. The vertex index is `u8` and **batch-local**, so the
 format allows 256 vertices; but the widest batch in any of the 110 extracted
 models is **24**, and the mean is around 9. The ceiling that matters in practice
 is the retail one, not the field width.
+
+The triangle count has a separate **16-triangle draw limit**. `gSPPolygon`
+(`include/f3ddkr.h`) packs `count - 1` into four bits; the runtime reads
+`((w0 >> 20) & 0xF) + 1`. A batch of 24 triangles therefore draws only eight,
+even if its vertices fit. Every retail batch respects this limit. The builder
+splits on both vertex and triangle counts, and the encoder refuses an oversized
+draw batch. Exporting a mesh based on an older oversized model rebuilds its
+batches instead of patching that layout in place.
 
 `tools/blender/dkr_track_editor/level_model_encoder.py` implements the
 layout-preserving half of this table, and

@@ -46,7 +46,8 @@ with quartiles at 149 and 449; :data:`..textures.DEFAULT_PROJECTION_SCALE` is
 agrees with itself exactly: over all 10,389 batches in the 55 level models the
 bit is set on the 619 whose texture is animated and on none of the 9,770 whose
 texture is not. So applying an animated texture sets it and applying a still one
-clears it. Getting that wrong is what makes a picked waterfall render frozen.
+clears it. Waterfalls use a separate TexScroll object, authored by
+:mod:`.waterfall`; their movement does not depend on this frame-animation bit.
 
 **Transparency is partly a choice, and the rest follows from it.** Which pass
 the game draws a face in is the texture's to decide, so applying a see-through
@@ -213,7 +214,7 @@ def selected_faces(mesh) -> list:
 # The texture table
 # ---------------------------------------------------------------------------
 
-def allocate(obj, texture, surface: int) -> int:
+def allocate(obj, texture, surface: int, reserved=None, dedicated=False) -> int:
     """The table index for this texture at this surface type, adding one if new.
 
     Matching includes the surface type on purpose. Two entries pointing at one
@@ -245,8 +246,11 @@ def allocate(obj, texture, surface: int) -> int:
     }
 
     table = geometry.texture_table(obj)
+    if reserved is None:
+        from . import waterfall
+        reserved = waterfall.reserved_indices(bpy.context, table)
     for index, entry in enumerate(table):
-        if all(entry.get(field) == record[field]
+        if not dedicated and index not in reserved and all(entry.get(field) == record[field]
                for field in ("id", "w", "h", "format", "surface")):
             return index
 
@@ -324,7 +328,7 @@ class ApplyResult:
 
 
 def apply_texture(obj, faces, texture, surface, mapping, scale,
-                  look=looks.AUTO) -> ApplyResult:
+                  look=looks.AUTO, *, dedicated=False, mapped_uvs=None) -> ApplyResult:
     """Point faces at a texture, map them, and give them a material.
 
     Every write lands on the mesh's own record of the file - the face's texture
@@ -334,7 +338,7 @@ def apply_texture(obj, faces, texture, surface, mapping, scale,
     neither is read back.
     """
     mesh = obj.data
-    index = allocate(obj, texture, surface)
+    index = allocate(obj, texture, surface, dedicated=dedicated)
     entry = geometry.texture_table(obj)[index]
     result = ApplyResult(index)
     result.animated = texture.frames > 1
@@ -364,7 +368,9 @@ def apply_texture(obj, faces, texture, surface, mapping, scale,
         was = geometry.texture_entry(obj, texture_values[face])
         raw = [(uv_values[c * 2], uv_values[c * 2 + 1]) for c in corners]
 
-        if mapping == PROJECT:
+        if mapped_uvs is not None:
+            mapped = mapped_uvs[face]
+        elif mapping == PROJECT:
             places = [
                 scene.to_map(matrix @ mesh.vertices[v].co)
                 for v in polygon.vertices

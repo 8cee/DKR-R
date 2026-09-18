@@ -72,6 +72,11 @@ MAX_BATCH_VERTICES = 256
 #: renderer was tuned for.
 BATCH_VERTEX_TARGET = 24
 
+#: ``gSPPolygon`` packs ``triangle count - 1`` into four bits. The runtime
+#: decodes those bits, so 17 triangles would draw only one even when every
+#: vertex fits. Merging source batches must respect both command limits.
+MAX_BATCH_TRIANGLES = 16
+
 #: ``LEVEL_MODEL_MAX_SIZE`` in ``tracks.c``. Covers the inflated blob *and*
 #: everything the loader allocates past ``modelSize``.
 BUDGET = 0x82A00
@@ -173,9 +178,9 @@ def rebatch_segment(segment: Segment, faces: Sequence[Face], positions: Sequence
     """Rebuild a segment's batches, triangles and vertices from loose faces.
 
     Faces are grouped by :class:`BatchKey`, opaque groups first, and each group
-    is cut into batches once it would outgrow ``target`` vertices. Order within
-    a group is the order the faces arrive in, so an untouched segment comes back
-    unchanged rather than merely equivalent.
+    is cut into batches before exceeding ``target`` vertices or 16 triangles.
+    Order within a group is the order the faces arrive in, so an untouched
+    segment comes back unchanged rather than merely equivalent.
     """
     if target < 3 or target > MAX_BATCH_VERTICES:
         raise LayoutError(
@@ -248,12 +253,13 @@ def rebatch_segment(segment: Segment, faces: Sequence[Face], positions: Sequence
 
 
 def _chunk(faces: Sequence[Face], target: int) -> Iterable[List[Face]]:
-    """Cut a group into batches, closing one before its vertices outgrow ``target``."""
+    """Keep both the vertex window and the four-bit draw count representable."""
     current: List[Face] = []
     seen: set = set()
     for face in faces:
         fresh = {v for v in face.vertices if v not in seen}
-        if current and len(seen) + len(fresh) > target:
+        if current and (len(seen) + len(fresh) > target
+                        or len(current) >= MAX_BATCH_TRIANGLES):
             yield current
             current, seen = [], set()
             fresh = set(face.vertices)
@@ -652,7 +658,11 @@ def resegment(model: LevelModel,
       so any ``(segment, vertex)`` mapping a caller holds is stale. That is why
       this is explicit rather than something an export does quietly.
     """
-    faces, positions, colours = _dissolve(model)
+    # Batches that draw alike are merged rather than carried over: this call is
+    # replacing the segmentation, so the source batches have no claim on the
+    # result, and keeping them is what pushes a crowded new segment past the
+    # 255 its u8 batch count can hold. See :func:`_dissolve`.
+    faces, positions, colours = _dissolve(model, keep_batches=False)
     if not faces:
         return len(model.segments)
 
@@ -1147,13 +1157,25 @@ def blank_model(textures: Sequence = (), bounds=None) -> LevelModel:
     return model
 
 
-def _dissolve(model: LevelModel):
+def _dissolve(model: LevelModel, keep_batches: bool = True):
     """Every face in the model, against one flat pool of vertices.
 
-    A :class:`BatchKey`'s ``serial`` is only unique inside its own segment, so
-    it is widened to ``(segment, batch)`` here. Without that, batches from two
-    different source segments would collide and be merged into one draw call
-    the moment they landed in the same new segment.
+    ``keep_batches`` carries each face's source batch through. A
+    :class:`BatchKey`'s ``serial`` is only unique inside its own segment, so it
+    is widened to ``(segment, batch)``; without that, batches from two source
+    segments would collide and merge the moment they landed in the same new
+    segment, and a decompose and rebuild of an untouched segmentation would
+    stop being the identity.
+
+    A caller **replacing** the segmentation wants the opposite, and says so.
+    There, faces from many source segments land in one new segment, and keeping
+    the serials makes that segment inherit the union of all their batches.
+    Measured on an exported track whose wave grid forced the partition: one tile
+    came out with 335 batches built from 20 distinct (texture, flags) pairs,
+    past the 255 a ``u8 numberofOpaqueBatches`` can hold, and the export failed
+    inside struct.pack. Dropping them merges what draws alike - the same tile
+    comes out at 63 - and costs nothing a resegment has not already spent,
+    since it destroys identity by definition.
     """
     faces: List[Face] = []
     positions: List = []
@@ -1176,7 +1198,7 @@ def _dissolve(model: LevelModel):
                 face.key.texture_index, face.key.flags, face.key.misc,
                 face.key.texture_offset, face.key.vertex_override,
                 face.key.opaque,
-                None if face.key.serial is None
+                None if not keep_batches or face.key.serial is None
                 else (segment.index << 16) | (face.key.serial & 0xFFFF),
             )
             faces.append(Face(widened, [offset[v] for v in face.vertices],

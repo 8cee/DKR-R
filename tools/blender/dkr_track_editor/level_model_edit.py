@@ -255,7 +255,8 @@ def set_surface_types(model: LevelModel, surfaces: Dict[int, int]) -> int:
 # ---------------------------------------------------------------------------
 
 def add_texture(model: LevelModel, texture_id: int, width: int, height: int,
-                texture_format: int = 1, surface_type: int = 0) -> int:
+                texture_format: int = 1, surface_type: int = 0, *,
+                dedicated=False, reserved=()) -> int:
     """Give the model a texture it does not carry yet, and return its index.
 
     ``texture_id`` indexes the ROM's global 3D texture list, which is what a
@@ -265,7 +266,8 @@ def add_texture(model: LevelModel, texture_id: int, width: int, height: int,
     ``.dkrmap`` imposes is "textures the ROM holds", not "textures this table
     already lists".
 
-    An entry that matches in every field is reused rather than duplicated. The
+    An entry that matches in every field is reused unless ``dedicated`` is set
+    or its index is ``reserved`` by a TexScroll. The
     match has to include ``surface_type``, because two entries pointing at one
     image and behaving differently is a thing the format expresses on purpose
     and the addon must not merge.
@@ -285,7 +287,7 @@ def add_texture(model: LevelModel, texture_id: int, width: int, height: int,
     surface_type = int(surface_type) & 0xFF
 
     for index, existing in enumerate(model.textures):
-        if (existing.texture_id == texture_id
+        if (not dedicated and index not in reserved and existing.texture_id == texture_id
                 and existing.raw_width == width
                 and existing.raw_height == height
                 and existing.format == texture_format

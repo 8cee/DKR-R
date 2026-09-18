@@ -235,7 +235,69 @@ the upper 4 MB. So the same `level_load` hook grows the main pool's tail slot
 to `0x80800000` the first time a `.dkrmap` level loads. The pool never
 shrinks, and the allocator code is unchanged. Retail and legacy levels never
 trigger the growth; the log shows
-`main memory pool grown into expansion RAM` when it happens.
+`main memory pool grown into expansion RAM` when it happens. `load_level_game`'s
+entry hook does the same growth first, because it runs before the display-list
+heap is allocated.
+
+**The level model heap.** A bigger pool is not a bigger *level model*. That is a
+separate reservation: `generate_track` asks for `LEVEL_MODEL_MAX_SIZE`
+(`0x82A00`, 535,040 bytes) in one allocation and builds the whole model inside
+it — the inflated blob, then per segment two bytes a triangle, sixteen bytes per
+collision plane and two per wave batch. Collision dominates. Bluey, retail's
+largest, lands near 80% of it with a fraction of the triangles an exported track
+carries, and a `.dkrmap` race can exceed it honestly.
+
+Retail does not refuse when it does. It compares the total, reports it through
+`rmonPrintf` — stubbed in this build, so nothing is printed — and writes past
+the heap anyway, straight over `gCollisionCandidates`, `gCollisionSurfaces` and
+the pool's slot list behind them. The symptom is a wild pointer or a rejected
+display-list opcode some frames later, never the overflow itself.
+
+So the arena is measured before the load and the reservation sized to fit.
+`custom_tracks::measure_level_model_arena` walks the payload exactly as
+`track_init_collision` does, including the edge planes a neighbouring pair
+shares, and `load_level_game`'s entry hook leaves the result for a hook inside
+`generate_track`. That hook writes `s5`, the register holding the constant, at
+the one instruction where it is complete and before anything has read it:
+
+```
+8002c0f4  lui   s5, 0x0008
+8002c0f8  ori   s5, s5, 0x2a00    <- the hook runs after this
+8002c104  jal   mempool_alloc_safe
+8002c108  or    a0, s5, zero      <- delay slot: the size asked for
+8002c1c0  addu  t6, s0, s5        <- where the compressed blob is landed
+```
+
+One write therefore enlarges the reservation *and* keeps the compressed payload
+at the tail of the larger heap, which is what guarantees the inflate cannot
+overrun its own source. US Rev A's prologue is instruction-for-instruction the
+same, forty-eight bytes further on. The hook refuses to write unless `s5`
+already holds the retail constant, so a revision that differs keeps the retail
+heap rather than having a misread register overwritten, and every retail level
+keeps it byte for byte. The log shows `builds ... over the retail ...` when it measures and `track heap raised from ... to ... bytes` when the hook applies it.
+
+Two ceilings remain, and no larger heap lifts either. A collision plane index is
+packed as `index | 0x8000` when a pair shares one, so a segment cannot build
+more than 32,767 planes — roughly 11,000 collidable triangles. And `collision.c`
+considers ten segments at a time whatever the track's size. The runtime reserves
+at most 2 MB for a level model and says so in the log when a track needs more
+than that; past there the only fix is fewer collidable triangles or less
+geometry.
+
+**Display lists.** `alloc_displaylist_heap` sizes each frame's list from
+`gNumF3dCmdsPerPlayer` (4500 commands for one player), and the matrix heap
+starts right after it. `render_level_segment` spends 3 to 10 commands on every
+visible batch. A 68-segment export has 1214 batches and a PVS with every bit
+set, so driving it reached 5613 commands. The list then ran into that frame's
+matrices, F3DDKR rejected the garbage opcodes, and RT64 crashed in a `memmove`.
+At `load_level_game`'s entry the runtime inflates the track's own model and
+counts its batches. It then sets each table entry to retail +
+`batches x 10 x viewports`, capped at 0x20000 commands. Any other level gets the
+retail table back. When the table changes, the hook invalidates
+`gPrevPlayerCount`, so the retail allocator rebuilds the heap in that same call.
+The log shows
+`level N draws up to B batches; display lists sized for C commands`. A track
+that ships no model of its own keeps the retail budget.
 
 ## Verified end to end
 

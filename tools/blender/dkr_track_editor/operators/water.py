@@ -208,9 +208,11 @@ class DKR_OT_add_water(bpy.types.Operator):
                 bounds = model.bounds
                 rect = (bounds[0], bounds[4], bounds[1], bounds[5])
             level = scene.to_map((0.0, 0.0, self.level))[1]
+            from . import waterfall
+            reserved = waterfall.reserved_indices(context, geometry.texture_table(obj))
             plan = water.lay_water(model, self.kind == WAVES, level, rect,
                                    texture, tile=self.tile,
-                                   skip_dry=self.skip_dry)
+                                   skip_dry=self.skip_dry, reserved=reserved)
             _rebuilt, target, _stats = geometry.replace_base(context, obj, model)
         except (WaterOpError, geometry_export.GeometryExportError) as error:
             self.report({"ERROR"}, str(error))

@@ -91,10 +91,10 @@ class Texture3D:
     """One entry of ``ASSET_TEXTURES_3D``, resolved to something drawable."""
 
     __slots__ = ("index", "asset_id", "name", "group", "png", "width", "height",
-                 "format", "frames", "render_mode")
+                 "format", "frames", "render_mode", "wrap_s", "wrap_t")
 
     def __init__(self, index, asset_id, name, group, png, width, height,
-                 texture_format, frames, render_mode="OPAQUE"):
+                 texture_format, frames, render_mode="OPAQUE", wrap_s="Wrap", wrap_t="Wrap"):
         #: What a level model's texture table stores. The whole point.
         self.index = index
         self.asset_id = asset_id
@@ -114,6 +114,8 @@ class Texture3D:
         #: see-through, and so which pass a batch drawing it belongs to; see
         #: :mod:`.transparency`. Every one of the 1401 sidecars names one.
         self.render_mode = render_mode or "OPAQUE"
+        self.wrap_s = wrap_s
+        self.wrap_t = wrap_t
 
     @property
     def animated(self) -> bool:
@@ -234,6 +236,8 @@ def _entry(tree: AssetTree, index: int, asset_id: str) -> Optional[Texture3D]:
         texture_format=FORMAT_CODES.get(data.get("format"), DEFAULT_FORMAT),
         frames=max(1, len(images)),
         render_mode=data.get("render-mode") or "OPAQUE",
+        wrap_s=(data.get("flags") or {}).get("wrap-s", "Wrap"),
+        wrap_t=(data.get("flags") or {}).get("wrap-t", "Wrap"),
     )
 
 

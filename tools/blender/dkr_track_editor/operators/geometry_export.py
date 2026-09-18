@@ -762,7 +762,10 @@ def build_edited_model(context) -> Optional[GeometryEdit]:
     # not run off the end - it runs into the segment array. Nothing else about
     # the mesh has to have changed for that to be true, so the path is forced
     # here rather than left to the topology comparison to notice.
-    if (not added and flags is not None
+    draw_counts_fit = all(
+        batch.face_count <= level_model_layout.MAX_BATCH_TRIANGLES
+        for segment in model.segments for batch in segment.batches)
+    if (not added and flags is not None and draw_counts_fit
             and not _topology_changed(read, model, include_hidden)):
         edit = _patch_in_place(model, read, flags, path, obj, notes)
     else:
@@ -881,10 +884,13 @@ def _add_textures(obj, model, notes) -> int:
     animated = 0
     for position, record in enumerate(extras):
         try:
+            # These entries already have identities on the mesh. Identical
+            # images may be separate TexScroll targets and must stay separate.
             index = level_model_edit.add_texture(
                 model,
                 record.get("id", 0), record.get("w", 0), record.get("h", 0),
                 record.get("format", 1), record.get("surface", 0),
+                dedicated=True,
             )
         except level_model_edit.EditError as error:
             raise GeometryExportError(str(error))
@@ -919,9 +925,19 @@ def _patch_in_place(model, read, flags, path, obj, notes):
         for pool_index, position in enumerate(pool):
             positions[(segment_index, pool_index)] = position
 
+    # The baked lighting travels the same pool indices as the positions, and it
+    # has to travel: it multiplies into the texture, so a track whose colours
+    # were repainted and not written renders unlit - black, in the worst case -
+    # while every other edit in the same export lands. A rebuild has always
+    # carried them; this path silently did not.
+    colours = {}
+    for segment_index, pool in read.colours.items():
+        for pool_index, colour in enumerate(pool):
+            colours[(segment_index, pool_index)] = colour
+
     try:
         summary = level_model_edit.apply(
-            model, positions=positions, batch_flags=flags,
+            model, positions=positions, colours=colours, batch_flags=flags,
             surface_types=geometry.surface_types(obj),
         )
     except level_model_edit.EditError as error:

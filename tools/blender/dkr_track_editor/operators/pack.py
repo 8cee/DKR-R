@@ -57,6 +57,8 @@ class DKR_OT_export_dkrmap(bpy.types.Operator, ExportHelper):
 
         if self.validate_first:
             report = validate.validate(object_map, catalog, level_key=key)
+            from . import waterfall
+            report = validate.Report(list(report) + waterfall.issues(context))
             if report.errors:
                 self.report(
                     {"ERROR"},
