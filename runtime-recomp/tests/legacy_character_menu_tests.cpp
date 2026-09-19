@@ -107,7 +107,7 @@ void stage() {
  CharacterMenuMemory g(memory,fields);initialize(g,2);auto a=library();
  CharacterStage s;active_stage=&s;CharacterStageCalls calls{spawn,free_object,fraction,emit,steady_fraction,camera};
  g.write(camera_address+0xc,std::bit_cast<unsigned>(0.0f));
- g.write(camera_address+0x14,std::bit_cast<unsigned>(-200.0f));
+ g.write(camera_address+0x14,std::bit_cast<unsigned>(168.0f)); // Authored stage camera is on +Z.
  recomp_context c{};c.r29=std::int32_t(0x800f0000);const auto saved=c;
  s.initialize(memory,fields,c,calls,a->characters);
  check(spawned==2 && !std::memcmp(&saved,&c,sizeof c),"Stage spawn corrupted intercepted registers.");
@@ -118,7 +118,7 @@ void stage() {
  check(g.read(0x80090018,2)==72 && particles==1,"Custom animation/music/confirmation semantics differ from native.");
  c.r4=std::int32_t(0x80091000);check(s.update(memory,fields,c,calls,v),"Idle actor lost update.");
  check(g.read(0x8009103b,1)==1 && g.read(0x80091018,2)==152,"Idle dance does not follow native music phase.");
- check(g.read(0x80090000,2)<0x8000 && g.read(0x80091000,2)>0x8000,"Outer actors do not turn inward toward the viewer.");
+ check(g.read(0x80090000,2)>0x8000 && g.read(0x80091000,2)<0x8000,"Outer actors disagree with the authored Conker/Timber yaw convention.");
  // All custom actors read the same phase as stock, irrespective of audio-clock
  // sampling jitter. Exercise beat wraps and idle/selected poses at variable dt.
  v={};
@@ -145,7 +145,8 @@ void stage() {
   s.update(memory,fields,c,calls,v);
   const double yaw=g.read(object,2)*std::numbers::pi/32768;
   const double dx=camera_x-std::bit_cast<float>(g.read(object+0xc)),dz=camera_z-std::bit_cast<float>(g.read(object+0x14));
-  const double alignment=(std::sin(yaw)*dx+std::cos(yaw)*dz)/std::hypot(dx,dz);
+  // The visible face is local -Z. Testing +Z here hid Beta 8's half-turn bug.
+  const double alignment=(-std::sin(yaw)*dx-std::cos(yaw)*dz)/std::hypot(dx,dz);
   check(alignment>0.999999,"Selection actor is not facing the camera.");
   check(g.read(object+2,2)==123 && g.read(object+4,2)==456,"Facing correction tilted the character.");
   for(unsigned j=0;j<4;++j)check(g.read(object+8+4*j)==transform[j],"Facing correction changed scale/position.");

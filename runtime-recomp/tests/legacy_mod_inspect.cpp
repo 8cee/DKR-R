@@ -17,6 +17,11 @@ int main(int argc,char** argv) {
                     auto prepared=dkr::mods::prepare_character(base,target,hash,c.base_character);
                     auto names=dkr::mods::allocate_characters(dkr::mods::AssetBank::stock(base),{prepared});
                     std::cout<<"CHAR "<<c.base_character<<" PASS "<<prepared.records.size()<<" records\n";
+                    const dkr::mods::AssetImage retail(base,a.source_revision);
+                    const auto& portrait=prepared.records.at({4,c.portrait});
+                    std::cout<<"  PORTRAIT "<<c.portrait<<" changed="<<(dkr::mods::sha256(portrait)!=dkr::mods::sha256(retail.record(4,c.portrait)))<<" hash="<<dkr::mods::sha256(portrait)<<'\n';
+                    const auto original_audio=dkr::mods::prepare_character_race_audio(retail.record(39,2),retail.record(39,3),retail.record(39,7),c.base_character);
+                    std::cout<<"  RACE AUDIO changed="<<(original_audio.control!=prepared.race_audio.control || original_audio.samples!=prepared.race_audio.samples || original_audio.cues!=prepared.race_audio.cues)<<'\n';
                 }catch(const std::exception& e){std::cout<<"CHAR "<<c.base_character<<" FAIL "<<e.what()<<'\n';}
                 for(const auto& t:a.tracks)try {
                     const auto p=dkr::mods::prepare_track_bank(base,target,hash,t.carrier);

@@ -123,21 +123,21 @@ int character_race_cue(unsigned sound,unsigned base) {
         if(sound==0x162+12*i+base)return int(i);
         if(sound==0x1c2+12*i+base)return int(8+i);
     }
-    return sound==0x156+base?16:-1;
+    return sound==0x156+base?16:sound==0x7b+base?17:-1;
 }
 unsigned character_race_sound(unsigned character,unsigned cue) {
-    if(character>=16 || cue>=17)throw Error("Invalid custom race sound identity.");
+    if(character>=16 || cue>=18)throw Error("Invalid custom race sound identity.");
     return 0x4000U|(character<<5)|cue;
 }
 bool decode_character_race_sound(unsigned sound,unsigned& character,unsigned& cue) {
-    if((sound&~0x1ffU)!=0x4000U || (sound&31)>=17)return false;
+    if((sound&~0x1ffU)!=0x4000U || (sound&31)>=18)return false;
     character=(sound>>5)&15;cue=sound&31;return true;
 }
 CharacterRaceAudio prepare_character_race_audio(View control,View samples,View table,unsigned base) {
     if(base>=10)throw Error("Invalid race voice identity.");
-    std::array<CharacterRaceCue,17> cues;
+    std::array<CharacterRaceCue,18> cues;
     for(unsigned i=0;i<cues.size();++i) {
-        const unsigned sound=(i<8?0x162+12*i:i<16?0x1c2+12*(i-8):0x156)+base;
+        const unsigned sound=(i<8?0x162+12*i:i<16?0x1c2+12*(i-8):i==16?0x156:0x7b)+base;
         const auto data=slice(table,10*sound,10);
         cues[i]={{be16(data,0),data[2],data[4],data[8]},data[3],be16(data,6)};
         if(cues[i].min_volume>127)throw Error("Invalid custom spatial sound volume.");

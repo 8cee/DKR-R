@@ -11,22 +11,34 @@ void func_80098774(std::uint8_t*,recomp_context*);
 void play_random_character_voice(std::uint8_t*,recomp_context*);
 void racer_play_sound(std::uint8_t*,recomp_context*);
 void sound_play_direct(std::uint8_t*,recomp_context*);
+void hud_eggs_portrait(std::uint8_t*,recomp_context*);
+void hud_lives_render(std::uint8_t*,recomp_context*);
+void hud_treasure(std::uint8_t*,recomp_context*);
+void hud_main_hub(std::uint8_t*,recomp_context*);
+void hud_element_render(std::uint8_t*,recomp_context*);
+void menu_cinematic_loop(std::uint8_t*,recomp_context*);
 }
 namespace {
 Bytes memory(8*MiB);CharacterMenuFields fields=[] {CharacterMenuFields f;f.fill(0x80000000);return f;}();
 CharacterMenuMemory g(memory,fields);unsigned checks=0,next=0x80400000,random_value=0,random_calls=0,points=0,plays=0;
 unsigned last_sound=0,last_priority=0,last_bank=0,last_handle=0,echoes=0,lookup_calls=0,random_begin=0,random_end=0;
 std::vector<unsigned> drawn;
-bool trial=false;struct StopDrawing {};
+bool trial=false,hud_mode=false,fail_hud_asset=false;unsigned hud_failures=0;struct StopDrawing {};
 constexpr unsigned Settings=0x80300000,Object=0x80310000,Racer=0x80320000,Stack=0x807f0000;
 #if DKR_TEST_REVISION==77
 constexpr unsigned PostRace=0x80126c54,ResultObjects=0x800e0a24,Results=0x800e0bec,Order=0x800e0cec,
  Portraits=0x800e0af0,Players=0x800df4bc,RankCount=0x800e0fe4,IconPositions=0x800e14bc,RankIDs=0x80126430,
  ResultIDs=0x80126428,Trophy=0x800e1048,DisplayList=0x801263a0,HudMat=0x801263a8,MenuText=0x800df4a0,SpatialTable=0x80119c40;
+constexpr unsigned CurrentHud=2148691164,HudIds=2148691184,HudCache=2148691188,HudStale=2148691160,
+ HudColour=2148411444,HudPal=2148691157,HudPlayers=2148691255,HudSprites=2148691328,HudSpriteCount=2148692352;
+constexpr unsigned CinematicList=0x80126804;
 #else
 constexpr unsigned PostRace=0x80127230,ResultObjects=0x800e0fa4,Results=0x800e116c,Order=0x800e126c,
  Portraits=0x800e1070,Players=0x800dfa3c,RankCount=0x800e1564,IconPositions=0x800e1a3c,RankIDs=0x801269d0,
  ResultIDs=0x801269c8,Trophy=0x800e15c8,DisplayList=0x8012693c,HudMat=0x80126944,MenuText=0x800dfa20,SpatialTable=0x8011a1c0;
+constexpr unsigned CurrentHud=2148692636,HudIds=2148692656,HudCache=2148692660,HudStale=2148692632,
+ HudColour=2148412852,HudPal=2148692629,HudPlayers=2148692727,HudSprites=2148692800,HudSpriteCount=2148693824;
+constexpr unsigned CinematicList=0x80126da4;
 #endif
 void check(bool b,const char* why){++checks;if(!b)throw Error(why);}
 gpr ptr(unsigned v){return std::int32_t(v);}
@@ -59,11 +71,32 @@ extern "C" int dkr_legacy_character_play_sound(std::uint8_t*,recomp_context* c,u
 extern "C" int dkr_legacy_character_menu(std::uint8_t*,recomp_context*,unsigned event,const std::uint32_t*) {
  check(event==8,"Unexpected selection-sound event");return 0;
 }
+extern "C" void dkr_legacy_character_hud_bind(std::uint8_t*,recomp_context* c,unsigned hud,unsigned racer) {
+ presentation.bind_hud(unsigned(c->r29),hud,*roster,assets->characters,racer<4?racer:g.read(racer,2));
+}
+extern "C" void dkr_legacy_character_hud_unbind(std::uint8_t*,recomp_context* c){presentation.unbind_hud(unsigned(c->r29));}
+extern "C" unsigned dkr_legacy_character_hud_lookup(std::uint8_t*,recomp_context*,unsigned stack,unsigned hud) {
+ return presentation.hud_lookup(stack,hud,g.read(hud+6,2));
+}
+extern "C" unsigned dkr_legacy_character_cinematic_portrait(std::uint8_t*,recomp_context*,unsigned id) {
+ return presentation.cinematic_portrait(id);
+}
+extern "C" void input_pressed(std::uint8_t*,recomp_context* c){c->r2=0;}
+extern "C" void func_800214C4(std::uint8_t*,recomp_context* c){c->r2=0;}
 extern "C" void get_settings(std::uint8_t*,recomp_context* c){c->r2=ptr(Settings);}
 extern "C" void is_time_trial_enabled(std::uint8_t*,recomp_context* c){c->r2=trial;}
-extern "C" void is_in_two_player_adventure(std::uint8_t*,recomp_context* c){c->r2=0;}
+extern "C" void is_in_two_player_adventure(std::uint8_t*,recomp_context* c){c->r2=hud_mode;}
 extern "C" void menu_racer_portraits(std::uint8_t*,recomp_context*){for(unsigned i=0;i<10;++i)g.write(Portraits+i*4,0x80350000+16*i);}
-extern "C" void texrect_draw(std::uint8_t*,recomp_context* c){drawn.push_back(unsigned(c->r5));if(drawn.size()==4)throw StopDrawing{};}
+extern "C" void texrect_draw(std::uint8_t*,recomp_context* c){drawn.push_back(hud_mode?g.read(unsigned(c->r5)):unsigned(c->r5));if(!hud_mode && drawn.size()==4)throw StopDrawing{};}
+extern "C" void texrect_draw_scaled(std::uint8_t*,recomp_context* c){drawn.push_back(g.read(unsigned(c->r5)));}
+extern "C" void cam_get_viewport_layout(std::uint8_t*,recomp_context* c){c->r2=0;}
+extern "C" void load_texture(std::uint8_t* m,recomp_context* c){if(fail_hud_asset)c->r2=0;else texture(m,c);}
+extern "C" void object_model_init(std::uint8_t*,recomp_context* c){c->r2=0;}
+extern "C" void spawn_object(std::uint8_t*,recomp_context* c){c->r2=0;}
+extern "C" void tex_load_sprite(std::uint8_t*,recomp_context* c){c->r2=fail_hud_asset?0:ptr(0x80214000);}
+extern "C" void dkr_hud_asset_load_failed(std::uint8_t*,recomp_context*){++hud_failures;}
+extern "C" void render_ortho_triangle_image(std::uint8_t*,recomp_context* c){drawn.push_back(unsigned(c->r7));}
+extern "C" void cam_get_active_camera(std::uint8_t*,recomp_context* c){c->r2=ptr(0x80218000);}
 extern "C" void rand_range(std::uint8_t*,recomp_context* c){++random_calls;c->r2=random_value;}
 extern "C" void sound_count(std::uint8_t*,recomp_context* c){c->r2=1023;}
 extern "C" void sndp_play(std::uint8_t*,recomp_context* c){++plays;last_sound=unsigned(c->r5);last_handle=unsigned(c->r6);}
@@ -82,10 +115,14 @@ NOOP(set_current_dialogue_background_colour) NOOP(set_current_dialogue_box_coord
 NOOP(set_current_text_background_colour) NOOP(set_current_text_colour) NOOP(set_dialogue_font)
 NOOP(set_text_background_colour) NOOP(set_text_colour) NOOP(set_text_font) NOOP(sprite_opaque)
 NOOP(stubbed_printf)
+NOOP(hud_balloons) NOOP(hud_speedometre) NOOP(rdp_init)
+NOOP(hud_draw_model) NOOP(mtx_cam_push) NOOP(mtx_pop) NOOP(render_object)
+NOOP(dkr_hud_element_begin) NOOP(dkr_hud_element_end)
+NOOP(cinematic_free) NOOP(load_level_for_menu) NOOP(music_change_off)
 extern "C" void do_break(std::uint32_t){throw Error("Native fixture reached an arithmetic break");}
 int main(){try {
  for(unsigned i=0;i<2;++i){AllocatedCharacter a;a.id=std::string(64,'a'+i);a.base_character=3;a.portrait=906+i;a.race_audio.control=Bytes(32);
-  for(unsigned c=0;c<17;++c)a.race_audio.cues[c]={{c+1,100,100,63},10,15000};assets->characters.push_back(a);}
+  for(unsigned c=0;c<18;++c)a.race_audio.cues[c]={{c+1,100,100,63},10,15000};assets->characters.push_back(a);}
  roster=std::make_unique<CharacterRoster>(assets);roster->request(0,assets->characters[0].id);roster->request(1,assets->characters[1].id);
  roster->commit(std::array<std::uint8_t,4>{3,3,3,3},4);auto c=context();
  presentation.initialize(memory,c,calls,assets->characters,std::array<std::uint32_t,2>{0x18000000,0x19000000});
@@ -108,6 +145,14 @@ int main(){try {
  for(unsigned rankings=0;rankings<2;++rankings){c=context();c.r4=rankings;func_80098774(memory.data(),&c);
   for(unsigned i=0;i<4;++i)check(g.read(Trophy+(2+3*i)*32+20)==expected_portrait(rankings?ranks[i]:results[i]),"Trophy rankings lost per-racer identity");}
  check(lookup_calls>=40,"Not all native portrait hooks executed");
+ // Trophy cinematic keeps logical custom identity in its transient list,
+ // even when two custom racers share a donor with a stock racer.
+ drawn.clear();g.write(CinematicList,0x803d0000);
+ for(unsigned i=0;i<4;++i)g.write(0x803d0000+i,presentation.cinematic_id(*roster,assets->characters,i,5),1);
+ g.write(0x803d0004,255,1);c=context();
+ try{menu_cinematic_loop(memory.data(),&c);}catch(const StopDrawing&){}
+ check(drawn.size()==4,"Cinematic omitted a portrait");
+ for(unsigned i=0;i<4;++i)check(drawn[i]==expected_portrait(i),"Cinematic used the donor portrait");
  // Native voice selection still owns the RNG and stores the unencoded last
  // sound ID for its repeat suppression. Test every voice variant and side.
  g.write(SpatialTable,0x803c0000); // Stock control racers still use the native sound table.
@@ -132,5 +177,46 @@ int main(){try {
  check(points==before,"Exit-controlled racer emitted a custom voice");
  g.write(Racer+0x108,0);g.write(Racer+0x24,1);c=context();c.r4=ptr(Object);c.r5=0x162;c.r6=8;play_random_character_voice(memory.data(),&c);
  check(points==before,"Custom voice bypassed the existing active-sound mask");
- std::cout<<checks<<" native portrait/voice pipeline checks passed (v"<<DKR_TEST_REVISION<<").\n";return 0;
+ // Execute all four HUD callers and the actual texture renderer, including
+ // its queued/unit-scale, tinted, arbitrary-scale and PAL branches.
+ hud_mode=true;constexpr unsigned Hud=0x80200000,Cache=0x80210000,Ids=0x80211000,StockTexture=0x80213000;
+ g.write(CurrentHud,Hud);g.write(HudIds,Ids);g.write(HudCache,Cache);g.write(HudStale,0x80212000);
+ g.write(Ids+59*2,0xc000|126,2);g.write(Cache+59*4,StockTexture);g.write(StockTexture,0x28280000);
+ g.write(HudPlayers,1,1);g.write(Settings+0x71,3,1);
+ for(auto offset:{0x640U,0x720U}){g.write(Hud+offset+8,0x3f800000);g.write(Hud+offset+12,0x42c80000);g.write(Hud+offset+16,0x42480000);}
+ for(unsigned player=0;player<4;++player)for(unsigned variant=0;variant<4;++variant) {
+  g.write(Racer,player,2);g.write(Racer+3,3,1);
+  for(auto fn:{hud_eggs_portrait,hud_lives_render,hud_treasure,hud_main_hub}) {
+   g.write(HudColour,variant==0?0xfffffffe:0xffffffff);g.write(HudPal,variant==3,1);
+   g.write(0x80000300,variant==3?0:1);g.write(Hud+0x648,variant==2?0x3f000000:0x3f800000);
+   drawn.clear();g.write(HudSpriteCount,0);c=context();c.f_odd=&c.f0.u32h;c.r4=ptr(fn==hud_main_hub?Object:Racer);c.r5=1;
+   fn(memory.data(),&c);
+   const auto owner=fn==hud_main_hub?1:player;const auto cell=presentation.portrait(*roster,assets->characters,owner);
+   const auto expected=cell?g.read(g.read(cell)):StockTexture;
+   if(variant==0)check(g.read(HudSprites)==expected,"Queued HUD portrait used donor texture");
+   else {
+    if(drawn.empty() || drawn.front()!=expected)std::cerr<<"HUD case player="<<player<<" variant="<<variant<<" function="<<(fn==hud_eggs_portrait?"eggs":fn==hud_lives_render?"lives":fn==hud_treasure?"treasure":"hub")<<" expected="<<std::hex<<expected<<" actual="<<(drawn.empty()?0:drawn.front())<<std::dec<<'\n';
+    check(!drawn.empty() && drawn.front()==expected,"Native HUD portrait used donor texture");
+   }
+   check(g.read(Cache+59*4)==StockTexture,"Custom HUD replaced the stock donor cache");
+  }
+ }
+ // Non-portrait HUD assets must keep their identity and coordinates after
+ // custom portrait draws, including a failed load followed by a successful retry.
+ for(unsigned element:{0U,12U,13U})for(bool failed_first:{false,true})for(bool scaled:{false,true}) {
+  const unsigned hud=Hud+element*32,asset=element==0?1:element;
+  g.write(hud+6,asset,2);g.write(hud+8,scaled?0x3fc00000:0x3f800000);
+  g.write(hud+12,0x42480000);g.write(hud+16,0x42700000);g.write(hud+24,0,2);
+  g.write(Ids+asset*2,(element==0?0xc000:0x8000)|126,2);g.write(Cache+asset*4,0);
+  g.write(HudColour,0xffffffff);g.write(HudPal,0,1);g.write(0x80000300,1);
+  auto draw=[&] {c=context();c.f_odd=&c.f0.u32h;c.r4=ptr(DisplayList);c.r5=ptr(HudMat);c.r6=ptr(HudMat+4);c.r7=ptr(hud);
+   hud_element_render(memory.data(),&c);check(unsigned(c.r29)==Stack,"HUD draw changed caller stack");};
+  const auto failures=hud_failures;drawn.clear();fail_hud_asset=failed_first;
+  if(failed_first){draw();check(drawn.empty() && hud_failures==failures+1,"Failed HUD asset was not diagnosed");}
+  fail_hud_asset=false;draw();
+  check(drawn.size()==1,"Ready/Go/position failed to draw after custom portrait or allocation retry");
+  check(g.read(hud+12)==0x42480000 && g.read(hud+16)==0x42700000,"HUD draw leaked a coordinate adjustment");
+  check(g.read(Cache+asset*4)!=0,"HUD asset retry was not cached");
+ }
+ std::cout<<checks<<" native portrait/voice/HUD pipeline checks passed (v"<<DKR_TEST_REVISION<<").\n";return 0;
  }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

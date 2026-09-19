@@ -8,6 +8,7 @@ import argparse
 from pathlib import Path
 import subprocess
 import sys
+import json
 
 
 def main():
@@ -18,6 +19,9 @@ def main():
     parser.add_argument("--recompiler",type=Path,required=True)
     parser.add_argument("--characters",action="store_true",help="Include the checked character resource adapter")
     parser.add_argument("--character-menu",action="store_true",help="Include the checked additive character selector")
+    parser.add_argument("--refresh-presentation",action="store_true",help="Refresh the reviewed presentation layer in an already-composed committed policy")
+    parser.add_argument("--v77-policy",type=Path,help="Explicit reviewed baseline policy for v1.0")
+    parser.add_argument("--v80-policy",type=Path,help="Explicit reviewed baseline policy for v1.1")
     args=parser.parse_args()
     root=Path(__file__).resolve().parents[1]
     output=args.output.resolve()
@@ -27,8 +31,9 @@ def main():
         elf=source/f"dkr.us.v{revision}.elf"
         rom=source/f"dkr.us.v{revision}.z64"
         policy=output/f"menu-v{revision}.policy.json"
+        source_policy=(args.v77_policy if revision==77 else args.v80_policy) or root/f'runtime-recomp/dkr.us.v{revision}.recomp-policy.json'
         compose_command=[sys.executable,str(root/"scripts/compose_legacy_mod_policy.py"),
-            "--policy",str(root/f"runtime-recomp/dkr.us.v{revision}.recomp-policy.json"),
+            "--policy",str(source_policy),
             "--fragment",str(root/f"runtime-recomp/legacy-mods.v{revision}.recomp-fragment.json"),
             "--elf",str(elf),"--scene-runtime","--track-menu",str(root/f"runtime-recomp/legacy-track-menu.v{revision}.recomp-fragment.json"),
             "--output",str(policy)]
@@ -36,7 +41,15 @@ def main():
         if args.character_menu:
             if not args.characters:raise ValueError('Character selector requires the resource adapter')
             compose_command += ['--character-menu',str(root/f'runtime-recomp/legacy-character-menu.v{revision}.recomp-fragment.json')]
-        subprocess.run(compose_command,check=True)
+        if args.refresh_presentation:
+            if not args.character_menu:raise ValueError('Presentation refresh requires the character menu')
+            from compose_legacy_mod_policy import elf_sections,elf_functions
+            from legacy_character_presentation_policy import refresh_presentation
+            base=json.loads(source_policy.read_text())
+            updated=refresh_presentation(base,elf,f'us.v{revision}',elf_sections(elf),elf_functions(elf,(1,2)))
+            policy.parent.mkdir(parents=True,exist_ok=True)
+            policy.write_text(json.dumps(updated,indent=2)+'\n')
+        else:subprocess.run(compose_command,check=True)
         for isolated in (True,False):
             functions=output/"menu-pipeline"/f"RecompiledFuncs-v{revision}" if isolated else output/f"generated-v{revision}"
             config=output/f"menu-{'pipeline-' if isolated else ''}v{revision}.toml"

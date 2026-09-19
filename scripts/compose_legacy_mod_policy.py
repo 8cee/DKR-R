@@ -168,25 +168,21 @@ def compose(policy: dict, fragment: dict, sections: list) -> dict:
         expected = [int(word, 0) for word in site["expected"]]
         if len(expected) != 3 or [words.get(address + i * 4) for i in range(3)] != expected:
             raise ValueError(f"Asset API entry signature changed: {name}")
-        owners = [entry for entry in hooks if int(entry["beforeVram"], 0) == address]
-        if any(int(entry["vram"], 0) == address for entry in patches):
+        owners=[entry for entry in hooks if int(entry["beforeVram"],0)==address]
+        text="extern int dkr_legacy_asset_api(uint8_t*, recomp_context*, unsigned); " + f"if (dkr_legacy_asset_api(rdram, ctx, {operation}U)) return;"
+        shared={"asset_table_load":"dkr_custom_tracks_table_load_begin", "asset_load":"dkr_custom_tracks_asset_load_begin"}
+        callback=shared.get(name)
+        allowed=f"extern void {callback}(uint8_t*, recomp_context*); {callback}(rdram, ctx);" if callback else None
+        if any(int(entry["vram"], 0) == address for entry in patches) or (owners and
+                (len(owners)!=1 or owners[0].get('function')!=name or owners[0].get('text')!=allowed)):
             raise ValueError(f"Asset API entry conflicts with an existing policy: {name}")
-        text = ("extern int dkr_legacy_asset_api(uint8_t*, recomp_context*, unsigned); "
-                f"if (dkr_legacy_asset_api(rdram, ctx, {operation}U)) return;")
         if owners:
-            recorder = {"asset_table_load": "table", "asset_load": "asset"}.get(name)
-            symbol = f"dkr_custom_tracks_{recorder}_load_begin"
-            expected = f"extern void {symbol}(uint8_t*, recomp_context*); {symbol}(rdram, ctx);"
-            if not recorder or len(owners) != 1 or owners[0].get("function") != name or owners[0].get("text") != expected:
-                raise ValueError(f"Unreviewed asset API entry owner: {name}")
-            # The mounted branch performs dkrmap extension itself. Only record
-            # the request for the existing epilogue if retail will execute it.
-            owners[0]["text"] = text + " " + expected
-            owners[0]["reason"] = owners[0].get("reason", "") + " Compose mounted legacy/character routing with dkrmap handling before the stock fallback."
-        else:
-            hooks.append({"function": name, "beforeVram": f"0x{address:08X}",
-                          "text": text,
-                          "reason": "Resolve a mounted immutable bank at the original function entry; leave the complete retail path intact without a mount."})
+            # Mounted legacy reads explicitly run the Blender extension via
+            # the runtime bridge. Unmounted reads retain its retail hooks.
+            owners[0]['text']=text+' '+owners[0]['text']
+        else:hooks.append({"function": name, "beforeVram": f"0x{address:08X}",
+                      "text": text,
+                      "reason": "Resolve a mounted immutable bank at the original function entry; leave the complete retail path intact without a mount."})
     return result
 
 
@@ -454,6 +450,8 @@ def main() -> None:
         result=compose_character_menu(result,menu,elf_sections(args.elf),elf_functions(args.elf,(1,2)))
         from legacy_character_presentation_policy import compose_presentation
         result=compose_presentation(result,args.elf,fragment['revision'],elf_sections(args.elf),elf_functions(args.elf,(1,2)))
+    from legacy_model_cache_policy import compose_model_cache
+    result=compose_model_cache(result,args.elf,fragment['revision'],elf_sections(args.elf),elf_functions(args.elf,(1,2)))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     # A build artifact, never a mutation of a versioned policy or protected C.
     args.output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")

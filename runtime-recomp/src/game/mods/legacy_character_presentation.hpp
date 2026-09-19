@@ -15,6 +15,15 @@ public:
         const std::vector<AllocatedCharacter>&,std::span<const std::uint32_t> sample_addresses);
     std::uint32_t portrait(const CharacterRoster&,const std::vector<AllocatedCharacter>&,
         unsigned racer)const;
+    // A HUD override belongs to one native draw invocation, not a donor ID or
+    // global HUD cache. Stack + element identity excludes nested/other draws.
+    void bind_hud(std::uint32_t stack,std::uint32_t hud,const CharacterRoster&,
+        const std::vector<AllocatedCharacter>&,unsigned racer);
+    void unbind_hud(std::uint32_t stack);
+    std::uint32_t hud_lookup(std::uint32_t stack,std::uint32_t hud,unsigned sprite)const;
+    unsigned cinematic_id(const CharacterRoster&,const std::vector<AllocatedCharacter>&,
+        unsigned racer,unsigned native_id)const;
+    std::uint32_t cinematic_portrait(unsigned id)const;
     unsigned sound(const CharacterRoster&,const std::vector<AllocatedCharacter>&,
         unsigned racer,unsigned native_character,unsigned native_sound)const;
     // kind 0: native spatial AudioPoint creation, 1: direct sound-bank play,
@@ -23,6 +32,8 @@ public:
         const std::vector<AllocatedCharacter>&,unsigned kind)const;
 private:
     std::vector<std::uint32_t> portrait_cells_,banks_;
+    struct HudBinding {std::uint32_t stack,hud,cell;unsigned sprite;};
+    std::vector<HudBinding> hud_bindings_;
     bool ready_=false;
 };
 }

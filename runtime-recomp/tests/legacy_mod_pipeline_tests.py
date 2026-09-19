@@ -18,6 +18,39 @@ spec.loader.exec_module(presentation)
 
 
 class PipelineTests(unittest.TestCase):
+    def test_cache_failure_policy_is_hash_pinned_and_conflict_checked(self):
+        import sys
+        with patch.object(sys,'path',[str(ROOT/'scripts'),*sys.path]):
+            from legacy_model_cache_policy import compose_model_cache, ELFS
+        class Elf:
+            def read_bytes(self): return b'isolated cache failure fixture'
+        elf=Elf()
+        for rev in ('us.v77','us.v80'):
+            words={0x80001000:0x27bdffe0}
+            symbols={'model_instance_init':{(0x80001000,4)}}
+            heap=0x80070b50 if rev=='us.v77' else 0x80070d90
+            hud=0x800aa7ac if rev=='us.v77' else 0x800aad08
+            words.update({heap:0x01e42823,hud:0})
+            symbols.update({'mempool_init_main':{(heap,4)},'hud_element_render':{(hud,4)}})
+            if rev=='us.v77':
+                words.update({0x8005f99c:0x27bdffa8,0x8005fcb4:0x8fbf0024})
+                symbols.update({'object_model_init':{(0x8005f99c,0x400)},
+                    'gModelCacheCount':{(0x8011d62c,4)},'D_8011D634':{(0x8011d634,4)}})
+            sections=[(pc,struct.pack('>I',word)) for pc,word in words.items()]
+            base={'functionHooks':[],'instructionPatches':[]}
+            with self.assertRaises(ValueError):compose_model_cache(base,elf,rev,sections,symbols)
+            with patch.dict(ELFS,{rev:hashlib.sha256(elf.read_bytes()).hexdigest()}):
+                result=compose_model_cache(base,elf,rev,sections,symbols)
+                self.assertEqual(base,{'functionHooks':[],'instructionPatches':[]})
+                self.assertEqual(len(result['functionHooks']),5 if rev=='us.v77' else 3)
+                for site in result['functionHooks']:
+                    for key,field in [('functionHooks','beforeVram'),('instructionPatches','vram')]:
+                        conflict=copy.deepcopy(base);conflict[key].append({field:site['beforeVram']})
+                        with self.assertRaises(ValueError):compose_model_cache(conflict,elf,rev,sections,symbols)
+                for i,(pc,data) in enumerate(sections):
+                    bad=sections.copy();bad[i]=(pc,bytes([data[0]^1])+data[1:])
+                    with self.assertRaises(ValueError):compose_model_cache(base,elf,rev,bad,symbols)
+
     def test_presentation_rejects_conflicts_and_changed_signatures(self):
         class FixtureElf:
             def read_bytes(self): return b'isolated synthetic presentation fixture'
@@ -37,6 +70,18 @@ class PipelineTests(unittest.TestCase):
             put('play_random_character_voice', voice+4, 0x3104ffff)
             put('racer_play_sound', horn, 0x0c0004c0)
             put('racer_play_sound', horn+4, 0xafa00010)
+            bonus,banana=(0x8003b30c,0x8003db10) if rev=='us.v77' else (0x8003b34c,0x8003db50)
+            for name,pc,delay in [('obj_loop_bonus',bonus,0x01202025),('obj_loop_banana',banana,0xafa00010)]:
+                put(name,pc,0x0c0004c0);put(name,pc+4,delay)
+            renderer=0x800aa600 if rev=='us.v77' else 0x800aab5c
+            put('hud_element_render',renderer,0x27bdff48)
+            for name,pc,owner,offset,delay in presentation.HUD_CALLS[rev]:
+                put(name,pc,0x0c000000|((renderer>>2)&0x3ffffff));put(name,pc+4,delay);put(name,pc+8,0)
+            for pc,lookup,expected in presentation.HUD_LOADS[rev]:put('hud_element_render',pc,expected)
+            capture,draw=presentation.CINEMATIC[rev]
+            put('menu_trophy_race_rankings_loop',capture-4,0x80820059)
+            put('menu_trophy_race_rankings_loop',capture,0x14600005)
+            put('menu_cinematic_loop',draw,0x8f050000)
             sections = [(pc, struct.pack('>I', word)) for pc, word in words.items()]
             symbols = {name: {(lo, hi-lo+4)} for name, (lo, hi) in bounds.items()}
             base = {'instructionPatches': [], 'functionHooks': []}
@@ -44,7 +89,10 @@ class PipelineTests(unittest.TestCase):
             with patch.dict(presentation.ELFS, {rev: hashlib.sha256(elf.read_bytes()).hexdigest()}):
                 result = presentation.compose_presentation(base, elf, rev, sections, symbols)
                 self.assertEqual(base, {'instructionPatches': [], 'functionHooks': []})
-                self.assertEqual(len(result['functionHooks']), 10)
+                self.assertEqual(len(result['functionHooks']), 25)
+                self.assertEqual(result,presentation.refresh_presentation(result,elf,rev,sections,symbols))
+                legacy=presentation.compose_presentation(base,elf,rev,sections,symbols,extended=False)
+                self.assertEqual(result,presentation.refresh_presentation(legacy,elf,rev,sections,symbols))
                 for site in result['functionHooks']:
                     for key, address in (('functionHooks', 'beforeVram'), ('instructionPatches', 'vram')):
                         bad = copy.deepcopy(base); bad[key].append({address: site['beforeVram'], 'function': site['function'], 'text': 'unreviewed'})
@@ -60,6 +108,22 @@ class PipelineTests(unittest.TestCase):
     def test_sidebar_visual_and_navigation_order_match(self):
         source = (ROOT / 'runtime-recomp/src/game/runtime_ui.cpp').read_text()
         self.assertIn('kSidebarOrder{0,1,2,3,4,8,6,5,7,9,10}', source.replace(' ', ''))
+
+    def test_track_lab_is_in_mods_and_keeps_its_texture_modal(self):
+        source=(ROOT/'runtime-recomp/src/game/runtime_ui.cpp').read_text()
+        mods=source.split('void DrawModsHacks(',1)[1].split('void DrawTextures(',1)[0]
+        textures=source.split('void DrawTextures(float width) {',1)[1].split('std::string FormatRecordTime',1)[0]
+        # Track Lab is a section of the mods page and never of the textures page.
+        self.assertIn('kModsSectionTrackLab',mods)
+        self.assertIn('DrawTrackLabSection(',mods)
+        self.assertNotIn('DrawTrackLabSection',textures)
+        # One shared single-pack modal, rendered once by each page that reaches it.
+        for page in (mods,textures):self.assertEqual(page.count('DrawSharedTexturePackModal();'),1)
+        section=source.split('void DrawTrackLabSection(float width, bool locked,',1)[1]
+        section=section.split('void DrawSharedTexturePackModal',1)[0]
+        # The section still owns arming and the auto-boot switch.
+        self.assertIn('armed_track_id()',section)
+        self.assertIn('set_auto_boot(',section)
 
     def test_custom_stage_reuses_stock_clock_and_revision_camera(self):
         # The custom early-return hook must not bypass the stock beat override.
@@ -209,16 +273,17 @@ class PipelineTests(unittest.TestCase):
             after = compose.compose(policy, fragment, sections)
             self.assertEqual(before, policy)
             self.assertEqual(after["instructionPatches"][:-2], before["instructionPatches"])
-            self.assertEqual(len(after["functionHooks"]), len(before["functionHooks"]) + 6)
-            for old, new in zip(before["functionHooks"], after["functionHooks"]):
-                if old["function"] in ("asset_table_load", "asset_load") and old["text"].endswith("_load_begin(rdram, ctx);"):
-                    self.assertTrue(new["text"].endswith(old["text"]))
-                    self.assertIn("if (dkr_legacy_asset_api(rdram, ctx,", new["text"])
-                    self.assertLess(new["text"].index("return;"), new["text"].index(old["text"]))
-                else:
-                    self.assertEqual(old, new)
+            for old in before['functionHooks']:
+                matches=[h for h in after['functionHooks'] if h['function']==old['function'] and h['beforeVram']==old['beforeVram']]
+                self.assertEqual(len(matches),1)
+                new=matches[0]
+                if old['function'] in ('asset_table_load','asset_load') and '_begin(rdram, ctx)' in old['text']:
+                    self.assertTrue(new['text'].endswith(' '+old['text']))
+                    self.assertEqual(new['reason'],old['reason'])
+                else:self.assertEqual(new,old)
             self.assertTrue(all(p["value"] == "0x00000000" for p in after["instructionPatches"][-2:]))
-            for site, hook in zip(fragment["sites"], after["functionHooks"][-6:-4]):
+            bridges=[h for h in after['functionHooks'] if 'dkr_legacy_pi_start_dma' in h['text']]
+            for site, hook in zip(fragment["sites"], bridges,strict=True):
                 self.assertEqual(int(hook["beforeVram"], 0), int(site["vram"], 0) + 8)
 
     def test_every_instruction_signature_is_required(self):

@@ -228,8 +228,8 @@ int main() {
     const std::filesystem::path root =
         std::filesystem::temp_directory_path() / "dkrr-custom-tracks-tests";
     std::filesystem::remove_all(root);
-    write_track(root / "alpha.dkrmap", "alpha", 128U);
     write_track(root / "beta.dkrmap", "beta", 192U);
+    write_track(root / "alpha.dkrmap", "alpha", 128U);
 
     scan(root);
     assert(tracks().size() == 2U);

@@ -16,6 +16,7 @@
 #include <atomic>
 #include <bit>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -319,6 +320,17 @@ void EndHudPass(std::uint8_t* rdram, recomp_context* context,
 }
 
 } // namespace
+
+extern "C" void dkr_hud_asset_load_failed(std::uint8_t*, recomp_context* context) {
+    // One message per asset per guest thread: no retry loop or per-frame I/O.
+    // Registers are observed at the hash-pinned native failed-load branch.
+    static thread_local std::array<bool, 256> reported{};
+    const auto sprite = static_cast<std::uint32_t>(context->r8);
+    if (sprite >= reported.size() || reported[sprite]) return;
+    reported[sprite] = true;
+    std::fprintf(stderr, "[hud][asset-load-failed] sprite=%u element=0x%08X; native draw skipped, asset will retry on next draw\n",
+        sprite, static_cast<std::uint32_t>(context->r16));
+}
 
 namespace {
 int CurrentHudOwner(std::uint8_t* rdram) {

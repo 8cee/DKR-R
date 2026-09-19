@@ -236,6 +236,20 @@ extern "C" void dkr_custom_tracks_table_load_begin(std::uint8_t*,
 }
 
 static void size_menu_display_lists(std::uint8_t* rdram);
+static void publish_extended_table(std::uint8_t* rdram, recomp_context* context,
+                                   std::uint32_t requested);
+
+// Both the retail epilogue and the mounted legacy namespace reach this: the
+// namespace can serve the table without ever running the retail loader.
+// Extend the returned table, then size the Track Select display lists the
+// appended levels need - the sizing is idempotent past boot.
+extern "C" void dkr_custom_tracks_extend_table(std::uint8_t* rdram, recomp_context* context,
+                                               std::uint32_t requested) {
+    publish_extended_table(rdram, context, requested);
+    if (requested == kLevelHeadersTableSection) {
+        size_menu_display_lists(rdram);
+    }
+}
 
 // Publishes a longer level table so the retail count, range check and world
 // maximum all grow with it.
@@ -278,6 +292,7 @@ static void publish_extended_table(std::uint8_t* rdram, recomp_context* context,
     }
 
     recomp_context call = *context;
+    call.f_odd=call.mips3_float_mode?&call.f1.u32l:&call.f0.u32h;
     call.r4 = static_cast<gpr>(extended.size() * sizeof(std::int32_t));
     call.r5 = static_cast<gpr>(kColourTagGrey);
     payload->mempool_alloc_safe(rdram, &call);
@@ -302,10 +317,7 @@ extern "C" void dkr_custom_tracks_table_load_end(std::uint8_t* rdram,
                                                   recomp_context* context) {
     const std::uint32_t requested = g_requested_table;
     g_requested_table = 0xFFFFFFFFU;
-    publish_extended_table(rdram, context, requested);
-    if (requested == kLevelHeadersTableSection) {
-        size_menu_display_lists(rdram);
-    }
+    dkr_custom_tracks_extend_table(rdram, context, requested);
 }
 
 // Entry of asset_load. The destination register is clobbered by the DMA call
@@ -318,6 +330,20 @@ extern "C" void dkr_custom_tracks_asset_load_begin(std::uint8_t*,
     g_load.size = static_cast<std::int32_t>(context->r7);
 }
 
+namespace {
+bool apply_custom_payload(std::uint8_t* rdram,const AssetLoadRequest& request);
+}
+
+// Consult only ranges assigned by build_extended_table. This must precede
+// the legacy bank's strict section-bounds check: appended Blender bytes are
+// owned by this loader, not by the immutable legacy source bank.
+extern "C" int dkr_custom_tracks_asset_override(std::uint8_t* rdram,recomp_context* context) {
+    const AssetLoadRequest request{std::uint32_t(context->r4),std::uint32_t(context->r5),
+        std::uint32_t(context->r6),std::int32_t(context->r7)};
+    if(!apply_custom_payload(rdram,request))return 0;
+    context->r2=request.size;return 1;
+}
+
 // Reached only on asset_load's DMA path. A custom offset lies just past the
 // section, so the retail DMA has read unrelated but in-ROM bytes into the
 // destination; replacing them here keeps the retail loader untouched and needs
@@ -326,16 +352,21 @@ extern "C" void dkr_custom_tracks_asset_load_end(std::uint8_t* rdram,
                                                   recomp_context*) {
     const AssetLoadRequest request = g_load;
     g_load = AssetLoadRequest{};
+    apply_custom_payload(rdram,request);
+}
+
+namespace {
+bool apply_custom_payload(std::uint8_t* rdram,const AssetLoadRequest& request) {
     Section section = Section::LevelHeaders;
     if (!section_for_data(request.section, section) || request.size <= 0 ||
-        !addressable(request.destination)) {
-        return;
+        !addressable(request.destination) || std::uint32_t(request.size)>kRdramHigh-request.destination+1U) {
+        return false;
     }
 
     const std::uint8_t* payload = dkr::runtime::custom_tracks::payload_for(
         section, request.offset, request.size);
     if (payload == nullptr) {
-        return; // Retail range: the bytes the ROM supplied are the right ones.
+        return false; // Retail/legacy range: leave its original owner in charge.
     }
 
     for (std::int32_t index = 0; index < request.size; ++index) {
@@ -344,7 +375,7 @@ extern "C" void dkr_custom_tracks_asset_load_end(std::uint8_t* rdram,
     }
 
     if (section != Section::LevelHeaders) {
-        return;
+        return true;
     }
 
     // WORLD_CUSTOM_TRACKS only files a course under Track Select's Custom
@@ -384,24 +415,10 @@ extern "C" void dkr_custom_tracks_asset_load_end(std::uint8_t* rdram,
                      "%d\n",
                      request.offset, fixup.label, index);
     }
+    return true;
 }
+} // namespace
 
-// A mounted legacy section has strict bounds and cannot DMA beyond its end.
-// Serve authored payloads before entering that path, including header fixups.
-extern "C" int dkr_custom_tracks_asset_load_override(std::uint8_t* rdram,
-                                                      recomp_context* context) {
-    Section section;
-    const auto size=static_cast<std::int32_t>(context->r7);
-    const auto destination=static_cast<std::uint32_t>(context->r5);
-    if(!section_for_data(static_cast<std::uint32_t>(context->r4),section) || size<=0 ||
-       !addressable(destination) || std::uint64_t(destination)+size>std::uint64_t(kRdramHigh)+1 ||
-       !dkr::runtime::custom_tracks::payload_for(section,static_cast<std::uint32_t>(context->r6),size))
-        return 0;
-    dkr_custom_tracks_asset_load_begin(rdram,context);
-    dkr_custom_tracks_asset_load_end(rdram,context);
-    context->r2=size;
-    return 1;
-}
 
 // Common return convergence of get_track_id_to_load. All three retail paths -
 // new game, settings->courseId, and the gTrackIdToLoad override that Track
