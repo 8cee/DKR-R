@@ -287,6 +287,8 @@ def import_object_map(context, object_map: ObjectMap, catalog=None, tree=None,
         for obj in object_map.objects
     ]
     stamp_order(created, order_base)
+    from .operators import waterfall
+    waterfall.bind_imported(context, created)
     return created
 
 
@@ -380,7 +382,7 @@ def _load_json(empty, key, fallback):
 
 
 def export_object_map(context, catalog=None, selected_only=False,
-                      slot=None) -> ObjectMap:
+                      slot=None, resolve_scroll=True) -> ObjectMap:
     """Collect the scene back into an object map, in a stable order.
 
     Document order is preserved from the Blender object name, which import set
@@ -397,7 +399,11 @@ def export_object_map(context, catalog=None, selected_only=False,
     if slot is not None:
         empties = [o for o in empties if slot_of(o) == slot]
     empties.sort(key=lambda o: o.get("dkr_order", 1 << 30))
-    return ObjectMap(objects=[read_object(e, catalog) for e in empties])
+    objects = [read_object(e, catalog) for e in empties]
+    if resolve_scroll:
+        from .operators import waterfall
+        waterfall.resolve_export(context, empties, objects)
+    return ObjectMap(objects=objects)
 
 
 def slot_counts(context) -> Dict[str, int]:

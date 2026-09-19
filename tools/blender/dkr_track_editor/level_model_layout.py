@@ -28,11 +28,12 @@ where it matters:
 * ``modelSize`` at 0x48 is the inflated length. All 55 models.
 * A batch terminator holds ``(vertex count, triangle count)``. All 1146
   segments.
-* Which batches are **opaque** is authored, not derivable. No flag bit separates
-  the two sides of ``numberofOpaqueBatches`` - the intersection over all retail
-  batches is empty - and neither does the texture format, where eight of the
-  fourteen formats appear on both sides. So opacity travels with the face, from
-  the batch it came from, and is never inferred.
+* Which side of ``numberofOpaqueBatches`` a batch is on is **not** a free
+  choice. No flag bit and no texture *format* separates the two sides, which is
+  what this note used to conclude from; the texture's *render mode* does, as
+  ``render_level_segment`` reads it. That rule, in :mod:`.transparency`, puts
+  every textured retail batch on the side retail wrote. Here opacity still
+  travels with the face - the caller derives it - and is never inferred.
 
 Deliberately free of ``bpy``.
 """
@@ -42,6 +43,7 @@ from __future__ import annotations
 import struct
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+from . import water
 from .level_model import (
     BATCH_SIZE, BOUNDING_BOX_SIZE, BSP_NODE_SIZE, ENDIAN, HEADER_SIZE,
     SEGMENT_SIZE, TEXTURE_INFO_SIZE, TRIANGLE_SIZE, VERTEX_SIZE, Batch,
@@ -69,6 +71,11 @@ MAX_BATCH_VERTICES = 256
 #: that produced 200-vertex batches would be legal and nothing like the data the
 #: renderer was tuned for.
 BATCH_VERTEX_TARGET = 24
+
+#: ``gSPPolygon`` packs ``triangle count - 1`` into four bits. The runtime
+#: decodes those bits, so 17 triangles would draw only one even when every
+#: vertex fits. Merging source batches must respect both command limits.
+MAX_BATCH_TRIANGLES = 16
 
 #: ``LEVEL_MODEL_MAX_SIZE`` in ``tracks.c``. Covers the inflated blob *and*
 #: everything the loader allocates past ``modelSize``.
@@ -171,9 +178,9 @@ def rebatch_segment(segment: Segment, faces: Sequence[Face], positions: Sequence
     """Rebuild a segment's batches, triangles and vertices from loose faces.
 
     Faces are grouped by :class:`BatchKey`, opaque groups first, and each group
-    is cut into batches once it would outgrow ``target`` vertices. Order within
-    a group is the order the faces arrive in, so an untouched segment comes back
-    unchanged rather than merely equivalent.
+    is cut into batches before exceeding ``target`` vertices or 16 triangles.
+    Order within a group is the order the faces arrive in, so an untouched
+    segment comes back unchanged rather than merely equivalent.
     """
     if target < 3 or target > MAX_BATCH_VERTICES:
         raise LayoutError(
@@ -246,12 +253,13 @@ def rebatch_segment(segment: Segment, faces: Sequence[Face], positions: Sequence
 
 
 def _chunk(faces: Sequence[Face], target: int) -> Iterable[List[Face]]:
-    """Cut a group into batches, closing one before its vertices outgrow ``target``."""
+    """Keep both the vertex window and the four-bit draw count representable."""
     current: List[Face] = []
     seen: set = set()
     for face in faces:
         fresh = {v for v in face.vertices if v not in seen}
-        if current and len(seen) + len(fresh) > target:
+        if current and (len(seen) + len(fresh) > target
+                        or len(current) >= MAX_BATCH_TRIANGLES):
             yield current
             current, seen = [], set()
             fresh = set(face.vertices)
@@ -603,6 +611,12 @@ def check_collision_pressure(model: LevelModel) -> List[str]:
 #: data uses rather than above it.
 SEGMENT_TRIANGLE_TARGET = 48
 
+#: The most segments a model can hold. ``render_level_geometry_and_objects``
+#: (``tracks.c``) lists the segments it draws in ``u8 segmentIds[128]`` and
+#: clears ``objectsVisible[1..numberOfSegments]`` in an array of the same size,
+#: so a 128th segment writes past it every frame. Retail's largest is 117.
+MAX_SEGMENTS = 127
+
 #: Splitting stops here however many triangles are left. A segment holding one
 #: triangle costs a bounding box, a BSP node and a row of the PVS, and the PVS
 #: grows with the square of the segment count.
@@ -611,8 +625,15 @@ MIN_SEGMENT_TRIANGLES = 8
 
 def resegment(model: LevelModel,
               target: int = SEGMENT_TRIANGLE_TARGET,
-              batch_target: int = BATCH_VERTEX_TARGET) -> int:
+              batch_target: int = BATCH_VERTEX_TARGET,
+              wave_grid: Optional[Tuple[int, int, int, int]] = None) -> int:
     """Partition a model's geometry into fresh segments. Returns the count.
+
+    A model holding wave water is cut into the wave grid instead - see
+    :func:`resegment_grid` - because the game places *every* segment on that
+    grid, and anything else draws waves where there is no water. ``wave_grid``
+    is ``(tile width, tile depth, origin x, origin z)``; without it the grid is
+    read off the model.
 
     This is what a track grown outside its inherited segmentation needs. The
     three steps before it edit a segmentation; none of them makes one, so a
@@ -637,9 +658,18 @@ def resegment(model: LevelModel,
       so any ``(segment, vertex)`` mapping a caller holds is stale. That is why
       this is explicit rather than something an export does quietly.
     """
-    faces, positions, colours = _dissolve(model)
+    # Batches that draw alike are merged rather than carried over: this call is
+    # replacing the segmentation, so the source batches have no claim on the
+    # result, and keeping them is what pushes a crowded new segment past the
+    # 255 its u8 batch count can hold. See :func:`_dissolve`.
+    faces, positions, colours = _dissolve(model, keep_batches=False)
     if not faces:
         return len(model.segments)
+
+    layout = wave_grid or wave_layout(model, faces, positions)
+    if layout is not None:
+        return resegment_grid(model, faces, positions, colours, layout,
+                              batch_target)
 
     # A model built from nothing has no bounds yet, and without them the split
     # below cannot divide space: it cuts by count into slices that each span
@@ -658,6 +688,14 @@ def resegment(model: LevelModel,
                model.bounds[5] - model.bounds[4]) if model.bounds else 0
     max_extent = span * OVERSIZED_BOX * 0.5 if span > 0 else None
     groups = _partition(faces, positions, max(1, target), max_extent)
+    # Coarser segments are the only way under MAX_SEGMENTS, so both stop
+    # conditions loosen together until the model fits. It ends: past the whole
+    # model's size and span, the split stops at one group.
+    while len(groups) > MAX_SEGMENTS:
+        target += max(1, target // 4)
+        if max_extent is not None:
+            max_extent *= 1.25
+        groups = _partition(faces, positions, max(1, target), max_extent)
 
     model.segments = []
     for index, group in enumerate(groups):
@@ -682,6 +720,385 @@ def resegment(model: LevelModel,
     model.pvs = b"\xff" * pvs_size(len(model.segments))
     rebuild(model)
     return len(model.segments)
+
+
+# ---------------------------------------------------------------------------
+# The wave grid
+# ---------------------------------------------------------------------------
+#
+# See :mod:`.water` for why a model with waves has to be a grid of equal
+# squares, one segment a square. What follows builds one out of any geometry:
+# faces that cross a grid line are cut along it, so every piece lies inside one
+# square and every square's box starts on its own line, which is where the
+# game's rounding looks for it.
+
+def _wave_faces(faces):
+    return [face for face in faces if water.is_wavy(face.key.flags)]
+
+
+def wave_layout(model: LevelModel, faces=None, positions=None
+                ) -> Optional[Tuple[int, int, int, int]]:
+    """``(tile width, tile depth, origin x, origin z)`` for a model with waves.
+
+    ``None`` when there is no wave water. With a reference, its water is one
+    tile, whatever size its pieces are - the title screen lays its water in
+    half-tile quads - so the grid is the game's own when the reference box
+    agrees with that water, and the water's own when an edit has grown the
+    box. Without one, the grid is read off the wave water itself, which the
+    addon lays one quad to a square.
+    """
+    if faces is None or positions is None:
+        faces, positions, _colours = _dissolve(model)
+    wavy = _wave_faces(faces)
+    if not wavy:
+        return None
+
+    grid = water.simulate(model)
+    if grid is not None and grid.reference is not None:
+        extent = water.reference_extent(model, grid.reference)
+        if extent is not None and extent[2] > 0 and extent[3] > 0:
+            if (grid.valid and abs(grid.tile_w - extent[2]) <= 2
+                    and abs(grid.tile_h - extent[3]) <= 2):
+                return grid.tile_w, grid.tile_h, grid.origin_x, grid.origin_z
+            return extent[2], extent[3], extent[0], extent[1]
+
+    extents: Dict[Tuple[int, int], int] = {}
+    low_x = low_z = None
+    for face in wavy:
+        xs = [positions[i][0] for i in face.vertices]
+        zs = [positions[i][2] for i in face.vertices]
+        key = (max(xs) - min(xs), max(zs) - min(zs))
+        if key[0] > 0 and key[1] > 0:
+            extents[key] = extents.get(key, 0) + 1
+        low_x = min(xs) if low_x is None else min(low_x, min(xs))
+        low_z = min(zs) if low_z is None else min(low_z, min(zs))
+    if not extents:
+        raise LayoutError(
+            "the wave water has no extent: every wave face is a line")
+    width, depth = max(extents.items(), key=lambda kv: (kv[1], kv[0]))[0]
+    return width, depth, low_x, low_z
+
+
+def _lerp_corner(one, two, axis, value):
+    """The point where the edge ``one``-``two`` crosses ``axis = value``.
+
+    The two ends are put in a fixed order first, so the same edge cut from
+    either of the faces that share it lands on the same integer point - the
+    two sides of a cut then still meet.
+    """
+    first, second = sorted((one, two), key=lambda c: (c[0], c[2]))
+    span = second[0][axis] - first[0][axis]
+    t = (value - first[0][axis]) / float(span)
+    position = [int(round(first[0][i] + (second[0][i] - first[0][i]) * t))
+                for i in range(3)]
+    position[axis] = int(value)
+    # UVs belong to the face, so they are taken in the face's own direction.
+    start, end = (one, two)
+    t_face = (value - start[0][axis]) / float(end[0][axis] - start[0][axis])
+    uv = tuple(int(round(start[1][i] + (end[1][i] - start[1][i]) * t_face))
+               for i in range(2))
+    colour = tuple(int(round(first[2][i] + (second[2][i] - first[2][i]) * t))
+                   for i in range(4))
+    return (tuple(position), uv, colour)
+
+
+def _split_polygon(polygon, axis, value):
+    """``(below, above)``: a convex polygon cut along ``axis = value``."""
+    below, above = [], []
+    count = len(polygon)
+    for index in range(count):
+        here = polygon[index]
+        there = polygon[(index + 1) % count]
+        a, b = here[0][axis], there[0][axis]
+        if a <= value:
+            below.append(here)
+        if a >= value:
+            above.append(here)
+        if (a < value < b) or (b < value < a):
+            point = _lerp_corner(here, there, axis, value)
+            below.append(point)
+            above.append(point)
+    return below, above
+
+
+def _cut_face(corners, lines_x, lines_z):
+    """A face cut along every grid line it crosses, as convex polygons."""
+    pieces = [corners]
+    for axis, lines in ((0, lines_x), (2, lines_z)):
+        cut = []
+        for polygon in pieces:
+            low = min(c[0][axis] for c in polygon)
+            high = max(c[0][axis] for c in polygon)
+            rest = polygon
+            for value in lines:
+                if value <= low or value >= high:
+                    continue
+                below, rest = _split_polygon(rest, axis, value)
+                if len(below) >= 3:
+                    cut.append(below)
+                if len(rest) < 3:
+                    break
+            if len(rest) >= 3:
+                cut.append(rest)
+        pieces = cut
+    return pieces
+
+
+def _degenerate(a, b, c) -> bool:
+    if a == b or b == c or a == c:
+        return True
+    u = (b[0] - a[0], b[1] - a[1], b[2] - a[2])
+    v = (c[0] - a[0], c[1] - a[1], c[2] - a[2])
+    return (u[1] * v[2] - u[2] * v[1] == 0 and u[2] * v[0] - u[0] * v[2] == 0
+            and u[0] * v[1] - u[1] * v[0] == 0)
+
+
+def _grid_lines(low, high, origin, step):
+    first = (int(low) - origin) // step
+    last = (int(high) - origin) // step + 1
+    return [origin + index * step for index in range(first, last + 1)]
+
+
+def resegment_grid(model: LevelModel, faces, positions, colours,
+                   layout: Tuple[int, int, int, int],
+                   batch_target: int = BATCH_VERTEX_TARGET) -> int:
+    """Cut the model into the wave grid, one segment a square. Returns the count.
+
+    * Wave water is never cut: each face goes to the square the game would put
+      a box starting at its corner in. The addon lays wave water one quad a
+      square, and retail's quads are a unit or two off their lines, which the
+      game's own nudge absorbs.
+    * Everything else is cut along the grid lines it crosses and each piece
+      goes to the square it lies in. Positions, UVs and colours are
+      interpolated along the cut and rounded; the ends of a shared edge are
+      ordered first, so both faces cut it at the same point.
+    * A square whose pieces all hug its far edge would have its box rounded
+      into the next square, so it joins that square's segment.
+    * Squares holding wave water come first, then the rest, each row by row.
+      Wave squares switch ``hasWaves`` on; one of them, a square whose box is
+      exactly a tile, carries the reference flag - the one that already did if
+      it still qualifies.
+
+    The result is checked with :func:`.water.problems`, and anything it finds
+    is raised rather than written.
+    """
+    width, depth, origin_x, origin_z = (int(v) for v in layout)
+    if width <= 0 or depth <= 0:
+        raise LayoutError("a wave tile cannot be %dx%d" % (width, depth))
+
+    pool_positions = list(positions)
+    pool_colours = list(colours)
+    seen: Dict[Tuple, int] = {}
+    for index, (position, colour) in enumerate(zip(pool_positions, pool_colours)):
+        seen.setdefault((tuple(position), tuple(colour)), index)
+
+    def pool_index(position, colour):
+        key = (tuple(position), tuple(colour))
+        index = seen.get(key)
+        if index is None:
+            index = len(pool_positions)
+            seen[key] = index
+            pool_positions.append(tuple(position))
+            pool_colours.append(tuple(colour))
+        return index
+
+    xs = [p[0] for p in pool_positions]
+    zs = [p[2] for p in pool_positions]
+    lines_x = _grid_lines(min(xs), max(xs), origin_x, width)
+    lines_z = _grid_lines(min(zs), max(zs), origin_z, depth)
+
+    def square(x, z):
+        return ((x - origin_x) // width, (z - origin_z) // depth)
+
+    had_reference = set()
+    groups: Dict[Tuple[int, int], List[Face]] = {}
+    for face in faces:
+        points = [pool_positions[i] for i in face.vertices]
+        if water.is_wavy(face.key.flags):
+            cell = square(min(p[0] for p in points) + water.CORNER_NUDGE,
+                          min(p[2] for p in points) + water.CORNER_NUDGE)
+            if face.key.flags & water.RENDER_WAVE_REFERENCE:
+                had_reference.add(cell)
+            groups.setdefault(cell, []).append(face)
+            continue
+        corners = [(tuple(pool_positions[i]), tuple(face.uvs[at]),
+                    tuple(pool_colours[i]))
+                   for at, i in enumerate(face.vertices)]
+        xs = [c[0][0] for c in corners]
+        zs = [c[0][2] for c in corners]
+        if (square(min(xs), min(zs)) == square(max(xs) - 1, max(zs) - 1)
+                or (max(xs) - min(xs) <= 0 and max(zs) - min(zs) <= 0)):
+            pieces = [corners]
+        else:
+            pieces = _cut_face(corners, lines_x, lines_z)
+        for polygon in pieces:
+            cx = sum(c[0][0] for c in polygon) / float(len(polygon))
+            cz = sum(c[0][2] for c in polygon) / float(len(polygon))
+            cell = (int((cx - origin_x) // width), int((cz - origin_z) // depth))
+            for corner in range(1, len(polygon) - 1):
+                trio = (polygon[0], polygon[corner], polygon[corner + 1])
+                if _degenerate(*(c[0] for c in trio)):
+                    continue
+                groups.setdefault(cell, []).append(Face(
+                    face.key,
+                    [pool_index(c[0], c[2]) for c in trio],
+                    [c[1] for c in trio],
+                    face.flags,
+                ))
+
+    def box_of(group):
+        points = [pool_positions[i] for face in group for i in face.vertices]
+        return (min(p[0] for p in points), min(p[2] for p in points),
+                max(p[0] for p in points), max(p[2] for p in points))
+
+    def placed(group):
+        low_x, low_z, _hx, _hz = box_of(group)
+        return square(low_x + water.CORNER_NUDGE, low_z + water.CORNER_NUDGE)
+
+    wavy_cells = {cell for cell, group in groups.items()
+                  if any(water.is_wavy(face.key.flags) for face in group)}
+
+    # A square whose box the game would round into another joins that one.
+    for _round in range(len(groups) + 1):
+        moved = False
+        for cell in sorted(groups):
+            if cell not in groups:
+                continue
+            where = placed(groups[cell])
+            if where == cell:
+                continue
+            if cell in wavy_cells:
+                raise LayoutError(
+                    "the wave water in square %s starts %d units from its "
+                    "line, past the %d the game allows"
+                    % (cell, box_of(groups[cell])[0] - origin_x
+                       - cell[0] * width, water.CORNER_NUDGE))
+            groups.setdefault(where, []).extend(groups.pop(cell))
+            moved = True
+        if not moved:
+            break
+
+    wavy_cells = {cell for cell, group in groups.items()
+                  if any(water.is_wavy(face.key.flags) for face in group)}
+    segments = _join_dry_squares(groups, wavy_cells, placed)
+    order = (sorted((key for key in segments if key in wavy_cells),
+                    key=lambda c: (c[1], c[0]))
+             + sorted((key for key in segments if key not in wavy_cells),
+                      key=lambda c: (c[1], c[0])))
+    if len(order) > MAX_SEGMENTS:
+        raise LayoutError(
+            "cut into %dx%d squares the track fills %d of them, and a model "
+            "holds at most %d segments even with dry squares joined. Use "
+            "larger wave tiles" % (width, depth, len(order), MAX_SEGMENTS))
+
+    def exact(cell):
+        low_x, low_z, high_x, high_z = box_of(segments[cell])
+        return (high_x - low_x, high_z - low_z) == (width, depth)
+
+    candidates = [cell for cell in order if cell in wavy_cells and exact(cell)]
+    if wavy_cells and not candidates:
+        raise LayoutError(
+            "no wave square is exactly %dx%d, and the game sizes every tile "
+            "after the one flagged as the reference" % (width, depth))
+    preferred = [cell for cell in candidates if cell in had_reference]
+    reference = (preferred or candidates or [None])[0]
+
+    model.segments = []
+    for index, cell in enumerate(order):
+        segment = Segment(index)
+        local, cell_positions, cell_colours = {}, [], []
+        rekeyed = []
+        for face in segments[cell]:
+            mapped = []
+            for pool in face.vertices:
+                if pool not in local:
+                    local[pool] = len(cell_positions)
+                    cell_positions.append(pool_positions[pool])
+                    cell_colours.append(pool_colours[pool])
+                mapped.append(local[pool])
+            flags = face.key.flags & ~water.RENDER_WAVE_REFERENCE
+            if cell == reference and water.is_wavy(flags):
+                flags |= water.RENDER_WAVE_REFERENCE
+            key = face.key
+            if flags != key.flags:
+                key = BatchKey(key.texture_index, flags, key.misc,
+                               key.texture_offset, key.vertex_override,
+                               key.opaque, key.serial)
+            rekeyed.append(Face(key, mapped, face.uvs, face.flags))
+        rebatch_segment(segment, rekeyed, cell_positions, cell_colours,
+                        batch_target)
+        segment.has_waves = water.HAS_WAVES if cell in wavy_cells else 0
+        model.segments.append(segment)
+
+    _rebuild_boxes(model)
+    model.bsp = build_bsp(model.bounding_boxes)
+    model.pvs = b"\xff" * pvs_size(len(model.segments))
+    rebuild(model)
+
+    found = water.problems(model)
+    if found:
+        raise LayoutError("the wave grid did not come out right: %s" % found[0])
+    return len(model.segments)
+
+
+def _join_dry_squares(groups, wavy_cells, placed):
+    """``{key square: faces}``, with dry squares joined into blocks if need be.
+
+    One segment a square is what a wave square needs; a dry square only needs
+    never to be placed on a wave square. So when a track fills more squares
+    than a model holds segments, dry squares are joined into ``n x n`` blocks
+    - the smallest ``n`` that fits - wherever a block holds no water at all.
+    Such a block's box starts inside itself, so the game places it on one of
+    its own dry squares. A block that would round onto a wave square anyway,
+    through a sliver at its edge, is left as single squares. The key of a block
+    is its lowest square, which is what orders it.
+    """
+    if len(groups) <= MAX_SEGMENTS:
+        return dict(groups)
+    best = dict(groups)
+    for factor in range(2, 65):
+        blocks: Dict[Tuple[int, int], List[Tuple[int, int]]] = {}
+        for cell in groups:
+            if cell in wavy_cells:
+                continue
+            blocks.setdefault((cell[0] // factor, cell[1] // factor), []).append(cell)
+        wet_blocks = {(cell[0] // factor, cell[1] // factor) for cell in wavy_cells}
+        joined: Dict[Tuple[int, int], List[Face]] = {}
+        for cell in wavy_cells:
+            joined[cell] = list(groups[cell])
+        for block, cells in blocks.items():
+            if block in wet_blocks:
+                for cell in cells:
+                    joined[cell] = list(groups[cell])
+                continue
+            faces = [face for cell in cells for face in groups[cell]]
+            if placed(faces) in wavy_cells:
+                for cell in cells:
+                    joined[cell] = list(groups[cell])
+                continue
+            joined[min(cells, key=lambda c: (c[1], c[0]))] = faces
+        best = joined
+        if len(joined) <= MAX_SEGMENTS:
+            break
+    return best
+
+
+def add_faces(model: LevelModel, faces: Sequence[Face], positions: Sequence,
+              colours: Sequence) -> None:
+    """Put loose faces into the model as one more segment, for a resegment.
+
+    The segment is a staging area: :func:`resegment` dissolves every segment
+    anyway, so what matters is only that the faces are in the model when it
+    runs.
+    """
+    segment = Segment(len(model.segments))
+    rebatch_segment(segment, list(faces), list(positions), list(colours))
+    model.segments.append(segment)
+    from . import level_model_edit
+
+    model.bounding_boxes = list(model.bounding_boxes)
+    model.bounding_boxes.append(level_model_edit.segment_box(segment)
+                                or (0, 0, 0, 0, 0, 0))
 
 
 #: ``LevelModel`` fields with no reader anywhere in the decomp that are still
@@ -740,13 +1157,25 @@ def blank_model(textures: Sequence = (), bounds=None) -> LevelModel:
     return model
 
 
-def _dissolve(model: LevelModel):
+def _dissolve(model: LevelModel, keep_batches: bool = True):
     """Every face in the model, against one flat pool of vertices.
 
-    A :class:`BatchKey`'s ``serial`` is only unique inside its own segment, so
-    it is widened to ``(segment, batch)`` here. Without that, batches from two
-    different source segments would collide and be merged into one draw call
-    the moment they landed in the same new segment.
+    ``keep_batches`` carries each face's source batch through. A
+    :class:`BatchKey`'s ``serial`` is only unique inside its own segment, so it
+    is widened to ``(segment, batch)``; without that, batches from two source
+    segments would collide and merge the moment they landed in the same new
+    segment, and a decompose and rebuild of an untouched segmentation would
+    stop being the identity.
+
+    A caller **replacing** the segmentation wants the opposite, and says so.
+    There, faces from many source segments land in one new segment, and keeping
+    the serials makes that segment inherit the union of all their batches.
+    Measured on an exported track whose wave grid forced the partition: one tile
+    came out with 335 batches built from 20 distinct (texture, flags) pairs,
+    past the 255 a ``u8 numberofOpaqueBatches`` can hold, and the export failed
+    inside struct.pack. Dropping them merges what draws alike - the same tile
+    comes out at 63 - and costs nothing a resegment has not already spent,
+    since it destroys identity by definition.
     """
     faces: List[Face] = []
     positions: List = []
@@ -769,7 +1198,7 @@ def _dissolve(model: LevelModel):
                 face.key.texture_index, face.key.flags, face.key.misc,
                 face.key.texture_offset, face.key.vertex_override,
                 face.key.opaque,
-                None if face.key.serial is None
+                None if not keep_batches or face.key.serial is None
                 else (segment.index << 16) | (face.key.serial & 0xFFFF),
             )
             faces.append(Face(widened, [offset[v] for v in face.vertices],
@@ -852,58 +1281,138 @@ def _rebuild_boxes(model: LevelModel) -> None:
 
 
 def build_bsp(boxes: Sequence[Sequence[int]]) -> List[Tuple[int, int, int, int, int]]:
-    """A BSP over the segment boxes, one node per segment.
+    """A BSP the game's traversal can walk, over the segments in their order.
 
-    The format has **no separate leaf nodes**: the array holds one node per
-    segment, ``segmentIndex`` names the segment the node *is*, and ``leftNode``
-    / ``rightNode`` are child indices with -1 for no subtree. So this is a
-    binary search tree over the segments, and every segment appears exactly
-    once - which all 110 retail models satisfy and which the gate checks.
+    ``traverse_segments_bsp_tree`` (``tracks.c``) never draws a node's own
+    segment. A node splits the run of segment indices it was handed at its
+    ``segmentIndex`` - ``[lo, seg - 1]`` to the left child, ``[seg, hi]`` to the
+    right - and a side with no child draws the one segment its run holds. So
+    what the game needs is a tree over **contiguous runs of indices**, and that
+    is what this builds: every node splits a run in two, and a run of one
+    segment is a side with no child. ``n`` segments take ``n - 1`` nodes; the
+    slot left over stays unreachable, as in 100 of retail's 110 models.
 
-    ``splitValue`` is the node's own segment's lower edge on the split axis,
-    which is what 1854 of retail's 2192 reachable nodes do.
+    An earlier version gave every segment a node naming itself, which retail
+    resembles at a glance and which the game cannot walk: it drew some segments
+    twice and others never - holes in the track - and a run that went below
+    zero drew segment 255 of a 127-segment model, which crashes in
+    ``render_level_segment``. :func:`draw_order` is the game's walk, and the
+    tests hold every built tree and every retail one to it.
+
+    The split axis and value only decide which half is drawn first - the
+    camera's side - never *which* segments are drawn, so they come from the
+    boxes of the two halves: the axis the halves are furthest apart on, and the
+    midpoint between them. The segment order is the caller's; re-segmenting
+    produces it by recursive spatial split, so each run is spatially coherent.
     """
-    nodes: List[Optional[Tuple[int, int, int, int, int]]] = [None] * len(boxes)
-    if not boxes:
+    count = len(boxes)
+    if not count:
         return []
+    nodes: List[Optional[Tuple[int, int, int, int, int]]] = [None] * count
+    slots = iter(range(1, count))
 
-    def build(indices: List[int]) -> int:
-        if not indices:
-            return -1
-        axis = 0
-        best = -1.0
+    def centre(index: int, axis: int) -> float:
+        return (boxes[index][axis] + boxes[index][axis + 3]) / 2.0
+
+    def build(low: int, high: int, slot: int) -> int:
+        middle = (low + high + 1) // 2
+        axis, gap, low_mean, high_mean = 0, None, 0.0, 0.0
         for candidate in range(3):
-            lows = [boxes[i][candidate] for i in indices]
-            highs = [boxes[i][candidate + 3] for i in indices]
-            spread = max(highs) - min(lows)
-            if spread > best:
-                best, axis = spread, candidate
-        indices.sort(key=lambda i: boxes[i][axis])
-        middle = len(indices) // 2
-        here = indices[middle]
-        left = build(indices[:middle])
-        right = build(indices[middle + 1:])
-        nodes[here] = (left, right, axis, here, int(boxes[here][axis]))
-        return here
+            left = (sum(centre(i, candidate) for i in range(low, middle))
+                    / (middle - low))
+            right = (sum(centre(i, candidate) for i in range(middle, high + 1))
+                     / (high + 1 - middle))
+            # Signed, so the left run is the low side: the game draws the left
+            # child first when the camera is below the split value.
+            if gap is None or right - left > gap:
+                axis, gap, low_mean, high_mean = candidate, right - left, left, right
+        value = max(-32768, min(32767, int(round((low_mean + high_mean) / 2.0))))
+        left_child = build(low, middle - 1, next(slots)) if middle - 1 > low else -1
+        right_child = build(middle, high, next(slots)) if high > middle else -1
+        nodes[slot] = (left_child, right_child, axis, middle, value)
+        return slot
 
-    root = build(list(range(len(boxes))))
-    if root != 0:
-        # Node 0 is the root the game descends from, so the tree is renumbered
-        # rather than the game asked to start elsewhere.
-        order = [root] + [i for i in range(len(boxes)) if i != root]
-        moved = {old: new for new, old in enumerate(order)}
-        renumbered: List[Tuple[int, int, int, int, int]] = [None] * len(boxes)
-        for old, node in enumerate(nodes):
-            if node is None:
-                continue
-            left, right, axis, segment_index, split = node
-            renumbered[moved[old]] = (
-                moved.get(left, -1) if left >= 0 else -1,
-                moved.get(right, -1) if right >= 0 else -1,
-                axis, segment_index, split,
-            )
-        nodes = renumbered
+    if count > 1:
+        build(0, count - 1, 0)
     return [node or (-1, -1, 0, 0, 0) for node in nodes]
+
+
+def draw_order(bsp: Sequence[Sequence[int]], count: int,
+               camera: Sequence[float] = (0.0, 0.0, 0.0),
+               limit: int = 4096) -> List[int]:
+    """The segments the game would draw, in order, before the PVS and the
+    frustum test thin the list.
+
+    ``traverse_segments_bsp_tree`` as the game runs it. Both children of every
+    node are always visited - the camera only picks which goes first - so the
+    *set* this returns is the same from every viewpoint. Indices come back as
+    the game stores them, in a ``u8`` array: ``add_segment_to_order`` guards with
+    a signed ``index < numberOfSegments``, so a run gone negative adds -1 and
+    the array holds 255.
+    """
+    if count <= 1:
+        return [0] if count == 1 else []
+    found: List[int] = []
+    x, y, z = camera
+
+    def add(index: int) -> None:
+        if index < count:
+            found.append(index & 0xFF)
+
+    def walk(node: int, low: int, high: int, depth: int) -> None:
+        if depth > limit or len(found) > limit or not 0 <= node < len(bsp):
+            raise LayoutError("the BSP does not end: node %d is out of the tree "
+                              "or part of a cycle" % node)
+        left, right, split_type, segment_index, split_value = bsp[node][:5]
+        value = x if split_type == 0 else y if split_type == 1 else z
+
+        def left_side():
+            if left != -1:
+                walk(left, low, segment_index - 1, depth + 1)
+            else:
+                add(low)
+
+        def right_side():
+            if right != -1:
+                walk(right, segment_index, high, depth + 1)
+            else:
+                add(high)
+
+        if value < split_value:
+            left_side()
+            right_side()
+        else:
+            right_side()
+            left_side()
+
+    walk(0, 0, count - 1, 0)
+    return found
+
+
+def bsp_problems(model: LevelModel) -> List[str]:
+    """What is wrong with a model's BSP, as the game would walk it. Empty if
+    it draws every segment exactly once."""
+    count = len(model.segments)
+    if count <= 1:
+        return []
+    try:
+        order = draw_order(model.bsp, count)
+    except LayoutError as error:
+        return [str(error)]
+    problems = []
+    stray = sorted({index for index in order if index >= count})
+    if stray:
+        problems.append(
+            "it draws segment %d of a %d-segment model; the game reads that "
+            "segment out of the vertex data and crashes" % (stray[0], count))
+    repeated = len(order) - len(set(order))
+    if repeated:
+        problems.append("it draws %d segment(s) twice" % repeated)
+    missed = count - len({index for index in order if index < count})
+    if missed:
+        problems.append("it never draws %d segment(s), which show as holes"
+                        % missed)
+    return problems
 
 
 def headroom_triangles(model: LevelModel) -> int:

@@ -8,7 +8,7 @@ from bpy.props import (
     PointerProperty, StringProperty,
 )
 
-from . import catalog as catalog_module, level_types
+from . import catalog as catalog_module, level_types, race_ai, water
 
 #: Blender hands an enum callback's strings to C without taking a reference, so
 #: a list built fresh each call can be collected while the menu still points at
@@ -103,6 +103,22 @@ def texture_surface_items(self, context):
     return _keep("texture_surface", found or [("0", "Road", "")])
 
 
+def transparency_items(auto=True):
+    """The looks a face can have, for the panels. ``AUTO`` first if asked for."""
+    from . import transparency as looks  # noqa: PLC0415
+
+    items = []
+    if auto:
+        items.append((looks.AUTO, "As Made",
+                      "Whatever the texture is made as: its own look for one of "
+                      "this track's, and solid or see-through for one of the "
+                      "ROM's, as the ROM wrote it"))
+    for mode, label in ((looks.OPAQUE, "Opaque"), (looks.CUTOUT, "Cut-Out"),
+                        (looks.BLEND, "Blended")):
+        items.append((mode, label, looks.DESCRIPTIONS[mode]))
+    return items
+
+
 def texture_format_items(self, context):
     """The formats a texture a track brings with it may be written in.
 
@@ -158,7 +174,14 @@ class DKR_CustomTexture(bpy.types.PropertyGroup):
     height: IntProperty(default=0)
     #: A ``FORMAT_CODES`` value, stored as the number the file stores.
     format: IntProperty(default=1)
+    #: What a texture added before transparency existed was written with. A
+    #: texture with a :attr:`transparency` takes its render mode from that.
     render_mode: StringProperty(default="OPAQUE")
+    #: The look, one of :data:`..transparency.MODES`, or empty for a texture
+    #: added before there was a choice - which keeps encoding exactly as it
+    #: did. Set by the import from the picture's own alpha, and by Set
+    #: Transparency.
+    transparency: StringProperty(default="")
     #: Which invisible bit the export flips to tell this texture apart from
     #: another that reduced to the same pixels; 0 for none. See
     #: :func:`..textures.nudge_texels`.
@@ -174,8 +197,30 @@ class DKR_ValidationEntry(bpy.types.PropertyGroup):
     objects: StringProperty(default="")
 
 
+def _redraw_views(context):
+    screen = getattr(context, "screen", None)
+    if screen is None:
+        return
+    for area in screen.areas:
+        if area.type == "VIEW_3D":
+            area.tag_redraw()
+
+
+def _redraw_update(self, context):
+    """An ``update`` for settings the viewport draws.
+
+    A named function defined above the class, never a lambda calling something
+    defined below it: Blender evaluates a class's deferred annotations against
+    the module's globals as they stood when the class was made, so a name
+    defined later is missing when the lambda finally runs.
+    """
+    _redraw_views(context)
+
+
 class DKR_SceneSettings(bpy.types.PropertyGroup):
     """Everything the sidebar needs to remember between clicks."""
+
+    waterfall_object: StringProperty(name="Waterfall", default="")
 
     source_path: StringProperty(
         name="Source",
@@ -360,6 +405,41 @@ class DKR_SceneSettings(bpy.types.PropertyGroup):
         default=False,
     )
 
+    # -- the race AI overlay ---------------------------------------------
+
+    show_ai_lines: BoolProperty(
+        name="Show Bot Lines",
+        description=(
+            "Draw the four lanes the computer racers drive: the game's own "
+            "spline through the checkpoints, moved by each lane's offsets. It "
+            "follows a checkpoint while you drag it"
+        ),
+        default=False,
+        update=_redraw_update,
+    )
+
+    ai_lines_on_top: BoolProperty(
+        name="Draw On Top",
+        description=(
+            "Draw the lanes through the track instead of behind it. The lanes "
+            "run at checkpoint height, which is usually at or under the road"
+        ),
+        default=True,
+        update=_redraw_update,
+    )
+
+    ai_line_vehicle: EnumProperty(
+        name="Vehicle",
+        description=(
+            "Whose line to show. Each vehicle's racers load their own set of "
+            "checkpoints, chosen in AI Racers > Checkpoint Sets"
+        ),
+        items=[(vehicle, label, "The line %s racers follow" % label.lower())
+               for vehicle, label in level_types.PLAYER_VEHICLES],
+        default="VEHICLE_CAR",
+        update=_redraw_update,
+    )
+
     # -- the texture browser ---------------------------------------------
     #
     # A track can draw with any texture the ROM holds, not only the ones its
@@ -418,6 +498,18 @@ class DKR_SceneSettings(bpy.types.PropertyGroup):
         default="KEEP",
     )
 
+    texture_transparency: EnumProperty(
+        name="Transparency",
+        description=(
+            "How the picture's alpha is used on the faces it is applied to. "
+            "The game decides from the texture's render mode and the faces' "
+            "cut-out flag, and draws see-through faces in a second pass - the "
+            "addon keeps both in step"
+        ),
+        items=transparency_items(auto=True),
+        default="AUTO",
+    )
+
     texture_scale: FloatProperty(
         name="Units Per Repeat",
         description=(
@@ -459,21 +551,189 @@ class DKR_SceneSettings(bpy.types.PropertyGroup):
         default="",
     )
 
+    show_wave_details: BoolProperty(
+        name="Wave Shape",
+        description="Show the two sine waves and the pattern the simulation "
+                    "adds up",
+        default=False,
+    )
+
     has_validated: BoolProperty(default=False)
     results: CollectionProperty(type=DKR_ValidationEntry)
+
+
+# ---------------------------------------------------------------------------
+# The race AI's header bytes
+# ---------------------------------------------------------------------------
+
+def _answer_key(pointer):
+    # Imported here, not at module scope: this module is registered first.
+    from .operators import header as header_ops  # noqa: PLC0415
+    return header_ops.key_for(pointer)
+
+
+def _bridge(pointer, name, description, maximum, soft_max=None):
+    """An int property whose value *is* the header answer for ``pointer``.
+
+    The answer stays a scene custom property, where the header form keeps all
+    of its answers, so the export, the inherited-header overlay and an import
+    see one source of truth. This only gives it a widget with a range and a
+    tooltip. Unanswered, it reads the surveyed default and writes nothing.
+    """
+    def get(self):
+        value = self.id_data.get(_answer_key(pointer))
+        if value is None:
+            value = race_ai.header_default(pointer)
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    def set(self, value):
+        self.id_data[_answer_key(pointer)] = int(value)
+
+    options = {"name": name, "description": description, "min": 0,
+               "max": maximum, "get": get, "set": set}
+    if soft_max is not None:
+        options["soft_max"] = soft_max
+    return IntProperty(**options)
+
+
+_SKILL_HELP = (
+    "0 Master always gets the start boost, 1 Expert gets it when the player "
+    "does, 2 Hard goes on the beep, 3 Medium and 4 Easy are 4 and 8 frames "
+    "late. Nothing after the start depends on it"
+)
+
+
+def _race_ai_properties():
+    found = {}
+    for adventure, adventure_label in race_ai.ADVENTURES:
+        for number, (slot, label, help_text) in enumerate(race_ai.AI_LEVEL_SLOTS):
+            found["%s_%d" % (adventure, number)] = _bridge(
+                race_ai.ai_level_pointer(adventure, slot),
+                "%s, %s" % (adventure_label, label),
+                "%s. Behaviour table 0 (easiest) to 9 (the one the Ultimate AI "
+                "cheat forces): target speed of the slowest and the leading "
+                "bot, %s" % (help_text, race_ai.describe_levels()),
+                race_ai.BEHAVIOUR_LEVELS - 1,
+            )
+    for index, character in enumerate(race_ai.CHARACTERS):
+        found["skill_%d" % index] = _bridge(
+            race_ai.skill_pointer(index), character,
+            "%s's start skill in single-player races, boss races and Taj's "
+            "challenges; with two or more players each bot draws Master to "
+            "Hard instead. %s" % (character, _SKILL_HELP),
+            255, soft_max=5,
+        )
+        found["trophy_%d" % index] = _bridge(
+            race_ai.skill_pointer(index, True), character,
+            "%s's start skill when this race is part of a trophy race. %s"
+            % (character, _SKILL_HELP),
+            255, soft_max=5,
+        )
+    for index, (_vehicle, label) in enumerate(level_types.PLAYER_VEHICLES):
+        found["set_%d" % index] = _bridge(
+            race_ai.vehicle_set_pointer(index), label,
+            "Which checkpoints a %s's racers load: the ones whose vehicleType "
+            "equals this. Retail gives the plane its own route this way"
+            % label.lower(),
+            255, soft_max=7,
+        )
+    return found
+
+
+class DKR_RaceAiSettings(bpy.types.PropertyGroup):
+    """The race AI's header bytes as properties the AI Racers panel can draw.
+
+    Built from :mod:`race_ai`'s descriptors rather than written out, so the
+    slots, the characters and their order cannot drift from the bytes.
+    """
+
+
+DKR_RaceAiSettings.__annotations__ = _race_ai_properties()
+
+
+# ---------------------------------------------------------------------------
+# The waves' header bytes
+# ---------------------------------------------------------------------------
+
+def _wave_default(pointer):
+    value = race_ai.header_default(pointer)
+    return 0 if value is None else value
+
+
+def _wave_bridge(field):
+    """A property whose value *is* the header answer for one wave byte.
+
+    The same arrangement as the race AI's: the answer is a scene custom
+    property, where the export and the inherited-header overlay read it, and
+    this only gives it a widget. A toggle is stored as the 0 or 1 the byte is.
+    """
+    pointer = field.pointer
+
+    def read(self):
+        value = self.id_data.get(_answer_key(pointer))
+        if value is None:
+            value = _wave_default(pointer)
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    if field.toggle:
+        def get(self):
+            return bool(read(self))
+
+        def set(self, value):
+            self.id_data[_answer_key(pointer)] = 1 if value else 0
+
+        return BoolProperty(name=field.label, description=field.help,
+                            get=get, set=set)
+
+    def set_int(self, value):
+        if pointer == "/waves/seed-size":
+            value = max(2, int(value) & ~1)
+        self.id_data[_answer_key(pointer)] = int(value)
+
+    return IntProperty(name=field.label, description=field.help,
+                       min=field.minimum, max=field.maximum,
+                       get=read, set=set_int)
+
+
+class DKR_WaterSettings(bpy.types.PropertyGroup):
+    """The header's wave bytes as properties the Water panel can draw.
+
+    Built from :data:`..water.HEADER_FIELDS`, so the panel cannot name a byte
+    the header does not have.
+    """
+
+
+DKR_WaterSettings.__annotations__ = {
+    field.name: _wave_bridge(field) for field in water.HEADER_FIELDS
+}
 
 
 CLASSES = (
     DKR_CustomTexture,
     DKR_ValidationEntry,
     DKR_SceneSettings,
+    DKR_RaceAiSettings,
+    DKR_WaterSettings,
 )
 
 
 def register_pointers():
+    from .operators.waterfall import DKR_ScrollSettings
+    bpy.types.Object.dkr_scroll = PointerProperty(type=DKR_ScrollSettings)
     bpy.types.Scene.dkr = PointerProperty(type=DKR_SceneSettings)
+    bpy.types.Scene.dkr_ai = PointerProperty(type=DKR_RaceAiSettings)
+    bpy.types.Scene.dkr_water = PointerProperty(type=DKR_WaterSettings)
 
 
 def unregister_pointers():
-    if hasattr(bpy.types.Scene, "dkr"):
-        del bpy.types.Scene.dkr
+    if hasattr(bpy.types.Object, "dkr_scroll"):
+        del bpy.types.Object.dkr_scroll
+    for name in ("dkr_water", "dkr_ai", "dkr"):
+        if hasattr(bpy.types.Scene, name):
+            delattr(bpy.types.Scene, name)

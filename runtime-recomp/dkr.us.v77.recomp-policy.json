@@ -81,6 +81,12 @@
   ],
   "functionHooks": [
     {
+      "function": "generate_track",
+      "beforeVram": "0x8002C0FC",
+      "text": "extern void dkr_custom_tracks_track_heap(uint8_t*, recomp_context*); dkr_custom_tracks_track_heap(rdram, ctx);",
+      "reason": "Inside generate_track, on the instruction after LEVEL_MODEL_MAX_SIZE is fully materialised into s5 (lui 0x0008 / ori 0x2A00 at 0x8002C0F4-0x8002C0F8). s5 feeds both the mempool_alloc_safe size in the delay slot at 0x8002C108 and the compressed blob's landing address at 0x8002C1C0, so one write enlarges the level model heap and keeps the payload at its tail. A .dkrmap track's collision arena can exceed the retail 0x82A00, which retail reports only through a stubbed rmonPrintf before writing past the heap over gCollisionCandidates; the hook applies a size measured from the payload at load_level_game's entry and leaves every retail level untouched."
+    },
+    {
       "function": "texrect_draw",
       "beforeVram": "0x80078AB8",
       "text": "extern void dkr_hud_rect_begin(uint8_t*, recomp_context*, int); dkr_hud_rect_begin(rdram, ctx, 0);",

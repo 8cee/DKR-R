@@ -49,7 +49,8 @@ from bpy.props import BoolProperty, StringProperty
 from bpy_extras.io_utils import ImportHelper
 
 from .. import (assets, level_model, level_model_encoder, level_model_layout,
-                prefs, rice_identity, scene, textures as texture_module)
+                prefs, rice_identity, scene, textures as texture_module,
+                transparency as looks)
 from . import custom_textures, geometry
 
 #: Where the marker lives, so both this module and the export's "meshes I cannot
@@ -184,7 +185,8 @@ def _polygon_uvs(mesh, polygon, stats):
     return uvs
 
 
-def read_source_mesh(obj, textures, own=None, borrowed=None, stats=None):
+def read_source_mesh(obj, textures, own=None, borrowed=None, stats=None,
+                     table_looks=None):
     """``(faces, positions, colours)`` for :func:`rebatch_segment`.
 
     Quads are fanned into triangles rather than refused, for the same reason the
@@ -198,7 +200,12 @@ def read_source_mesh(obj, textures, own=None, borrowed=None, stats=None):
     is filled with what the UVs needed: ``uv_rescued`` faces whose mapping was
     in a map other than the active one, ``uv_unmapped`` textured faces with no
     mapping anywhere, and ``uv_clamped`` faces too wide for the s16 a UV is.
+
+    ``table_looks`` is :func:`table_looks`: for each entry whose texture is
+    known, the look its faces take and whether the game draws it see-through,
+    which together decide the cut-out bit and the pass each face is drawn in.
     """
+    table_looks = table_looks or {}
     mesh = obj.data
     matrix = obj.matrix_world
     borrowed = len(textures) if borrowed is None else int(borrowed)
@@ -219,7 +226,7 @@ def read_source_mesh(obj, textures, own=None, borrowed=None, stats=None):
                 )
         positions.append(rounded)
 
-    colours = _read_colours(mesh)
+    colours = _read_colours(mesh, stats)
 
     faces = []
     for polygon in mesh.polygons:
@@ -227,8 +234,14 @@ def read_source_mesh(obj, textures, own=None, borrowed=None, stats=None):
                     if polygon.material_index < len(mesh.materials) else None)
         index = _texture_for(material, polygon.material_index, borrowed, own)
         texture = textures[index] if 0 <= index < len(textures) else None
+        flags = _flags_for(material)
+        opaque = True
+        if index in table_looks:
+            look, translucent = table_looks[index]
+            flags = looks.with_mode(flags, look)
+            opaque = looks.draws_in_opaque_pass(flags, translucent)
         key = level_model_layout.BatchKey(
-            index, _flags_for(material), 0, 0, 0, True, None,
+            index, flags, 0, 0, 0, opaque, None,
         )
         mapping = _polygon_uvs(mesh, polygon, stats)
         if texture is not None and (mapping is None or _flat(mapping)):
@@ -252,15 +265,70 @@ def read_source_mesh(obj, textures, own=None, borrowed=None, stats=None):
     return faces, positions, colours
 
 
-def _read_colours(mesh) -> list:
+def table_looks(textures, tree=None, own=()) -> dict:
+    """``{table index: (look, see-through)}`` for the entries whose texture is known.
+
+    A picture the mesh brought takes the look its alpha asked for; one of the
+    ROM's takes the one it was made with.
+    """
+    found = {}
+    for index, reference in enumerate(textures):
+        texture = geometry.texture_object(reference.texture_id, tree, own)
+        if texture is not None:
+            found[index] = (texture.transparency, bool(texture.translucent))
+    return found
+
+
+def _written(layer) -> bool:
+    """True when this colour layer carries anything usable as lighting.
+
+    An all-zero layer is not something Blender produces: measured on 5.2, a new
+    colour attribute starts **white** in every domain and storage type, and
+    painting writes an opaque alpha. What does produce one is carrying a model
+    whose vertices are already black through a mesh and back, which is exactly
+    the case that needs catching.
+
+    Alpha is part of the test, and it is what keeps a deliberate black: black
+    painted on purpose has alpha 1, while an all-zero layer is also fully
+    transparent, which is not lighting anyone asked for.
+    """
+    try:
+        values = [0.0] * (len(layer.data) * 4)
+        layer.data.foreach_get("color", values)
+    except (RuntimeError, TypeError):
+        return False
+    return any(values)
+
+
+def _read_colours(mesh, stats=None) -> list:
     """The baked lighting, white where the author painted none.
 
     White rather than black: the colours are multiplied into the texture, so
     black would render the whole track unlit and look like a broken import.
+
+    A layer counts as lighting only if it carries something - see
+    :func:`_written`. An all-zero layer used to defeat this fallback, because
+    the fallback tested only whether a layer existed, and the track it produced
+    was black everywhere with no diagnostic anywhere. Painting black on purpose
+    still reaches the file.
     """
     white = (255, 255, 255, 255)
+    stats = {} if stats is None else stats
     layer = mesh.color_attributes.get(geometry.COLOUR_ATTRIBUTE)
-    if layer is None or layer.domain != "POINT":
+    if layer is not None and layer.domain != "POINT":
+        stats["colour_domain"] = layer.domain
+        layer = None
+    if layer is not None and not _written(layer):
+        stats["colour_pristine"] = layer.name
+        layer = None
+    if layer is None:
+        # Name the layers that do carry paint. Which of them the author meant
+        # is theirs to say - choosing here would swap one silent guess for
+        # another - so this only reports what is there.
+        stats["colour_elsewhere"] = sorted(
+            other.name for other in mesh.color_attributes
+            if other.name != geometry.COLOUR_ATTRIBUTE and _written(other)
+        )
         return [white] * len(mesh.vertices)
 
     values = [0.0] * (len(layer.data) * 4)
@@ -625,6 +693,14 @@ def build_track(operator, context, obj, textures, keep_source, donor=None,
     refused conversion leaves the scene holding what it held before.
     """
     context.view_layer.update()
+    # A scene moved without the folder beside it has lost the PNGs its own
+    # textures are drawn and exported from. The materials rebuilt below are
+    # reused by table entry, and a conversion can renumber the table, so each
+    # picture has to be loadable again before they are.
+    restored, lost = custom_textures.restore_missing(context)
+    for level, message in custom_textures.restoration_reports(
+            context, restored, lost):
+        operator.report(level, message)
     borrowed = len(textures)
     adopted = None
     if keep_textures:
@@ -642,10 +718,13 @@ def build_track(operator, context, obj, textures, keep_source, donor=None,
         return {"CANCELLED"}
 
     stats = {}
+    tree = (assets.AssetTree.find(donor) if donor else None) or prefs.resolve(context)
     try:
         faces, positions, colours = read_source_mesh(
             obj, textures, own=adopted.own if adopted else None,
             borrowed=borrowed, stats=stats,
+            table_looks=table_looks(textures, tree,
+                                    custom_textures.entries(context)),
         )
     except ValueError as error:
         return refuse(str(error))
@@ -689,7 +768,6 @@ def build_track(operator, context, obj, textures, keep_source, donor=None,
         if geometry.PROP_GEOMETRY in existing:
             bpy.data.objects.remove(existing, do_unlink=True)
     collection = geometry._geometry_collection(context)
-    tree = (assets.AssetTree.find(donor) if donor else None) or prefs.resolve(context)
     built, _stats = geometry._build_geometry(
         stem, model, collection, tree, include_hidden=True,
         own=custom_textures.entries(context),
@@ -756,6 +834,32 @@ def _texture_warnings(adopted, stats, uv_layers) -> list:
             "single texel of its texture. Unwrap them, or select them and use "
             "Project Flat in the Textures panel" % stats["uv_unmapped"]
         )
+    # Saying so is the point. The track still builds, and a white track looks
+    # plausible enough that an author can ship it without ever learning that
+    # the lighting they painted is not in it.
+    if stats.get("colour_pristine") or stats.get("colour_domain"):
+        if stats.get("colour_pristine"):
+            reason = ("the '%s' colour layer has never been painted"
+                      % stats["colour_pristine"])
+        else:
+            reason = ("the '%s' colour layer is on the %s domain, and the "
+                      "baked lighting is read from Vertex"
+                      % (geometry.COLOUR_ATTRIBUTE,
+                         str(stats["colour_domain"]).title()))
+        message = (
+            "%s, so the track was built with white lighting. Vertex colour is "
+            "multiplied into the texture, so this is what keeps a track from "
+            "being drawn black" % reason
+        )
+        elsewhere = stats.get("colour_elsewhere") or []
+        if elsewhere:
+            message += (
+                ". This mesh does carry paint in %s - convert it to the Vertex "
+                "domain and name it '%s' to use it instead"
+                % (", ".join("'%s'" % name for name in elsewhere),
+                   geometry.COLOUR_ATTRIBUTE)
+            )
+        messages.append(message)
     if stats.get("uv_clamped"):
         messages.append(
             "%d face(s) stretch their texture across more repeats than the s16 "

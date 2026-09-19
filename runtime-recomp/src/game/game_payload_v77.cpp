@@ -64,6 +64,14 @@ const dkr::runtime::GamePayload& dkr::runtime::payload_v77() {
         .sound_bank_play = sndp_play_with_priority,
         .sound_parameter = sndp_set_param,
         .sound_spatial_point = audspat_point_create,
+        .titlescreen_controller_assign = titlescreen_controller_assign,
+        .input_assign_players = input_assign_players,
+        .charselect_assign_ai = charselect_assign_ai,
+        .init_racer_headers = init_racer_headers,
+        .leveltable_vehicle_default = leveltable_vehicle_default,
+        .leveltable_vehicle_usable = leveltable_vehicle_usable,
+        .set_level_default_vehicle = set_level_default_vehicle,
+        .set_time_trial_enabled = set_time_trial_enabled,
         .register_sections = RegisterSectionsV77,
     };
     return payload;

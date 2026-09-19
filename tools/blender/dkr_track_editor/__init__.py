@@ -38,7 +38,8 @@ def _module_classes():
     from . import prefs, props
     from .operators import (ai, checks, custom_textures, edit, geometry,
                             header, io_objects, level_type, new_track, pack,
-                            placeholders, skybox, start_grid, textures)
+                            placeholders, race_ai, skybox, start_grid, textures,
+                            water, waterfall)
     from .ui import panels
 
     classes = []
@@ -52,8 +53,11 @@ def _module_classes():
     classes += list(geometry.CLASSES)
     classes += list(textures.CLASSES)
     classes += list(custom_textures.CLASSES)
+    classes += list(water.CLASSES)
+    classes += list(waterfall.CLASSES)
     classes += list(edit.CLASSES)
     classes += list(ai.CLASSES)
+    classes += list(race_ai.CLASSES)
     classes += list(checks.CLASSES)
     classes += list(header.CLASSES)
     classes += list(new_track.CLASSES)
@@ -91,11 +95,24 @@ def register():
     bpy.types.TOPBAR_MT_file_import.append(_menu_import)
     bpy.types.TOPBAR_MT_file_export.append(_menu_export)
 
+    # The bot lines are a draw handler, not a registered class, so the class
+    # loop does not undo them; unregister removes the handler itself.
+    from .operators import race_ai
+
+    race_ai.register_overlay()
+
 
 def unregister():
     import bpy
 
     from . import props
+
+    try:
+        from .operators import race_ai
+
+        race_ai.unregister_overlay()
+    except Exception:  # noqa: BLE001 - unregistering must not fail
+        pass
 
     bpy.types.TOPBAR_MT_file_export.remove(_menu_export)
     bpy.types.TOPBAR_MT_file_import.remove(_menu_import)

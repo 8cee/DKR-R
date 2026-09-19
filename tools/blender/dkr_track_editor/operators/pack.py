@@ -10,7 +10,8 @@ import bpy
 from bpy.props import BoolProperty, StringProperty
 from bpy_extras.io_utils import ExportHelper
 
-from .. import catalog as catalog_module, dkrmap, level_types, prefs, scene, validate
+from .. import (catalog as catalog_module, dkrmap, level_types, prefs, scene,
+                validate, water)
 from . import geometry_export
 
 
@@ -56,6 +57,8 @@ class DKR_OT_export_dkrmap(bpy.types.Operator, ExportHelper):
 
         if self.validate_first:
             report = validate.validate(object_map, catalog, level_key=key)
+            from . import waterfall
+            report = validate.Report(list(report) + waterfall.issues(context))
             if report.errors:
                 self.report(
                     {"ERROR"},
@@ -127,10 +130,8 @@ class DKR_OT_export_dkrmap(bpy.types.Operator, ExportHelper):
                     "the level-object translation table was unavailable"
                 )
 
-            # The header comes from the track being remixed, so the geometry
-            # and world stay whatever the base track had - except what the
-            # Level Type owns, which the import filled from this same header,
-            # so an untouched remix writes it back unchanged.
+            # A remix keeps the base geometry and overlays the author's
+            # settings. Its world defaults to the Custom Tracks category.
             from .. import level_header_template as template  # noqa: PLC0415
             from . import header as header_ops  # noqa: PLC0415
             base = _base_header(context, tree)
@@ -139,6 +140,8 @@ class DKR_OT_export_dkrmap(bpy.types.Operator, ExportHelper):
                 template.apply_overrides(base, header_ops.inherited_overrides(context))
             else:
                 base = _authored_header(context)
+            if base is not None and geometry_has_waves(context):
+                _check_wave_header(self, base, tree)
             if base is not None:
                 header = package.encode_header(
                     base, catalog.raw.get("enumValues", {}),
@@ -264,13 +267,32 @@ def _encode_textures(operator, context, package):
     if not own:
         return [], []
 
+    # A scene moved without the folder beside it still has the pictures its
+    # textures were made from, packed in the .blend, so it rebuilds them.
+    restored, lost = custom_textures.restore_missing(context)
+    if restored:
+        own = custom_textures.entries(context)
+        geometry_ops.show_own_pictures(context)
+        package.notes.append(
+            "%d texture(s) of this track's own were missing beside the .blend "
+            "and were rebuilt from the pictures they were made from: %s"
+            % (len(restored), ", ".join(restored))
+        )
+        for level, message in custom_textures.restoration_reports(
+                context, restored, []):
+            operator.report(level, message)
+
     missing = [entry.name for entry in own
                if not entry.png or not os.path.isfile(entry.png)]
     if missing:
+        reasons = dict(lost)
         raise dkrmap.DkrMapError(
-            "the resampled image for %s is gone from %s. The .blend records "
-            "where it was, not the picture itself, so add it again"
-            % (", ".join(missing), custom_textures.folder(context))
+            "the resampled image for %s is gone from %s and could not be "
+            "rebuilt (%s). The .blend records where it was, not the picture "
+            "itself: put the folder back beside the .blend, or add it again"
+            % (", ".join(missing), custom_textures.folder(context),
+               "; ".join(reasons.get(name, "no reason given")
+                         for name in missing[:4]))
         )
 
     separated = _separate_identical(context, own)
@@ -386,7 +408,7 @@ def _write_hd_pack(operator, context, package, own, payloads) -> str:
         if problem:
             left_out.append((entry.name, problem))
             continue
-        chosen.append((identity, original, entry))
+        chosen.append((identity, _hd_picture(operator, entry, original), entry))
 
     for name, reason in left_out[:3]:
         operator.report({"WARNING"},
@@ -443,6 +465,108 @@ def _write_hd_pack(operator, context, package, own, payloads) -> str:
         )
     return "%s with %d HD texture(s)" % (os.path.basename(target),
                                           written["count"])
+
+
+#: Pictures past this many pixels are hardened but not bled: spreading colour
+#: takes a few full-size float copies, and a pack of photographs would spend
+#: gigabytes on it.
+_BLEED_PIXELS = 8 * 1024 * 1024
+
+
+def _hd_picture(operator, entry, original) -> str:
+    """The file the pack carries for one texture: the original, or a cut-out of it.
+
+    A cut-out is drawn by RT64 with the render mode the console uses,
+    ``G_RM_AA_ZB_TEX_EDGE``, and RT64 turns that into a discard below an eighth
+    of alpha - where the console, reading the texture the export hardened at
+    half, cuts at half. A soft-edged original would draw a fatter shape in HD
+    than in the 64x32 and in Blender. So a cut-out's original is hardened at
+    the same half, with colour spread into its holes as the reduction's is, and
+    the copy goes in the pack. Nothing else about the original changes, and a
+    blended or opaque texture's goes in as it is.
+    """
+    from .. import transparency as looks  # noqa: PLC0415
+
+    if entry.mode != looks.CUTOUT:
+        return original
+    try:
+        return _harden_copy(original, entry.ordinal)
+    except Exception as error:  # noqa: BLE001 - HD is never worth failing over
+        traceback.print_exc()
+        operator.report({"WARNING"},
+                        "the HD copy of %s keeps its soft alpha: %s"
+                        % (entry.name, error))
+        return original
+
+
+def _harden_copy(path, ordinal) -> str:
+    import numpy  # noqa: PLC0415 - Blender ships it
+
+    from .. import transparency as looks  # noqa: PLC0415
+
+    image = bpy.data.images.load(path, check_existing=False)
+    try:
+        width, height = image.size
+        if width <= 0 or height <= 0 or image.channels < 4:
+            return path
+        try:
+            image.colorspace_settings.name = "Non-Color"
+        except (AttributeError, TypeError):
+            pass
+        pixels = numpy.empty(width * height * 4, dtype=numpy.float32)
+        image.pixels.foreach_get(pixels)
+    finally:
+        bpy.data.images.remove(image)
+
+    pixels = pixels.reshape(height, width, 4)
+    solid = pixels[:, :, 3] >= (looks.HARD_THRESHOLD - 0.5) / 255.0
+    if solid.all():
+        return path
+    pixels[:, :, 3] = solid
+    if width * height <= _BLEED_PIXELS and solid.any():
+        _bleed(numpy, pixels, solid)
+
+    target = os.path.join(bpy.app.tempdir or os.path.dirname(path),
+                          "dkr-hd-cutout-%d-%s" % (ordinal, os.path.basename(path)))
+    copy = bpy.data.images.new("dkr-hd-cutout", width, height, alpha=True)
+    try:
+        try:
+            copy.colorspace_settings.name = "Non-Color"
+        except (AttributeError, TypeError):
+            pass
+        copy.pixels.foreach_set(pixels.ravel())
+        copy.file_format = "PNG"
+        copy.filepath_raw = target
+        copy.save()
+    finally:
+        bpy.data.images.remove(copy)
+    return target
+
+
+def _bleed(numpy, pixels, solid, passes=6):
+    """Spread visible colour into the holes, as :func:`..transparency.bleed` does.
+
+    Each pass averages the colour of the solid texels in a 3x3 neighbourhood,
+    wrapping, and hands it to the holes that have any - a ring a pass.
+    """
+    known = solid.copy()
+    for _each in range(passes):
+        if known.all():
+            break
+        weight = known.astype(numpy.float32)
+        total = numpy.zeros(pixels.shape[:2] + (3,), dtype=numpy.float32)
+        count = numpy.zeros(pixels.shape[:2], dtype=numpy.float32)
+        coloured = pixels[:, :, :3] * weight[:, :, None]
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if dx or dy:
+                    total += numpy.roll(coloured, (dy, dx), axis=(0, 1))
+                    count += numpy.roll(weight, (dy, dx), axis=(0, 1))
+        reached = (~known) & (count > 0)
+        if not reached.any():
+            break
+        pixels[reached, :3] = total[reached] / count[reached][:, None]
+        known |= reached
 
 
 def _encode_geometry(operator, context, package):
@@ -557,10 +681,8 @@ def _authored_header(context):
 
     Returns ``None`` when the author has answered nothing, which leaves the
     package exactly as it was before this existed - no header, and the warning
-    that says so. A partial answer is refused rather than filled in, because
-    the two fields with no default are world and race type, and zero is a real
-    world and a real race type: a track that never answered would not fail, it
-    would quietly become a Central Area default race.
+    that says so. A partial answer is refused because the race type has no
+    default: encoding an unanswered type as zero would silently make a race.
     """
     from . import header as header_ops
     from .. import level_header_template as template
@@ -570,6 +692,12 @@ def _authored_header(context):
     if not header_ops.overrides(context):
         return None
     overrides = header_ops.effective_overrides(context)
+    # The one wave byte the template cannot default, because it names an
+    # asset. Without it the header says -1 and the waves load texture 0xFFFF.
+    if geometry_has_waves(context) and water.DETAIL_POINTER not in overrides:
+        detail = template.asset_defaults().get(water.DETAIL_POINTER)
+        if detail:
+            overrides[water.DETAIL_POINTER] = detail
 
     outstanding = template.missing(overrides)
     if outstanding:
@@ -582,6 +710,44 @@ def _authored_header(context):
             % (len(outstanding), ", ".join(outstanding))
         )
     return template.document(overrides)
+
+
+def geometry_has_waves(context) -> bool:
+    """Whether the track geometry holds wave water, read off the mesh."""
+    from . import geometry as geometry_ops  # noqa: PLC0415
+
+    for obj in geometry_ops.geometry_objects(context):
+        attribute = obj.data.attributes.get(geometry_ops.ATTR_FLAGS)
+        if attribute is None:
+            continue
+        values = [0] * len(attribute.data)
+        attribute.data.foreach_get("value", values)
+        if any(water.is_wavy(geometry_ops.to_unsigned32(v)) for v in values):
+            return True
+    return False
+
+
+def _check_wave_header(operator, header, tree):
+    """Say what in the header would stop the waves, before it ships."""
+    from .. import level_header_template as template  # noqa: PLC0415
+
+    values = {pointer: template.lookup(header, pointer)
+              for pointer in water.HEADER_POINTERS}
+    values = {k: v for k, v in values.items() if isinstance(v, int)}
+    for problem in water.header_problems(values):
+        operator.report({"WARNING"}, "waves: %s" % problem)
+    detail = template.lookup(header, water.DETAIL_POINTER)
+    if detail in (None, "", -1):
+        operator.report(
+            {"WARNING"},
+            "waves: the header names no wave detail texture, and the game "
+            "would load texture 0xFFFF for it. Set the decomp asset path so "
+            "%s can be named" % water.DETAIL_TEXTURE)
+    elif tree is None:
+        operator.report(
+            {"WARNING"},
+            "waves: the wave detail texture %s can only be written with the "
+            "decomp assets configured" % detail)
 
 
 def _base_header(context, tree):

@@ -455,6 +455,9 @@ if(DKR_RUNTIME_BUILD_GENERATED)
     endif()
     set(DKR_GAME_SOURCES
         src/game/audio_equalizer.cpp
+        # The policy's asset hooks call into these with or without RT64; the
+        # table logic itself is DKRCustomTracksCore, via DKRLegacyModLaunch.
+        src/game/custom_tracks_hooks.cpp
         src/game/dkr_save_codec.cpp
         src/game/game_payload.cpp
         src/game/game_main.cpp
@@ -491,12 +494,11 @@ if(DKR_RUNTIME_BUILD_GENERATED)
     endif()
     if(DKR_RUNTIME_BUILD_RT64)
         list(APPEND DKR_GAME_SOURCES
-            src/game/custom_tracks.cpp
-            src/game/custom_tracks_hooks.cpp
             src/game/hud_basic_settings.cpp
             src/game/f3ddkr_rt64.cpp
             src/game/generated/jumpman_font.c
             src/game/generated/racing_banana_font.c
+            src/game/generated/selawik_font.c
             src/game/rt64_renderer.cpp
             src/game/runtime_crt_overlay.cpp
             src/game/runtime_rice_texture_import.cpp
@@ -1064,6 +1066,7 @@ if(BUILD_TESTING)
 
         add_executable(DKRHudEditorTests tests/hud_basic_settings_tests.cpp
             src/game/generated/racing_banana_font.c src/game/generated/jumpman_font.c
+            src/game/generated/selawik_font.c
             "${DKR_RT64_SOURCE}/src/contrib/imgui/backends/imgui_impl_sdlrenderer2.cpp")
         target_include_directories(DKRHudEditorTests PRIVATE
             "${CMAKE_CURRENT_LIST_DIR}/src/game"
@@ -1303,6 +1306,18 @@ if(BUILD_TESTING)
             "${DKR_RT64_SOURCE}/src/contrib"
         )
         add_test(NAME DKRCustomTracks COMMAND DKRCustomTracksTests)
+        add_executable(DKRCustomTracksRuntimeTests
+            tests/custom_tracks_runtime_tests.cpp
+            src/game/custom_tracks_hooks.cpp
+            src/game/custom_tracks.cpp
+            "${DKR_RT64_SOURCE}/src/contrib/miniz/miniz.c"
+        )
+        target_include_directories(DKRCustomTracksRuntimeTests PRIVATE
+            "${CMAKE_CURRENT_LIST_DIR}/src/game"
+            "${DKR_RT64_SOURCE}/src/contrib"
+            "${DKRPORT_ROOT}/extern/n64-modern-runtime/N64Recomp/include"
+        )
+        add_test(NAME DKRCustomTracksRuntime COMMAND DKRCustomTracksRuntimeTests)
         add_executable(DKRCustomTracksGuestTests
             tests/custom_tracks_guest_tests.cpp
             src/game/custom_tracks.cpp src/game/custom_tracks_hooks.cpp
@@ -1484,7 +1499,7 @@ if(BUILD_TESTING)
         DKRDeterminismStateHash80Tests
     )
     if(DKR_RUNTIME_BUILD_RT64)
-        list(APPEND DKR_ASSERT_TEST_TARGETS DKRCustomTracksTests DKRCustomTracksGuestTests)
+        list(APPEND DKR_ASSERT_TEST_TARGETS DKRCustomTracksTests DKRCustomTracksRuntimeTests DKRCustomTracksGuestTests)
     endif()
     foreach(DKR_ASSERT_TEST_TARGET IN LISTS DKR_ASSERT_TEST_TARGETS)
         if(MSVC)

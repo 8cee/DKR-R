@@ -47,12 +47,14 @@ class DKR_OT_validate(bpy.types.Operator):
         key = level_types.current_key(settings)
         try:
             catalog = catalog_module.load()
-            object_map = scene.export_object_map(context, catalog)
+            object_map = scene.export_object_map(context, catalog, resolve_scroll=False)
             report = validate.validate(
                 object_map, catalog, level_key=key or level_types.NONE,
             )
             if key:
                 report = validate.Report(list(report) + grid_issues(context, key))
+            from . import waterfall
+            report = validate.Report(list(report) + waterfall.issues(context))
         except Exception as error:  # noqa: BLE001
             traceback.print_exc()
             self.report({"ERROR"}, "validation failed: %s" % error)

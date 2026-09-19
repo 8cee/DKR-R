@@ -81,6 +81,12 @@
   ],
   "functionHooks": [
     {
+      "function": "generate_track",
+      "beforeVram": "0x8002C13C",
+      "text": "extern void dkr_custom_tracks_track_heap(uint8_t*, recomp_context*); dkr_custom_tracks_track_heap(rdram, ctx);",
+      "reason": "The same instruction in generate_track for this revision, at the identical offset from the function's start (0x8002C104 + 0x38); the prologue is instruction-for-instruction the same as US v1.0's. The hook refuses to write unless s5 already holds the retail 0x82A00, so a prologue that differs keeps the retail heap instead."
+    },
+    {
       "function": "texrect_draw",
       "beforeVram": "0x80078F08",
       "text": "extern void dkr_hud_rect_begin(uint8_t*, recomp_context*, int); dkr_hud_rect_begin(rdram, ctx, 0);",

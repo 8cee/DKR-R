@@ -135,8 +135,8 @@ table. The hook runs at its epilogue, and when the request was
 `mempool_alloc_safe`, writes `build_extended_table()` into it, and replaces the
 return value in `context->r2`.
 
-The retail allocation is left to the memory pool. Only two call sites exist,
-both once per level load, so the discarded buffer is not a live leak.
+The retail allocation is released through `mempool_free` once the extended
+copy has replaced it, since callers free only the pointer they were given.
 
 ### 2. Route custom offsets away from the ROM
 
@@ -162,6 +162,159 @@ generated disassembly; every other address above comes from the matching
 decomp symbol file. The v1.1 policy is produced by
 `scripts/generate_revision_policy.py` and is never hand-authored.
 
+## Alongside legacy mods
+
+DKR-R also imports legacy mods from `.xdelta` patches: extra courses and up to
+two custom characters (`src/game/mods/`, `docs/LEGACY-MODS-BETA.md`). They
+answer the same asset calls, so the two systems are composed rather than
+stacked.
+
+**One entry hook, legacy first.** `scripts/compose_legacy_mod_policy.py` puts
+the legacy asset bus at the entry of `asset_table_load` and `asset_load`. The
+`.dkrmap` recorder is already there, so the composer merges the two into one
+hook instead of refusing the address: the legacy call returns early when a
+mounted bank served the request, and otherwise the `.dkrmap` recorder runs and
+the retail path continues to its epilogue as before. A mounted request never
+reaches that epilogue, so `dkr_legacy_asset_api` does the `.dkrmap` work itself:
+
+- a level table (sections 20, 22, 24, 26) is extended after the mount copied it,
+  and the mount's allocation is released like the retail one;
+- a read at a `.dkrmap` offset is served before the mount sees it
+  (`dkr_custom_tracks_asset_load_override`), because a mounted section refuses
+  any read past its end. The header fixups still run.
+
+**One texture namespace.** A mod session appends custom characters' textures to
+the 3D texture table at boot, and the table's allocation is fixed from then on:
+every scene rewrites it in place. `.dkrmap` artwork therefore cannot be added
+by the table hook in a mod session. `prepare_mod_launch` instead builds the
+`.dkrmap` texture table against the character-augmented boot table
+(`publish_dkrmap_artwork`) and appends the textures to the boot bank and to
+every scene bank with `AssetBank::append_textures`. They get the IDs
+`build_extended_table` wrote into the level models: characters first, then
+`.dkrmap` artwork in scan order. Section 3 and section 2 skip the `.dkrmap`
+hooks in a mounted session, since the bank already holds them.
+`legacy_dkrmap_artwork_tests.cpp` checks this against an owned ROM. Without
+legacy mods nothing changes: no session exists and the table hook publishes the
+artwork as before.
+
+The artwork is not part of the mod session's identity. That identity names the
+separate modded save folder, and re-exporting a track must not strand the
+player's modded Adventure progress.
+
+**Scenes and selection.** A legacy course is a scene published at `level_load`
+for the carrier level it borrows. A `.dkrmap` level is never a carrier
+(`custom_tracks::owns_level_id`), so loading one always publishes the original
+scene, even with a legacy request pending. Confirming a course in Track Select
+(`trackmenu_assets(TRACKMENU_TYPE_LOAD_LEVEL)`) disarms Track Lab, with or
+without legacy courses installed, so the player's choice is what loads. Auto
+boot and the L+Z restart never pass through that confirmation and keep
+reloading the armed track.
+
+Track Lab is a section of **MODS / HACKS**. It lists the tracks in the
+author's working folder; installed tracks appear beside the legacy courses in
+**My mods**, marked **DKR**.
+
+**Test-race setup.** Auto boot prepares a single-player Tracks race as Diddy,
+fills the opponents through the native unlock-dependent character selection,
+and commits all eight racer headers before entering the track. Skipping the
+menus must not skip that initialization: zeroed racer characters are Krunch.
+At the existing `level_load` scene-reset hook, gameplay on the armed track
+uses the addon's exported default vehicle and synchronizes the player vehicle
+selections read by the AI. This applies again on L+Z and track changes, without
+rerolling the roster on restart. Menu previews and disarmed Track Select keep
+their native choices. Special debug vehicles remain load arguments; the
+three-entry player selection arrays use an allowed normal vehicle. Authored
+setup-point overrides and boss-specific spawning still run in the native code.
+
+**Memory.** Retail DKR sizes its main pool (`mmInit`) to the 4 MB console,
+about 2.96 MB of allocations. A `.dkrmap` race can need more: a 75-texture
+track (each picture a 64x32 RGBA16, ~4 KB) with eight different hovercraft
+racers peaks at 3.01 MB, and the next allocation returned NULL and crashed in
+`init_triangle_particle_model`. The runtime maps 8 MB, and nothing else uses
+the upper 4 MB. So the same `level_load` hook grows the main pool's tail slot
+to `0x80800000` the first time a `.dkrmap` level loads. The pool never
+shrinks, and the allocator code is unchanged. Retail and legacy levels never
+trigger the growth; the log shows
+`main memory pool grown into expansion RAM` when it happens. `load_level_game`'s
+entry hook does the same growth first, because it runs before the display-list
+heap is allocated.
+
+**The level model heap.** A bigger pool is not a bigger *level model*. That is a
+separate reservation: `generate_track` asks for `LEVEL_MODEL_MAX_SIZE`
+(`0x82A00`, 535,040 bytes) in one allocation and builds the whole model inside
+it — the inflated blob, then per segment two bytes a triangle, sixteen bytes per
+collision plane and two per wave batch. Collision dominates. Bluey, retail's
+largest, lands near 80% of it with a fraction of the triangles an exported track
+carries, and a `.dkrmap` race can exceed it honestly.
+
+Retail does not refuse when it does. It compares the total, reports it through
+`rmonPrintf` — stubbed in this build, so nothing is printed — and writes past
+the heap anyway, straight over `gCollisionCandidates`, `gCollisionSurfaces` and
+the pool's slot list behind them. The symptom is a wild pointer or a rejected
+display-list opcode some frames later, never the overflow itself.
+
+So the arena is measured before the load and the reservation sized to fit.
+`custom_tracks::measure_level_model_arena` walks the payload exactly as
+`track_init_collision` does, including the edge planes a neighbouring pair
+shares, and the `level_load` entry hook leaves the result for a hook inside
+`generate_track`. It has to be `level_load`: Track Select previews load through
+`load_level_for_menu`, never `load_level_game`, and a preview that kept the
+retail heap overflowed it and crashed in `obj_loop_texscroll` on a wild
+texture pointer. That hook writes `s5`, the register holding the constant, at
+the one instruction where it is complete and before anything has read it:
+
+```
+8002c0f4  lui   s5, 0x0008
+8002c0f8  ori   s5, s5, 0x2a00    <- the hook runs after this
+8002c104  jal   mempool_alloc_safe
+8002c108  or    a0, s5, zero      <- delay slot: the size asked for
+8002c1c0  addu  t6, s0, s5        <- where the compressed blob is landed
+```
+
+One write therefore enlarges the reservation *and* keeps the compressed payload
+at the tail of the larger heap, which is what guarantees the inflate cannot
+overrun its own source. US Rev A's prologue is instruction-for-instruction the
+same, forty-eight bytes further on. The hook refuses to write unless `s5`
+already holds the retail constant, so a revision that differs keeps the retail
+heap rather than having a misread register overwritten, and every retail level
+keeps it byte for byte. The log shows `builds ... over the retail ...` when it measures and `track heap raised from ... to ... bytes` when the hook applies it.
+
+Two ceilings remain, and no larger heap lifts either. A collision plane index is
+packed as `index | 0x8000` when a pair shares one, so a segment cannot build
+more than 32,767 planes — roughly 11,000 collidable triangles. And `collision.c`
+considers ten segments at a time whatever the track's size. The runtime reserves
+at most 2 MB for a level model and says so in the log when a track needs more
+than that; past there the only fix is fewer collidable triangles or less
+geometry.
+
+**Display lists.** `alloc_displaylist_heap` sizes each frame's list from
+`gNumF3dCmdsPerPlayer` (4500 commands for one player), and the matrix heap
+starts right after it. `render_level_segment` spends 3 to 10 commands on every
+visible batch. A 68-segment export has 1214 batches and a PVS with every bit
+set, so driving it reached 5613 commands. The list then ran into that frame's
+matrices, F3DDKR rejected the garbage opcodes, and RT64 crashed in a `memmove`.
+At `load_level_game`'s entry the runtime inflates the track's own model and
+counts its batches. It then sets each table entry to retail +
+`batches x 10 x viewports`, capped at 0x20000 commands. Any other level gets the
+retail table back. When the table changes, the hook invalidates
+`gPrevPlayerCount`, so the retail allocator rebuilds the heap in that same call.
+The log shows
+`level N draws up to B batches; display lists sized for C commands`. A track
+that ships no model of its own keeps the retail budget.
+
+Track Select previews draw into the menu's one-player list, and their path
+cannot resize it: the preview often loads on thread30 while the menu is still
+drawing. So the runtime sizes it at boot. `level_global_init` loads the header
+table, which publishes each course's level ID, just before
+`default_alloc_displaylist_heap` first allocates the lists. At that point the
+runtime takes the largest batch count among the `.dkrmap` courses Track Select
+offers. It grows the pool and raises every table entry to at least that
+course's one-player budget. Later loads keep that floor, so the heap a race
+leaves for the menu can still draw every preview. The log shows
+`Track Select previews draw up to B batches`. A course enabled after boot that
+needs more is named in the log at preview time; restart the game to size the
+lists for it.
+
 ## Verified end to end
 
 A smoke test installed one track whose payload is a byte copy of Ancient
@@ -179,8 +332,27 @@ counts, and the decomp extracts exactly 65 level header files. The second line
 repeats once per `asset_table_load` call, which is once at level table init and
 again for each level load.
 
-What this does *not* yet prove: nothing navigates to the added index. The table
-grows, but a menu entry or a hub door still has to point at it.
+The Blender addon defaults new tracks and remixes to `WORLD_CUSTOM_TRACKS`
+(header world byte `6`). Enabled normal races in that category appear beside
+legacy courses under **CUSTOM TRACKS** in the offline Track Select menu, even
+when no legacy courses are enabled. Preview and race loads use each `.dkrmap`'s
+appended level ID. The native menu supports IDs below 128; higher IDs remain
+available through Track Lab. Hub, boss and special level types are not added
+to the normal-race grid.
+
+World `6` only files the course; the game never sees it. Retail indexes
+five-world arrays with `header->world - 1`. The post-race mosaic read past
+`gTracksMenuBgTextureIndices`, and `bgdraw_texture` then tiled a non-texture
+until its display list ran out of memory. A sixth world would also grow
+`gNumberOfWorlds`, and with it the save file's per-world fields. So when a
+header with world `6` is served, the runtime writes Dino Domain (`1`) in its
+place. That is the world whose background Track Select already draws for the
+category. The catalogue reads the world from the package itself.
+
+An explicit World selection in the addon overrides the default. Existing
+packages retain their exported world: select `WORLD_CUSTOM_TRACKS` and export
+again to put them in this category. Choosing another world does not itself
+create a retail menu entry or hub door.
 
 ## Sections a track can replace or extend
 
@@ -252,6 +424,36 @@ A payload is also refused if it is shorter than 40 bytes or not a multiple of
 how large the texture is, and it puts the display list it builds at
 `align16(tex + assetSize)` inside an allocation of exactly that size plus the
 lists.
+
+### What the header decides, and what the installer checks
+
+`material_init` builds each texture's display list from its own header, and
+three of its bytes decide how the game draws it:
+
+| Header | Meaning |
+|---|---|
+| `format & 0x0F` | the texel format |
+| `format >> 4` | the render mode: `TRANSPARENT` (0), `OPAQUE` (1), `TRANSPARENT_2` (2), `OPAQUE_2` (3) |
+| `numOfTextures >> 8` | how many frames the texture animates through |
+
+RGBA32, RGBA16 and CI4 are see-through when the render mode is a `TRANSPARENT`
+one; IA16, IA8 and IA4 always are; I8 and I4 never are. `render_level_segment`
+draws a see-through texture only in its second pass - over batches
+`[numberofOpaqueBatches, numberOfBatches)` - so a model has to put the batches
+drawing one past that split, or they are never drawn. The Blender exporter
+does, and `docs/LEVEL_MODEL_FORMAT.md` has the rule. A batch flagged
+`RENDER_CUTOUT` is alpha-tested instead of blended, and RT64 draws it the same
+way with an HD replacement, cutting where the replacement's alpha is below an
+eighth; the exporter hardens a cut-out's HD original at half so both cut in the
+same place.
+
+`inspect_texture_payload` reads those headers when a track is scanned, walking
+every frame by its own `textureSize` as `load_texture` does, and refuses a
+payload the loader would misread: a colour-indexed format, a render mode past
+3, no frames, a zero-sized frame, a `textureSize` smaller than its header and
+texels, or a frame that runs past the payload. A compressed payload's frames
+are packed, so only its first header is read. Track Lab shows what each track
+brings: *3 textures, 1 see-through, 1 animated*.
 
 ### The id a level model stores, and why it is a placeholder
 
@@ -389,11 +591,12 @@ filled with a guess.
 
 ## Installing
 
-Track Lab's **IMPORT A COPY** button takes a folder through the system picker.
-Point it at the `.dkrmap`, at the track's own folder, or at the folder that
-holds both the `.dkrmap` and its `<track>-hd.zip`; a `.zip` of the `.dkrmap`
-(optionally wrapping the pack too) also works. The manifest is validated before
-anything is copied.
+**MODS / HACKS → Import mods → DKR-R tracks** installs a copy. **Choose
+.dkrmap folder** takes the `.dkrmap`, the track's own folder, or the folder that
+holds both the `.dkrmap` and its `<track>-hd.zip`; **Choose track ZIP** takes a
+`.zip` of the `.dkrmap` (optionally wrapping the pack too). Both run the system
+picker off the graphics thread. The manifest is validated before anything is
+copied, and the installed track is shown in **My mods**.
 
 If the track declares an `hdTexturePack` and the matching `<track>-hd.zip` is
 found beside it, DKR-R imports that pack in the same gesture -
@@ -403,8 +606,8 @@ texture-pack browser's default list. A pack whose stamped `textureDigest` does
 not match the manifest's is left out with a note; the track still plays, in
 64x32.
 
-Track Lab draws in the Accurate profile as well now. The list, the import and
-arming all work there; what stays impossible in Accurate is a custom track
+Track Lab and the importer work in the Accurate profile as well. The list, the
+import and arming all work there; what stays impossible in Accurate is a custom track
 actually *loading*, because importing, arming or playing one switches the
 profile to Modern first (with a note saying so). Copying a folder into
 `custom-tracks/` by hand still works.
@@ -417,6 +620,24 @@ injected while N64Recomp translates the ELF. Adding hooks to
 runs again for that revision - the generated `RecompiledFuncs` still carry the
 old code. The first smoke test failed exactly this way: v80 had been
 regenerated after the policy edit and v77 had not, and the run used v77.
+
+**The versioned policy is not the whole policy.** The legacy mod hooks live in
+`runtime-recomp/legacy-*.recomp-fragment.json` and are composed into a build
+copy of each policy before N64Recomp runs; CMake refuses a payload that lacks
+them. Editing a `.dkrmap` hook in the versioned policy therefore means
+regenerating through the composer, which also checks that the legacy entry
+hook and the `.dkrmap` recorder still share `asset_table_load` and `asset_load`
+exactly as reviewed:
+
+```text
+python scripts/generate_legacy_menu_qualification.py --characters --character-menu
+    --v77-build <folder with dkr.us.v77.elf and .z64>
+    --v80-build <folder with dkr.us.v80.elf and .z64>
+    --recompiler <N64Recomp.exe> --output build/legacy-generated
+```
+
+Point `DKR_GENERATED_SOURCE_V77` / `_V80` at `generated-v77` / `generated-v80`
+in that folder. The presentation step accepts only the reviewed ELF hashes.
 
 **`mods/` belongs to librecomp.** N64ModernRuntime ships its own mod system,
 it is live in DKR-R, and it scans `mods/` for its `.nrm` format. A `.dkrmap`

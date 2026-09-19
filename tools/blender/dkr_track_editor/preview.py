@@ -81,6 +81,11 @@ def _alive(datablock) -> bool:
 
 
 def _image(path: str, rom_rows: bool = False) -> Optional[bpy.types.Image]:
+    # Checked first because neither the cache nor ``check_existing`` looks at
+    # the disk: a file deleted since it was loaded would come back as the image
+    # it used to be, and a material would go on drawing a picture that is gone.
+    if not path or not os.path.isfile(path):
+        return None
     key = path + ("#rom" if rom_rows else "")
     cached = _image_cache.get(key)
     if _alive(cached):

@@ -317,6 +317,25 @@ std::int32_t resolved_level_id(const std::string& track_id) {
     return found == g_resolved_level_ids.end() ? -1 : found->second;
 }
 
+std::vector<TrackSelectEntry> track_select_entries() {
+    std::scoped_lock lock(g_mutex);
+    std::vector<TrackSelectEntry> result;
+    for (const Track& track : g_tracks) {
+        const auto resolved = g_resolved_level_ids.find(track.id);
+        // Native preview/selection stores level IDs in signed bytes.
+        if (!track.enabled || resolved == g_resolved_level_ids.end() ||
+            resolved->second < 0 || resolved->second >= 128) continue;
+        const auto header = std::find_if(track.entries.begin(), track.entries.end(),
+            [](const Entry& entry) { return entry.section == Section::LevelHeaders; });
+        if (header == track.entries.end() || header->bytes.size() < 0xC8 ||
+            header->bytes[0] != kCustomTrackWorld || header->bytes[0x4C] != 0) continue;
+        const auto vehicles = header->bytes[0x4E];
+        if (!vehicles || (vehicles & ~7U)) continue;
+        result.push_back({track.id, track.name, resolved->second, vehicles});
+    }
+    return result;
+}
+
 HdPack hd_pack(const std::string& track_id) {
     std::scoped_lock lock(g_mutex);
     for (const Track& track : g_tracks) {
@@ -331,6 +350,128 @@ HdPack hd_pack(const std::string& track_id) {
         return pack;
     }
     return {};
+}
+
+bool inspect_texture_payload(const std::vector<std::uint8_t>& bytes,
+                             TextureInfo& info, std::string& error) {
+    // TextureHeader, from include/structs.h.
+    constexpr std::size_t kHeaderSize = 32U;
+    constexpr std::size_t kFormat = 0x02U;
+    constexpr std::size_t kFrames = 0x12U;
+    constexpr std::size_t kTextureSize = 0x16U;
+    constexpr std::size_t kIsCompressed = 0x1DU;
+    // Bits per texel, by the format's low nibble.
+    constexpr std::array<std::uint32_t, 9> kBits{32U, 16U, 8U, 4U, 16U,
+                                                  8U, 4U, 4U, 8U};
+
+    info = TextureInfo{};
+    // load_texture pulls sizeof(TempTexHeader) bytes to find the frame count
+    // before it knows the size. A payload shorter than that peek is served as
+    // far as it goes and the rest comes from whatever the ROM holds past the
+    // section: a header made of nothing and an allocation sized by it.
+    if (bytes.size() < kMinimumTexturePayload) {
+        error = std::to_string(bytes.size()) +
+                " bytes; a texture is at least " +
+                std::to_string(kMinimumTexturePayload) +
+                ", which is what load_texture reads before it knows the size";
+        return false;
+    }
+    // load_texture puts the display lists it builds at align16(tex +
+    // assetSize) inside an allocation of exactly assetSize plus those lists,
+    // so an unaligned payload pushes the last one past its own block.
+    if ((bytes.size() % 16U) != 0U) {
+        error = std::to_string(bytes.size()) +
+                " bytes, and a texture payload has to be a multiple of 16 or "
+                "load_texture's display list overruns its allocation";
+        return false;
+    }
+
+    info.width = bytes[0];
+    info.height = bytes[1];
+    info.format = static_cast<std::uint8_t>(bytes[kFormat] & 0x0FU);
+    info.render_mode = static_cast<std::uint8_t>(bytes[kFormat] >> 4U);
+    info.frames = static_cast<std::uint16_t>(bytes[kFrames]);
+    info.compressed = bytes[kIsCompressed] != 0U;
+    info.translucent = texture_translucent(info.format, info.render_mode);
+
+    if (info.format >= kBits.size()) {
+        error = "format " + std::to_string(info.format) +
+                " is not one material_init knows";
+        return false;
+    }
+    if (info.format == 7U || info.format == 8U) {
+        error = "a colour-indexed texture needs a palette from ASSET_EMPTY_14, "
+                "which a track cannot add";
+        return false;
+    }
+    if (info.render_mode > 3U) {
+        error = "render mode " + std::to_string(info.render_mode) +
+                " is not one of the four material_init knows";
+        return false;
+    }
+    if (info.frames == 0U) {
+        error = "the header says the texture has no frames";
+        return false;
+    }
+    if (info.compressed) {
+        return true;
+    }
+
+    std::size_t at = 0;
+    for (std::uint32_t frame = 0; frame < info.frames; ++frame) {
+        const std::string which = "frame " + std::to_string(frame + 1U);
+        if (at + kHeaderSize > bytes.size()) {
+            error = which + " of " + std::to_string(info.frames) +
+                    " starts past the end of the payload";
+            return false;
+        }
+        const std::uint32_t width = bytes[at];
+        const std::uint32_t height = bytes[at + 1U];
+        if (width == 0U || height == 0U) {
+            error = which + " is " + std::to_string(width) + "x" +
+                    std::to_string(height);
+            return false;
+        }
+        if ((bytes[at + kFormat] & 0x0FU) != info.format) {
+            error = which + " is in another format than the first";
+            return false;
+        }
+        const std::size_t texels =
+            (static_cast<std::size_t>(width) * height * kBits[info.format] +
+             7U) / 8U;
+        const std::size_t size =
+            (static_cast<std::size_t>(bytes[at + kTextureSize]) << 8U) |
+            bytes[at + kTextureSize + 1U];
+        if (size < kHeaderSize + texels) {
+            error = which + " says it is " + std::to_string(size) +
+                    " bytes, and its header and texels take " +
+                    std::to_string(kHeaderSize + texels);
+            return false;
+        }
+        if (at + kHeaderSize + texels > bytes.size()) {
+            error = which + "'s texels run past the end of the payload";
+            return false;
+        }
+        at += size;
+    }
+    return true;
+}
+
+ArtworkSummary artwork(const std::string& track_id) {
+    std::lock_guard lock(g_mutex);
+    ArtworkSummary summary;
+    for (const Track& track : g_tracks) {
+        if (track.id != track_id) {
+            continue;
+        }
+        for (const TextureInfo& texture : track.textures) {
+            ++summary.textures;
+            summary.translucent += texture.translucent ? 1U : 0U;
+            summary.animated += texture.frames > 1U ? 1U : 0U;
+        }
+        break;
+    }
+    return summary;
 }
 
 bool track_textures_published(const std::string& track_id) {
@@ -408,6 +549,248 @@ std::int32_t track_override() {
     const auto found = g_resolved_level_ids.find(g_armed_track);
     return found == g_resolved_level_ids.end() ? kNoTrackOverride
                                                 : found->second;
+}
+
+bool owns_level_id(std::int32_t level_id) {
+    std::scoped_lock lock(g_mutex);
+    return std::any_of(g_resolved_level_ids.begin(),g_resolved_level_ids.end(),
+        [level_id](const auto& entry){return entry.second==level_id;});
+}
+
+std::int32_t count_level_model_batches(const std::uint8_t* bytes, std::size_t size) {
+    // LevelModel and LevelModelSegment offsets, docs/LEVEL_MODEL_FORMAT.md.
+    constexpr std::size_t kContainerHeader = 5U;
+    constexpr std::uint32_t kModelHeaderSize = 0x4CU;
+    constexpr std::uint32_t kInflatedLimit = 0x100000U;
+    constexpr std::size_t kSegmentsPointer = 0x04U;
+    constexpr std::size_t kSegmentCount = 0x1AU;
+    constexpr std::uint32_t kSegmentSize = 0x44U;
+    constexpr std::size_t kSegmentBatchCount = 0x20U;
+    if (bytes == nullptr || size <= kContainerHeader || bytes[4] != kContainerTag) {
+        return -1;
+    }
+    const std::uint32_t inflated_size =
+        static_cast<std::uint32_t>(bytes[0]) | (static_cast<std::uint32_t>(bytes[1]) << 8) |
+        (static_cast<std::uint32_t>(bytes[2]) << 16) | (static_cast<std::uint32_t>(bytes[3]) << 24);
+    if (inflated_size < kModelHeaderSize || inflated_size > kInflatedLimit) {
+        return -1;
+    }
+    std::vector<std::uint8_t> model(inflated_size);
+    // No TINFL_FLAG_PARSE_ZLIB_HEADER: the container holds raw DEFLATE.
+    if (tinfl_decompress_mem_to_mem(model.data(), model.size(), bytes + kContainerHeader,
+                                    size - kContainerHeader, 0) != model.size()) {
+        return -1;
+    }
+    const auto be16 = [&](std::size_t at) {
+        return static_cast<std::int16_t>((model[at] << 8) | model[at + 1U]);
+    };
+    const std::uint32_t segments = read_be32(model.data() + kSegmentsPointer);
+    const std::int16_t count = be16(kSegmentCount);
+    if (count < 0 ||
+        std::uint64_t(segments) + std::uint64_t(count) * kSegmentSize > model.size()) {
+        return -1;
+    }
+    std::int32_t batches = 0;
+    for (std::int16_t segment = 0; segment < count; ++segment) {
+        batches += std::max<std::int16_t>(
+            0, be16(segments + std::size_t(segment) * kSegmentSize + kSegmentBatchCount));
+    }
+    return batches;
+}
+
+std::int32_t level_model_batches(std::int32_t level_id) {
+    std::scoped_lock lock(g_mutex);
+    for (const auto& [track_id, resolved] : g_resolved_level_ids) {
+        if (resolved != level_id) {
+            continue;
+        }
+        for (const Track& track : g_tracks) {
+            if (track.id != track_id) {
+                continue;
+            }
+            for (const Entry& entry : track.entries) {
+                if (entry.section == Section::LevelModels) {
+                    return count_level_model_batches(entry.bytes.data(), entry.bytes.size());
+                }
+            }
+        }
+    }
+    return -1;
+}
+
+std::int32_t measure_level_model_arena(const std::uint8_t* bytes, std::size_t size) {
+    // LevelModel and LevelModelSegment offsets, docs/LEVEL_MODEL_FORMAT.md.
+    constexpr std::size_t kContainerHeader = 5U;
+    constexpr std::uint32_t kModelHeaderSize = 0x4CU;
+    constexpr std::uint32_t kInflatedLimit = 0x100000U;
+    constexpr std::size_t kModelSizeField = 0x48U;
+    constexpr std::size_t kSegmentsPointer = 0x04U;
+    constexpr std::size_t kSegmentCount = 0x1AU;
+    constexpr std::uint32_t kSegmentSize = 0x44U;
+    constexpr std::size_t kSegmentTriangles = 0x04U;
+    constexpr std::size_t kSegmentBatches = 0x0CU;
+    constexpr std::size_t kSegmentFacets = 0x14U;
+    constexpr std::size_t kSegmentTriangleCount = 0x1EU;
+    constexpr std::size_t kSegmentBatchCount = 0x20U;
+    constexpr std::size_t kTriangleStride = 16U;
+    constexpr std::size_t kBatchStride = 12U;
+    constexpr std::size_t kFacetStride = 8U;
+    // TRI_FLAG_80 skips a triangle entirely; RENDER_NO_COLLISION (1 << 9) is
+    // the batch opting out of collision; 0x2000 is the batch func_8002C71C
+    // records into segment->unk34.
+    constexpr std::uint8_t kTriangleSkipped = 0x80U;
+    constexpr std::uint32_t kBatchNoCollision = 0x200U;
+    constexpr std::uint32_t kBatchSpecial = 0x2000U;
+    // track_init_collision packs a shared plane as `index | 0x8000`, so a plane
+    // index only has fifteen bits. That is a format ceiling, not a memory one:
+    // no larger heap lifts it, which is why it is refused here rather than
+    // measured and handed on.
+    constexpr std::uint32_t kPlaneLimit = 0x8000U;
+    // Nothing this side of a corrupt payload reaches a megabyte of arena per
+    // segment; the cap only keeps the accumulator honest.
+    constexpr std::uint64_t kArenaLimit = 0x800000U;
+
+    if (bytes == nullptr || size <= kContainerHeader || bytes[4] != kContainerTag) {
+        return -1;
+    }
+    const std::uint32_t inflated_size =
+        static_cast<std::uint32_t>(bytes[0]) | (static_cast<std::uint32_t>(bytes[1]) << 8) |
+        (static_cast<std::uint32_t>(bytes[2]) << 16) | (static_cast<std::uint32_t>(bytes[3]) << 24);
+    if (inflated_size < kModelHeaderSize || inflated_size > kInflatedLimit) {
+        return -1;
+    }
+    std::vector<std::uint8_t> model(inflated_size);
+    // No TINFL_FLAG_PARSE_ZLIB_HEADER: the container holds raw DEFLATE.
+    if (tinfl_decompress_mem_to_mem(model.data(), model.size(), bytes + kContainerHeader,
+                                    size - kContainerHeader, 0) != model.size()) {
+        return -1;
+    }
+    const auto fits = [&](std::uint64_t at, std::uint64_t length) {
+        return at + length <= model.size();
+    };
+    const auto be16 = [&](std::size_t at) -> std::uint32_t {
+        return static_cast<std::uint32_t>(model[at] << 8) | model[at + 1U];
+    };
+    const auto align16 = [](std::uint64_t value) { return (value + 15U) & ~std::uint64_t(15U); };
+
+    const std::uint32_t model_size = read_be32(model.data() + kModelSizeField);
+    const std::uint32_t segments = read_be32(model.data() + kSegmentsPointer);
+    const std::int16_t count = static_cast<std::int16_t>(be16(kSegmentCount));
+    if (model_size < kModelHeaderSize || model_size > inflated_size || count <= 0 ||
+        !fits(segments, std::uint64_t(count) * kSegmentSize)) {
+        return -1;
+    }
+
+    // The loader grows its arena from modelSize, not from the end of the file.
+    std::uint64_t constructed = model_size;
+    for (std::int16_t index = 0; index < count; ++index) {
+        const std::size_t segment = segments + std::size_t(index) * kSegmentSize;
+        const std::uint32_t triangles = read_be32(model.data() + segment + kSegmentTriangles);
+        const std::uint32_t batches = read_be32(model.data() + segment + kSegmentBatches);
+        const std::uint32_t facets = read_be32(model.data() + segment + kSegmentFacets);
+        const std::uint32_t triangle_count = be16(segment + kSegmentTriangleCount);
+        const std::uint32_t batch_count = be16(segment + kSegmentBatchCount);
+        // The batch array carries a sentinel entry past the last batch; the
+        // triangle window of batch n is read from n and n + 1 alike.
+        if (!fits(triangles, std::uint64_t(triangle_count) * kTriangleStride) ||
+            !fits(facets, std::uint64_t(triangle_count) * kFacetStride) ||
+            !fits(batches, (std::uint64_t(batch_count) + 1U) * kBatchStride)) {
+            return -1;
+        }
+
+        // One plane per drawn triangle first, so an edge plane built later can
+        // be told apart from a neighbour's base plane by its index alone.
+        std::vector<bool> collidable(triangle_count, false);
+        std::uint32_t planes = 0;
+        std::uint32_t special = 0;
+        for (std::uint32_t batch = 0; batch < batch_count; ++batch) {
+            const std::size_t entry = batches + std::size_t(batch) * kBatchStride;
+            const std::uint32_t first = be16(entry + 4U);
+            const std::uint32_t last = be16(entry + kBatchStride + 4U);
+            const std::uint32_t flags = read_be32(model.data() + entry + 8U);
+            if (flags & kBatchSpecial) {
+                ++special;
+            }
+            if (first > last || last > triangle_count) {
+                return -1;
+            }
+            for (std::uint32_t triangle = first; triangle < last; ++triangle) {
+                if (model[triangles + std::size_t(triangle) * kTriangleStride] & kTriangleSkipped) {
+                    continue;
+                }
+                ++planes;
+                collidable[triangle] = (flags & kBatchNoCollision) == 0;
+            }
+        }
+
+        const std::uint32_t base_planes = planes;
+        std::vector<std::array<std::uint32_t, 3>> edges(triangle_count);
+        for (std::uint32_t triangle = 0; triangle < triangle_count; ++triangle) {
+            for (unsigned edge = 0; edge < 3; ++edge) {
+                edges[triangle][edge] = be16(facets + std::size_t(triangle) * kFacetStride +
+                                             2U + std::size_t(edge) * 2U);
+            }
+        }
+        // An edge still naming a base plane has not been built yet: build one,
+        // and mark the neighbour's matching entry so the pair shares it.
+        for (std::uint32_t triangle = 0; triangle < triangle_count; ++triangle) {
+            if (!collidable[triangle]) {
+                continue;
+            }
+            const std::uint32_t base = be16(facets + std::size_t(triangle) * kFacetStride);
+            if (base >= base_planes) {
+                return -1;
+            }
+            for (unsigned edge = 0; edge < 3; ++edge) {
+                const std::uint32_t next = edges[triangle][edge];
+                if (next >= base_planes) {
+                    continue; // Already built, or shared by the neighbour.
+                }
+                if (next >= triangle_count) {
+                    return -1;
+                }
+                if (next != base) {
+                    for (std::uint32_t& reciprocal : edges[next]) {
+                        if (reciprocal == base) {
+                            reciprocal = planes | 0x8000U;
+                        }
+                    }
+                }
+                edges[triangle][edge] = planes++;
+            }
+        }
+        if (planes >= kPlaneLimit) {
+            return -1;
+        }
+
+        constructed = align16(constructed + std::uint64_t(triangle_count) * 2U); // unk10
+        constructed += std::uint64_t(planes) * 16U;                              // collisionPlanes
+        constructed = align16(constructed + std::uint64_t(special) * 2U);        // unk34
+        if (constructed > kArenaLimit) {
+            return -1;
+        }
+    }
+    return static_cast<std::int32_t>(constructed);
+}
+
+std::int32_t level_model_arena_bytes(std::int32_t level_id) {
+    std::scoped_lock lock(g_mutex);
+    for (const auto& [track_id, resolved] : g_resolved_level_ids) {
+        if (resolved != level_id) {
+            continue;
+        }
+        for (const Track& track : g_tracks) {
+            if (track.id != track_id) {
+                continue;
+            }
+            for (const Entry& entry : track.entries) {
+                if (entry.section == Section::LevelModels) {
+                    return measure_level_model_arena(entry.bytes.data(), entry.bytes.size());
+                }
+            }
+        }
+    }
+    return -1;
 }
 
 std::vector<std::int32_t> build_extended_table(
@@ -807,35 +1190,18 @@ bool parse_track(const std::filesystem::path& root, Track& track,
         }
 
         // A texture payload is the one kind the loader reads before it knows
-        // how big it is: load_texture pulls sizeof(TempTexHeader) bytes to
-        // find the frame count, then allocates from what it read. A payload
-        // shorter than that peek is served as far as it goes and the rest
-        // comes from wherever the ROM's own bytes sit past the section, which
-        // is a TextureHeader made of nothing and an allocation sized by it.
-        // Cheaper to refuse the package.
+        // how big it is, and material_init reads how to draw it - format,
+        // render mode, frame count - out of its own headers. See
+        // inspect_texture_payload.
         if (entry.section == Section::Textures3D) {
-            if (entry.bytes.size() <
-                dkr::runtime::custom_tracks::kMinimumTexturePayload) {
-                error = file + " is " + std::to_string(entry.bytes.size()) +
-                        " bytes; a texture is at least " +
-                        std::to_string(
-                            dkr::runtime::custom_tracks::
-                                kMinimumTexturePayload) +
-                        ", which is what load_texture reads before it knows "
-                        "the size";
+            dkr::runtime::custom_tracks::TextureInfo info;
+            std::string reason;
+            if (!dkr::runtime::custom_tracks::inspect_texture_payload(
+                    entry.bytes, info, reason)) {
+                error = file + ": " + reason;
                 return false;
             }
-            // load_texture puts the display lists it builds at
-            // align16(tex + assetSize) inside an allocation of exactly
-            // assetSize plus those lists, so an unaligned payload pushes the
-            // last one past the end of its own block.
-            if ((entry.bytes.size() % 16U) != 0U) {
-                error = file + " is " + std::to_string(entry.bytes.size()) +
-                        " bytes and a texture payload has to be a multiple of "
-                        "16, or load_texture's display list overruns its "
-                        "allocation";
-                return false;
-            }
+            track.textures.push_back(info);
         }
         track.entries.push_back(std::move(entry));
     }
@@ -986,6 +1352,19 @@ void scan_one(const std::filesystem::path& directory, const char* label) {
                          item.path().filename().string().c_str(),
                          error.c_str());
             continue;
+        }
+        if (!track.textures.empty()) {
+            std::size_t translucent = 0;
+            std::size_t animated = 0;
+            for (const auto& texture : track.textures) {
+                translucent += texture.translucent ? 1U : 0U;
+                animated += texture.frames > 1U ? 1U : 0U;
+            }
+            std::fprintf(stderr,
+                         "[custom-tracks] %s ships %zu texture(s): %zu "
+                         "see-through, %zu animated\n",
+                         track.id.c_str(), track.textures.size(), translucent,
+                         animated);
         }
 
         // Resolve the HD pack sibling against the folder this track was read
@@ -1227,6 +1606,57 @@ bool install(const std::filesystem::path& source, std::string& error,
 
     discard_install_temp(temp_root);
     reload();
+    error.clear();
+    return true;
+}
+
+namespace {
+
+// Resolve both paths before allowing deletion: a symlink/junction must not
+// turn a managed-looking path into a deletion in the author's source folder.
+bool installed_path_locked(const std::filesystem::path& source) {
+    if (g_directory.empty() || source.extension() != ".dkrmap") return false;
+    std::error_code code;
+    const auto root = std::filesystem::canonical(g_directory, code);
+    if (code) return false;
+    if (!std::filesystem::equivalent(source.parent_path(), root, code) || code) return false;
+    const auto resolved = std::filesystem::canonical(source, code);
+    if (code || resolved == root) return false;
+    return std::filesystem::equivalent(resolved.parent_path(), root, code) && !code;
+}
+
+} // namespace
+
+bool is_installed(const Track& track) {
+    std::scoped_lock lock(g_mutex);
+    return installed_path_locked(track.source);
+}
+
+bool uninstall(const std::string& id, std::string& error) {
+    std::scoped_lock lock(g_mutex);
+    const auto found = std::find_if(g_tracks.begin(), g_tracks.end(),
+        [&id](const Track& track) { return track.id == id; });
+    if (found == g_tracks.end()) {
+        error = "This track is no longer in the library.";
+        return false;
+    }
+    if (!installed_path_locked(found->source)) {
+        error = "This track is read from a working folder. Its source files cannot be uninstalled.";
+        return false;
+    }
+    std::error_code code;
+    std::filesystem::remove_all(found->source, code);
+    if (code) {
+        error = "Could not uninstall the track: " + code.message();
+        return false;
+    }
+    g_tracks.erase(found);
+    g_resolved_level_ids.erase(id);
+    if (g_armed_track == id) {
+        g_armed_track.clear();
+        g_auto_boot = false;
+        save_state_locked();
+    }
     error.clear();
     return true;
 }

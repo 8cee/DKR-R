@@ -156,4 +156,17 @@ add_library(DKRLegacyImportLibrary STATIC "${_dkr_mod_src}/legacy_import_library
 target_link_libraries(DKRLegacyImportLibrary PUBLIC DKRLegacyModCore DKRLegacyModProcess)
 
 add_library(DKRLegacyModLaunch STATIC "${_dkr_mod_src}/legacy_mod_launch.cpp")
-target_link_libraries(DKRLegacyModLaunch PUBLIC DKRLegacyImportLibrary)
+# .dkrmap table logic. A mod launch publishes the tracks' artwork into the
+# character-augmented boot bank, so the launch owns this dependency.
+add_library(DKRCustomTracksCore STATIC "${_dkr_mod_src}/../custom_tracks.cpp")
+target_include_directories(DKRCustomTracksCore PUBLIC "${_dkr_mod_src}/.."
+    "${DKRPORT_ROOT}/extern/rt64/src/contrib")
+target_compile_features(DKRCustomTracksCore PUBLIC cxx_std_20)
+target_compile_definitions(DKRCustomTracksCore PRIVATE NOMINMAX)
+if(TARGET rt64)
+    # Same single miniz provider as DKRLegacyModCore inside the game.
+    target_link_libraries(DKRCustomTracksCore PRIVATE rt64)
+else()
+    target_link_libraries(DKRCustomTracksCore PRIVATE DKRLegacyModMiniz)
+endif()
+target_link_libraries(DKRLegacyModLaunch PUBLIC DKRLegacyImportLibrary DKRCustomTracksCore)

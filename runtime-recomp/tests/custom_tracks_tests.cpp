@@ -1,5 +1,6 @@
 #include "custom_tracks.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <cstdio>
 #include <filesystem>
@@ -55,6 +56,35 @@ std::string track_manifest(const std::string& id, const std::string& extra) {
     return "{\"schemaVersion\":1,\"id\":\"" + id + "\",\"name\":\"" + id +
            "\"," + extra +
            "\"adds\":[{\"section\":\"LEVEL_HEADERS\",\"file\":\"h.bin\"}]}";
+}
+
+// A TEXTURES_3D payload as BuildTexture writes one: a TextureHeader and its
+// texels per frame, each frame 16-aligned, filled with `fill`.
+std::string texture_payload(std::uint8_t width, std::uint8_t height,
+                            std::uint8_t format, std::uint8_t render_mode,
+                            std::uint8_t frames = 1, char fill = 't') {
+    static const std::uint32_t kBits[] = {32, 16, 8, 4, 16, 8, 4, 4, 8};
+    const std::size_t texels =
+        (static_cast<std::size_t>(width) * height * kBits[format] + 7U) / 8U;
+    const std::size_t size = (32U + texels + 15U) & ~std::size_t{15U};
+    std::string out;
+    for (std::uint8_t frame = 0; frame < frames; ++frame) {
+        std::string one(size, fill);
+        std::fill(one.begin(), one.begin() + 32, '\0');
+        one[0x00] = static_cast<char>(width);
+        one[0x01] = static_cast<char>(height);
+        one[0x02] = static_cast<char>((render_mode << 4) | format);
+        one[0x05] = 1;
+        one[0x12] = static_cast<char>(frames);
+        one[0x16] = static_cast<char>((size >> 8) & 0xFF);
+        one[0x17] = static_cast<char>(size & 0xFF);
+        out += one;
+    }
+    return out;
+}
+
+std::vector<std::uint8_t> as_bytes(const std::string& text) {
+    return std::vector<std::uint8_t>(text.begin(), text.end());
 }
 
 void write_track(const std::filesystem::path& root, const std::string& id,
@@ -118,6 +148,43 @@ std::string model_payload(const std::vector<std::int32_t>& texture_ids,
     payload += model;
     payload += tail;
     return payload;
+}
+
+// A whole level model with the given batch count in each segment, compressed
+// with Huffman-coded DEFLATE the way the retail assets are.
+std::string batch_model_payload(const std::vector<std::int16_t>& batches,
+                                std::uint8_t tag = 0x09) {
+    const std::uint32_t segments = 0x4C;
+    std::string model(segments + batches.size() * 0x44U + 32U, '\0');
+    model[4] = static_cast<char>((segments >> 24) & 0xFF);
+    model[5] = static_cast<char>((segments >> 16) & 0xFF);
+    model[6] = static_cast<char>((segments >> 8) & 0xFF);
+    model[7] = static_cast<char>(segments & 0xFF);
+    model[0x1A] = static_cast<char>((batches.size() >> 8) & 0xFF);
+    model[0x1B] = static_cast<char>(batches.size() & 0xFF);
+    for (std::size_t segment = 0; segment < batches.size(); ++segment) {
+        const std::size_t at = segments + segment * 0x44U + 0x20U;
+        model[at] = static_cast<char>((batches[segment] >> 8) & 0xFF);
+        model[at + 1] = static_cast<char>(batches[segment] & 0xFF);
+    }
+    std::size_t compressed_size = 0;
+    void* compressed = tdefl_compress_mem_to_heap(model.data(), model.size(),
+                                                  &compressed_size, TDEFL_DEFAULT_MAX_PROBES);
+    assert(compressed != nullptr);
+    const auto size = static_cast<std::uint32_t>(model.size());
+    std::string payload;
+    for (int byte = 0; byte < 4; ++byte) {
+        payload += static_cast<char>((size >> (byte * 8)) & 0xFF);
+    }
+    payload += static_cast<char>(tag);
+    payload.append(static_cast<const char*>(compressed), compressed_size);
+    mz_free(compressed);
+    return payload;
+}
+
+std::int32_t count_batches(const std::string& payload) {
+    return count_level_model_batches(
+        reinterpret_cast<const std::uint8_t*>(payload.data()), payload.size());
 }
 
 // The texture ids a served model payload now names.
@@ -185,6 +252,11 @@ int main() {
     assert(table[4] == 0x480 && table[5] - table[4] == 192);
     assert(resolved_level_id("alpha") == 3);
     assert(resolved_level_id("beta") == 4);
+    // A legacy mod session asks this at every scene load: an added level is
+    // never one of its retail carriers.
+    assert(owns_level_id(3) && owns_level_id(4));
+    assert(!owns_level_id(0) && !owns_level_id(2) && !owns_level_id(5));
+    assert(!owns_level_id(kNoTrackOverride));
 
     // Retail offsets belong to the ROM; custom offsets resolve to a payload.
     assert(payload_for(Section::LevelHeaders, 0x250, 0x1B0) == nullptr);
@@ -200,6 +272,7 @@ int main() {
     assert(level_count(table) == 4);
     assert(resolved_level_id("alpha") == -1);
     assert(resolved_level_id("beta") == 3);
+    assert(owns_level_id(3) && !owns_level_id(4));
     assert(table[3] == 0x400 && table[4] - table[3] == 192);
 
     // tracks() must hand back a snapshot, because a reload replaces the
@@ -388,11 +461,22 @@ int main() {
                    model_payload({kCustomTextureIdBase, 1234,
                                   kCustomTextureIdBase + 1}));
         // 64x32 RGBA16 and 32x32 RGBA16, header included, both 16-aligned.
-        write_file(art / "textures" / "0.bin", std::string(4128U, 'a'));
-        write_file(art / "textures" / "1.bin", std::string(2080U, 'b'));
+        // The second is see-through (render mode TRANSPARENT).
+        write_file(art / "textures" / "0.bin",
+                   texture_payload(64, 32, 1, 1, 1, 'a'));
+        write_file(art / "textures" / "1.bin",
+                   texture_payload(32, 32, 1, 0, 1, 'b'));
     }
     scan(root);
     assert(tracks().size() == 1U);
+    assert(tracks().front().textures.size() == 2U);
+    assert(!tracks().front().textures[0].translucent);
+    assert(tracks().front().textures[1].translucent);
+    {
+        const ArtworkSummary art = artwork("art");
+        assert(art.textures == 2U && art.translucent == 1U && art.animated == 0U);
+        assert(artwork("nobody").textures == 0U);
+    }
 
     // tex_init_textures counts exactly as level_global_init does, so the same
     // helper describes both: [o0 .. o(n-1), oEnd, -1] is n textures.
@@ -461,7 +545,8 @@ int main() {
         write_file(greedy / "m.bin",
                    model_payload({kCustomTextureIdBase,
                                   kCustomTextureIdBase + 7}));
-        write_file(greedy / "textures" / "0.bin", std::string(1056U, 'c'));
+        write_file(greedy / "textures" / "0.bin",
+                   texture_payload(32, 16, 1, 1, 1, 'c'));
     }
     std::filesystem::remove_all(root / "art.dkrmap");
     scan(root);
@@ -490,7 +575,8 @@ int main() {
                    "\"file\":\"m.bin\"},"
                    "{\"section\":\"TEXTURES_3D\",\"file\":\"textures/0.bin\"}]}");
         write_file(more / "m.bin", model_payload({kCustomTextureIdBase}));
-        write_file(more / "textures" / "0.bin", std::string(1056U, 'd'));
+        write_file(more / "textures" / "0.bin",
+                   texture_payload(32, 16, 1, 1, 1, 'd'));
     }
     scan(root);
     assert(tracks().size() == 2U);
@@ -543,15 +629,91 @@ int main() {
                    "{\"schemaVersion\":1,\"id\":\"good\",\"name\":\"Good\","
                    "\"adds\":[{\"section\":\"TEXTURES_3D\","
                    "\"file\":\"textures/0.bin\"}]}");
-        write_file(good / "textures" / "0.bin", std::string(48U, 'g'));
+        write_file(good / "textures" / "0.bin", texture_payload(4, 2, 1, 1));
+
+        // A header the loader would misread: a palette the track cannot
+        // supply, and a render mode material_init has never heard of.
+        const std::filesystem::path palette = root / "palette.dkrmap";
+        std::filesystem::create_directories(palette / "textures");
+        write_file(palette / "manifest.json",
+                   "{\"schemaVersion\":1,\"id\":\"palette\",\"name\":\"P\","
+                   "\"adds\":[{\"section\":\"TEXTURES_3D\","
+                   "\"file\":\"textures/0.bin\"}]}");
+        write_file(palette / "textures" / "0.bin", texture_payload(16, 16, 7, 1));
     }
     scan(root);
     for (const Track& track : tracks()) {
         assert(track.id != "tiny");
         assert(track.id != "odd");
+        assert(track.id != "palette");
     }
     assert(tracks().size() == 1U);
     assert(tracks().front().id == "good");
+
+    // ------------------------------------------------------------------
+    // What a texture's header says about how it is drawn
+    // ------------------------------------------------------------------
+    //
+    // material_init decides see-through from the render mode for RGBA and CI4,
+    // always for IA, never for I; render_level_segment then draws a
+    // see-through batch only in its second pass. The exporter places batches
+    // by that rule, so the runtime has to read it the same way.
+    {
+        TextureInfo info;
+        std::string why;
+        assert(inspect_texture_payload(as_bytes(texture_payload(32, 32, 0, 0)),
+                                       info, why));
+        assert(info.width == 32 && info.height == 32 && info.format == 0U);
+        assert(info.render_mode == 0U && info.frames == 1U && info.translucent);
+        assert(inspect_texture_payload(as_bytes(texture_payload(16, 16, 1, 2)),
+                                       info, why) && info.translucent);
+        assert(inspect_texture_payload(as_bytes(texture_payload(16, 16, 1, 3)),
+                                       info, why) && !info.translucent);
+        assert(inspect_texture_payload(as_bytes(texture_payload(16, 16, 5, 1)),
+                                       info, why) && info.translucent);
+        assert(inspect_texture_payload(as_bytes(texture_payload(16, 16, 2, 0)),
+                                       info, why) && !info.translucent);
+        assert(texture_translucent(4U, 3U) && texture_translucent(6U, 1U));
+        assert(!texture_translucent(3U, 0U) && !texture_translucent(8U, 0U));
+
+        // An animated one: frames end to end, each walked by its own size.
+        assert(inspect_texture_payload(
+            as_bytes(texture_payload(16, 16, 0, 0, 3)), info, why));
+        assert(info.frames == 3U);
+
+        // A frame count the payload does not hold.
+        std::string short_animation = texture_payload(16, 16, 0, 0, 3);
+        short_animation.resize(short_animation.size() * 2U / 3U);
+        assert(!inspect_texture_payload(as_bytes(short_animation), info, why));
+        assert(why.find("frame 3") != std::string::npos);
+
+        std::string no_frames = texture_payload(16, 16, 1, 1);
+        no_frames[0x12] = 0;
+        assert(!inspect_texture_payload(as_bytes(no_frames), info, why));
+
+        std::string bad_mode = texture_payload(16, 16, 1, 1);
+        bad_mode[0x02] = static_cast<char>((6 << 4) | 1);
+        assert(!inspect_texture_payload(as_bytes(bad_mode), info, why));
+        assert(why.find("render mode") != std::string::npos);
+
+        std::string small = texture_payload(16, 16, 1, 1);
+        small[0x16] = 0;
+        small[0x17] = 64;
+        assert(!inspect_texture_payload(as_bytes(small), info, why));
+
+        std::string empty = texture_payload(16, 16, 1, 1);
+        empty[0x00] = 0;
+        assert(!inspect_texture_payload(as_bytes(empty), info, why));
+
+        // A compressed payload is packed past its first header, so only that
+        // header is read.
+        std::string packed = texture_payload(16, 16, 0, 0);
+        packed[0x1D] = 1;
+        packed[0x16] = 0;
+        packed[0x17] = 0;
+        assert(inspect_texture_payload(as_bytes(packed), info, why));
+        assert(info.compressed && info.translucent);
+    }
 
     // ------------------------------------------------------------------
     // A track's high-resolution texture pack
@@ -685,7 +847,8 @@ int main() {
                    "\"adds\":[{\"section\":\"LEVEL_MODELS\",\"file\":\"m.bin\"},"
                    "{\"section\":\"TEXTURES_3D\",\"file\":\"textures/0.bin\"}]}");
         write_file(art / "m.bin", model_payload({kCustomTextureIdBase}));
-        write_file(art / "textures" / "0.bin", std::string(1056U, 'a'));
+        write_file(art / "textures" / "0.bin",
+                   texture_payload(32, 16, 1, 1, 1, 'a'));
 
         const std::filesystem::path plain = root / "plain.dkrmap";
         std::filesystem::create_directories(plain);
@@ -750,6 +913,123 @@ int main() {
     arm_track_override(std::string{});
     assert(!std::filesystem::exists(root / "custom-tracks-state.txt"));
 
+    std::filesystem::remove_all(root);
+    // Uninstall only the managed copy; keep source tracks, other installed
+    // tracks, saves and separately managed HD packs. Clear persisted testing.
+    const auto installed = root / "installed";
+    const auto working = root / "working";
+    for (const auto& [folder, id] : std::vector<std::pair<std::filesystem::path, std::string>>{
+             {installed / "remove.dkrmap", "remove"},
+             {installed / "keep.dkrmap", "keep"},
+             {working / "source.dkrmap", "source"}}) {
+        std::filesystem::create_directories(folder);
+        write_file(folder / "manifest.json", track_manifest(id, ""));
+        write_file(folder / "h.bin", std::string(64U, 'h'));
+    }
+    write_file(root / "save.bin", "save data");
+    write_file(root / "track-hd.zip", "managed HD pack");
+    scan(installed);
+    set_working_directory(working);
+    scan(installed);
+    assert(tracks().size() == 3U);
+    for (const auto& track : tracks()) assert(is_installed(track) == (track.id != "source"));
+    arm_track_override("remove");
+    set_auto_boot(true);
+    std::string uninstall_error;
+    assert(!uninstall("missing", uninstall_error));
+    assert(!uninstall_error.empty());
+    assert(!uninstall("source", uninstall_error));
+    assert(std::filesystem::exists(working / "source.dkrmap" / "manifest.json"));
+    assert(armed_track_id() == "remove");
+    assert(uninstall("remove", uninstall_error));
+    assert(uninstall_error.empty());
+    assert(!std::filesystem::exists(installed / "remove.dkrmap"));
+    assert(std::filesystem::exists(installed / "keep.dkrmap" / "manifest.json"));
+    assert(read_file_text(root / "save.bin") == "save data");
+    assert(read_file_text(root / "track-hd.zip") == "managed HD pack");
+    assert(tracks().size() == 2U);
+    assert(armed_track_id().empty());
+    assert(!auto_boot_enabled());
+    assert(!std::filesystem::exists(root / "custom-tracks-state.txt"));
+    scan(installed);
+    assert(tracks().size() == 2U);
+    assert(armed_track_id().empty());
+    assert(!uninstall("remove", uninstall_error));
+
+    // A managed-looking symlink to an author's directory must not grant
+    // permission to delete it (Windows may not allow creating symlinks).
+    std::error_code link_error;
+    std::filesystem::create_directory_symlink(working / "source.dkrmap",
+                                              installed / "link.dkrmap", link_error);
+    if (!link_error) {
+        scan(installed);
+        assert(!uninstall("source", uninstall_error));
+        assert(std::filesystem::exists(working / "source.dkrmap" / "manifest.json"));
+        std::filesystem::remove(installed / "link.dkrmap");
+    }
+    set_working_directory({});
+
+    // The display-list budget reads every segment's batch count out of the
+    // inflated model; anything it cannot read counts as unknown.
+    {
+        assert(count_batches(batch_model_payload({14, 0, 23, -5, 27})) == 64);
+        assert(count_batches(batch_model_payload({})) == 0);
+        assert(count_batches(batch_model_payload({3}, 0x08)) == -1);
+        std::string truncated = batch_model_payload({3, 4});
+        truncated.resize(truncated.size() / 2);
+        assert(count_batches(truncated) == -1);
+        std::string oversized = batch_model_payload({3, 4});
+        oversized[0] = static_cast<char>(oversized[0] + 1); // declared size lies
+        assert(count_batches(oversized) == -1);
+        // numberOfSegments claims more than the inflated blob holds.
+        std::string bogus(0x4C, '\0');
+        bogus[7] = 0x4C;
+        bogus[0x1B] = 9;
+        std::size_t length = 0;
+        void* deflated = tdefl_compress_mem_to_heap(bogus.data(), bogus.size(), &length,
+                                                    TDEFL_DEFAULT_MAX_PROBES);
+        const std::string past_end = std::string("\x4C\0\0\0\x09", 5) +
+                                     std::string(static_cast<const char*>(deflated), length);
+        mz_free(deflated);
+        assert(count_batches(past_end) == -1);
+        assert(count_level_model_batches(nullptr, 0) == -1);
+        // Retail levels and tracks without a model have no count.
+        assert(level_model_batches(0) == -1);
+    }
+
+    // Only enabled races assigned to Custom Tracks join the native menu.
+    {
+        const auto library = root / "track-select";
+        for (const std::string id : {"race", "retail", "hub", "disabled"}) {
+            const auto path = library / (id + ".dkrmap");
+            std::filesystem::create_directories(path);
+            write_file(path / "manifest.json", track_manifest(id, ""));
+            std::string header(200, '\0');
+            header[0] = id == "retail" ? 1 : kCustomTrackWorld;
+            header[0x4C] = id == "hub" ? 5 : 0;
+            header[0x4E] = 7;
+            header[0x37] = 73;
+            header[0xBB] = 5;
+            write_file(path / "h.bin", header);
+        }
+        scan(library);
+        assert(track_select_entries().empty()); // IDs are not published yet.
+        set_enabled("disabled", false);
+        build_extended_table(Section::LevelHeaders, kRetail);
+        auto entries = track_select_entries();
+        assert(entries.size() == 1 && entries[0].id == "race");
+        assert(entries[0].level_id == resolved_level_id("race"));
+        assert(entries[0].name == "race" && entries[0].vehicles == 7);
+        set_enabled("race", false);
+        assert(track_select_entries().empty());
+        set_enabled("race", true);
+        // IDs beyond signed-byte range must never wrap into a retail level.
+        std::vector<std::int32_t> large_table(130);
+        for (unsigned i = 0; i < 129; ++i) large_table[i] = i * 200;
+        large_table.back() = -1;
+        build_extended_table(Section::LevelHeaders, large_table.data());
+        assert(track_select_entries().empty());
+    }
     std::filesystem::remove_all(root);
     std::printf("custom_tracks_tests: ok\n");
     return 0;

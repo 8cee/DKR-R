@@ -111,13 +111,19 @@ class PipelineTests(unittest.TestCase):
 
     def test_track_lab_is_in_mods_and_keeps_its_texture_modal(self):
         source=(ROOT/'runtime-recomp/src/game/runtime_ui.cpp').read_text()
-        mods=source.split('void DrawModsHacks(float width, bool game_running = false) {',1)[1].split('void DrawTextures(float width)',1)[0]
+        mods=source.split('void DrawModsHacks(',1)[1].split('void DrawTextures(',1)[0]
         textures=source.split('void DrawTextures(float width) {',1)[1].split('std::string FormatRecordTime',1)[0]
-        self.assertLess(mods.index('DrawMagicCodes(width)'),mods.index('DrawTrackLabSection(width)'))
+        # Track Lab is a section of the mods page and never of the textures page.
+        self.assertIn('kModsSectionTrackLab',mods)
+        self.assertIn('DrawTrackLabSection(',mods)
         self.assertNotIn('DrawTrackLabSection',textures)
-        for page in (mods,textures):self.assertEqual(page.count('DrawPendingTexturePackModals();'),1)
-        section=source.split('void DrawTrackLabSection(float width) {',1)[1].split('void DrawPendingTexturePackModals()',1)[0]
-        self.assertIn('DrawTrackLabControls(width);',section)
+        # One shared single-pack modal, rendered once by each page that reaches it.
+        for page in (mods,textures):self.assertEqual(page.count('DrawSharedTexturePackModal();'),1)
+        section=source.split('void DrawTrackLabSection(float width, bool locked,',1)[1]
+        section=section.split('void DrawSharedTexturePackModal',1)[0]
+        # The section still owns arming and the auto-boot switch.
+        self.assertIn('armed_track_id()',section)
+        self.assertIn('set_auto_boot(',section)
 
     def test_custom_stage_reuses_stock_clock_and_revision_camera(self):
         # The custom early-return hook must not bypass the stock beat override.

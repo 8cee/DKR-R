@@ -16,7 +16,8 @@ set(_mod_imgui "${DKRPORT_ROOT}/extern/rt64/src/contrib/imgui")
 add_executable(DKRLegacyModBrowserUiTests ../legacy_mod_browser_ui_tests.cpp
     "${_mod_imgui}/imgui.cpp" "${_mod_imgui}/imgui_draw.cpp"
     "${_mod_imgui}/imgui_widgets.cpp" "${_mod_imgui}/imgui_tables.cpp"
-    ../../src/game/generated/racing_banana_font.c ../../src/game/generated/jumpman_font.c)
+    ../../src/game/generated/racing_banana_font.c ../../src/game/generated/jumpman_font.c
+    ../../src/game/generated/selawik_font.c)
 target_include_directories(DKRLegacyModBrowserUiTests PRIVATE "${_mod_imgui}" ../../src/game)
 target_link_libraries(DKRLegacyModBrowserUiTests PRIVATE DKRLegacyImportLibrary)
 if(MSVC)
@@ -32,6 +33,15 @@ add_test(NAME DKRLegacyModLibraryTests COMMAND DKRLegacyModLibraryTests "$<TARGE
 set_tests_properties(DKRLegacyModLibraryTests PROPERTIES TIMEOUT 60)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_test(NAME DKRLegacyModPipelineGuards COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/../legacy_mod_pipeline_tests.py")
+add_executable(DKRLegacyDkrmapArtworkTests ../legacy_dkrmap_artwork_tests.cpp ../../src/game/dkr_save_codec.cpp)
+target_link_libraries(DKRLegacyDkrmapArtworkTests PRIVATE DKRLegacyModLaunch)
+add_test(NAME DKRLegacyDkrmapArtworkTests COMMAND DKRLegacyDkrmapArtworkTests)
+# The bank checks need an owned ROM; it is never part of a public fixture.
+set(DKR_LEGACY_TEST_ROM "" CACHE FILEPATH "Owned US v1.0/v1.1 ROM for ROM-backed legacy checks")
+if(NOT DKR_LEGACY_TEST_ROM STREQUAL "")
+    add_test(NAME DKRLegacyDkrmapArtworkRomTests
+             COMMAND DKRLegacyDkrmapArtworkTests "${DKR_LEGACY_TEST_ROM}")
+endif()
 add_executable(DKRLegacyModTests ../legacy_mod_tests.cpp)
 target_link_libraries(DKRLegacyModTests PRIVATE DKRLegacyModCore DKRLegacyModProcess)
 add_test(NAME DKRLegacyModTests COMMAND DKRLegacyModTests)

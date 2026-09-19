@@ -92,6 +92,15 @@ def check_layout(model: LevelModel) -> List[str]:
                 "%s has batches but no terminator entry, so no batch has an end"
                 % label
             )
+        for index, batch in enumerate(segment.batches):
+            # gSPPolygon encodes count - 1 in four bits; a larger array can
+            # fit in the file while most of its triangles disappear in game.
+            if batch.face_count > 16:
+                problems.append(
+                    "%s batch %d holds %d triangles, but the game draws at "
+                    "most 16 per batch; rebuild the batches before exporting"
+                    % (label, index, batch.face_count)
+                )
     return problems
 
 

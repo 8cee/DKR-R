@@ -1,4 +1,6 @@
 #include "runtime_legacy_mods.hpp"
+#include "custom_tracks.hpp"
+#include "runtime_netplay.hpp"
 #include "game_payload.hpp"
 #include "mods/legacy_runtime_assets.hpp"
 #include "mods/legacy_runtime_io.hpp"
@@ -30,7 +32,8 @@ std::atomic<std::shared_ptr<const mods::PreparedModLaunch>> launch;
 struct MenuState {
     std::mutex mutex;
     mods::TrackMenuAdapter adapter;
-    MenuState(std::vector<mods::Root> roots,bool races):adapter(std::move(roots),races){}
+    bool allow_races, catalog_ready=false;
+    MenuState(std::vector<mods::Root> roots,bool races):adapter(std::move(roots),races),allow_races(races){}
 };
 std::atomic<std::shared_ptr<MenuState>> menu;
 struct CharacterState {
@@ -89,8 +92,14 @@ void begin_track_menu(bool allow_races) {
     menu.store(std::make_shared<MenuState>(active->tracks(),allow_races));
 }
 void request_scene(const std::string& id,unsigned carrier) {
+    // Appended .dkrmap level IDs load through the custom-track asset hooks.
+    // begin_scene detects them and returns a mounted legacy bank to stock.
+    if(custom_tracks::owns_level_id(static_cast<std::int32_t>(carrier)))return;
     auto active=session.load();
-    if(!active)throw mods::Error("No custom-content session is prepared.");
+    if(!active) {
+        if(id.empty())return;
+        throw mods::Error("No custom-content session is prepared.");
+    }
     active->request(id,carrier);
 }
 std::string failure(){std::lock_guard lock(error_mutex);return last_error;}
@@ -302,8 +311,38 @@ extern "C" std::uint32_t dkr_legacy_character_cinematic_portrait(std::uint8_t*,r
 }
 extern "C" int dkr_legacy_track_menu(std::uint8_t* rdram,recomp_context* ctx,unsigned event,const std::uint32_t* fields,unsigned observed) {
     using namespace dkr::runtime;
-    auto state=legacy::menu.load();if(!state)return 0;
+    // trackmenu_assets(TRACKMENU_TYPE_LOAD_LEVEL): Track Select confirmed a
+    // course. That choice supersedes Track Lab's sticky load override before
+    // get_track_id_to_load can replace it, with or without legacy courses.
+    if(event==12 && static_cast<std::uint32_t>(ctx->r4)==2)
+        custom_tracks::arm_track_override({});
+    auto state=legacy::menu.load();
     try {
+        // Level IDs are assigned at game initialization, after launcher setup.
+        // Build the combined catalogue on the first Track Select entry, also
+        // when there are no legacy mods enabled for this session.
+        if(event==0 && (!state || !state->catalog_ready) && !netplay::session().active()) {
+            const auto authored=custom_tracks::track_select_entries();
+            if(!authored.empty()) {
+                const auto active=legacy::session.load();
+                auto roots=active?active->tracks():std::vector<dkr::mods::Root>{};
+                for(const auto& track:authored) {
+                    if(roots.size()==512)break;
+                    dkr::mods::Root root;
+                    const auto identity="dkrmap:"+track.id;
+                    root.content_id=dkr::mods::sha256(dkr::mods::View(
+                        reinterpret_cast<const std::uint8_t*>(identity.data()),identity.size()));
+                    root.name=track.name.substr(0,255);
+                    root.carrier=static_cast<unsigned>(track.level_id);
+                    root.vehicles=track.vehicles;
+                    roots.push_back(std::move(root));
+                }
+                state=std::make_shared<legacy::MenuState>(std::move(roots),state?state->allow_races:true);
+                legacy::menu.store(state);
+            }
+            if(state)state->catalog_ready=true;
+        }
+        if(!state)return 0;
         if(!fields)throw dkr::mods::Error("Native menu hook has no verified revision fields.");
 #if DKR_LEGACY_QUALIFICATION
         legacy::qualify_native_menu(rdram,ctx,event,fields,false);
@@ -325,6 +364,10 @@ extern "C" int dkr_legacy_track_menu(std::uint8_t* rdram,recomp_context* ctx,uns
         dkr::mods::TrackMenuEffect effect;
         {std::lock_guard lock(state->mutex);effect=state->adapter.apply(event,{rdram,recomp::mem_size},addresses,
             static_cast<std::uint32_t>(ctx->r4),observed);}
+        // Appended levels have their own vehicle table entry. Preserve the
+        // author's default instead of the legacy carrier's first usable one.
+        if(event==10 && custom_tracks::owns_level_id(static_cast<std::int32_t>(ctx->r4)))
+            effect.override_return=false;
         if(effect.scene)legacy::request_scene(effect.scene->id,effect.scene->carrier);
         if(effect.navigation_sound) {
             const auto payload=active_payload();
@@ -348,7 +391,8 @@ extern "C" void dkr_legacy_scene_begin(std::uint8_t* rdram,recomp_context* ctx) 
     auto active=legacy::session.load();if(!active)return;
     try {
         const auto before=active->current_content();
-        active->begin_scene({rdram,recomp::mem_size},static_cast<std::uint32_t>(ctx->r4));
+        const auto level=static_cast<std::uint32_t>(ctx->r4);
+        active->begin_scene({rdram,recomp::mem_size},level,custom_tracks::owns_level_id(level));
         const auto after=active->current_content();
         if(before!=after)std::fprintf(stderr,"[legacy][scene] generation=%llu carrier=%u content=%s\n",
             static_cast<unsigned long long>(active->published_scenes()),static_cast<unsigned>(ctx->r4),
@@ -361,13 +405,17 @@ extern "C" int dkr_legacy_asset_api(std::uint8_t* rdram,recomp_context* ctx,unsi
     auto active=legacy::session.load();if(!active)return 0;
     try {
         auto lease=active->acquire();const auto mount=lease.route();if(!mount)return 0;
+        const auto section=static_cast<std::uint32_t>(ctx->r4);
+        // Section 2 is already part of the shared boot-owned texture bank;
+        // its offsets may change with the active legacy course's artwork.
+        if(operation==static_cast<unsigned>(dkr::mods::AssetOperation::PartialLoad) && section!=2 &&
+           dkr_custom_tracks_asset_override(rdram,ctx))return 1;
         const auto payload=active_payload();
         if(!payload)throw dkr::mods::Error("The custom asset loader has no selected revision.");
-        const auto section=std::uint32_t(ctx->r4);
-        if(operation==unsigned(dkr::mods::AssetOperation::PartialLoad) && dkr_custom_tracks_asset_override(rdram,ctx))return 1;
         const bool handled=dkr::mods::dispatch_asset_api(static_cast<dkr::mods::AssetOperation>(operation),mount,
             {rdram,recomp::mem_size},*ctx,{payload->asset_allocate,payload->asset_release,payload->asset_copy});
-        if(handled && operation==unsigned(dkr::mods::AssetOperation::TableLoad))dkr_custom_tracks_extend_table(rdram,ctx,section);
+        if(handled && operation==static_cast<unsigned>(dkr::mods::AssetOperation::TableLoad) && section!=3)
+            dkr_custom_tracks_extend_table(rdram,ctx,section);
         return handled;
     } catch(const ultramodern::thread_terminated&){throw;}
       catch(const std::exception& error){legacy::fail(error.what());}

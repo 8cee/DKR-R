@@ -77,7 +77,10 @@ def test_registration():
                  "set_default_vehicle", "generate_start_grid",
                  "select_grid_children", "step_music", "play_music",
                  "pick_skybox", "show_skybox", "minimap_fit",
-                 "make_convertible"):
+                 "make_convertible", "ai_copy_difficulty",
+                 "set_face_transparency", "set_texture_transparency",
+                 "restore_custom_textures",
+                 "add_water", "select_water", "remove_water", "wave_preset"):
         check(hasattr(bpy.ops.dkr, name), "operator dkr.%s exists" % name)
     check(hasattr(bpy.types.Scene, "dkr"), "scene settings registered")
 
@@ -434,6 +437,94 @@ def test_import_sets_level_type():
     bpy.ops.dkr.import_level(level=names["Horseshoe Gulch"], with_geometry=False)
     check(level_types.current_key(settings) == "TEST_RACE",
           "Horseshoe Gulch comes in as Special > Test Race")
+
+
+def test_race_ai():
+    print("race AI: the bots' line and the header's AI bytes")
+    from dkr_track_editor import level_header, level_header_template as template
+    from dkr_track_editor import prefs, race_ai
+    from dkr_track_editor.operators import header as header_ops
+    from dkr_track_editor.operators import race_ai as race_ai_ops
+
+    fresh()
+    context = bpy.context
+    check(race_ai_ops.is_drawing(), "the bot lines' draw handler is registered")
+
+    catalog = catalog_module.load()
+    object_type = catalog.get(race_ai.CHECKPOINT)
+    root = scene.ensure_root(context)
+    corners = [(0.0, 0.0), (2000.0, 0.0), (2000.0, 2000.0), (0.0, 2000.0)]
+    for number, (x, z) in enumerate(corners):
+        fields = object_type.fresh_fields()
+        fields.update(index=number * 2, vehicleType=0, isAltCheckpoint=0)
+        placed = gltf_io.MapObject(object_id=race_ai.CHECKPOINT, name="Checkpoint",
+                                   translation=[x, 0.0, z], fields=fields)
+        scene.create_empty(context, placed, catalog, root)["dkr_order"] = number
+
+    route, _objects = race_ai_ops.read_route(context)
+    check(len(route.main) == 4, "four placed checkpoints make a four-gate route (%d)"
+          % len(route.main))
+    found = race_ai_ops.geometry(route)
+    check(all(found["lanes"]) and all(len(p) == 4 for p in found["points"]),
+          "every lane has a line and a point on every gate")
+
+    first = race_ai_ops.checkpoint_empties(context)[0]
+    before = race_ai_ops.geometry(race_ai_ops.read_route(context)[0])["points"][0][0]
+    first.rotation_euler.z = math.radians(90.0)
+    after = race_ai_ops.geometry(race_ai_ops.read_route(context)[0])["points"][0][0]
+    check(before != after, "turning a checkpoint in the viewport turns its lanes")
+
+    context.scene.dkr.show_ai_lines = True
+    try:
+        race_ai_ops._draw()  # no GPU in the background: it must not raise
+        survived = True
+    except Exception:  # noqa: BLE001
+        survived = False
+    check(survived, "the draw handler never raises, GPU or not")
+
+    ai = context.scene.dkr_ai
+    check(ai.skill_0 == 2 and ai.adv1_0 == 0 and not header_ops.overrides(context),
+          "unanswered, the panel shows the survey's defaults and writes nothing")
+    ai.adv1_1 = 4
+    ai.skill_3 = 0
+    ai.trophy_9 = 4
+    ai.set_2 = 1
+    answers = header_ops.overrides(context)
+    check(answers.get("/ai-levels/adv1/silver-coins") == 4
+          and answers.get("/unknown/unkC/3") == 0
+          and answers.get("/unknown/unk16/9") == 4
+          and answers.get("/unknown/unk4F/2") == 1,
+          "an edit in the panel is a header answer")
+    document = template.document(header_ops.effective_overrides(context))
+    payload = level_header.encode(document, catalog.raw.get("enumValues", {}))
+    check(payload[0x21] == 4 and payload[0x0C + 3] == 0
+          and payload[0x16 + 9] == 4 and payload[0x4F + 2] == 1,
+          "and lands on the bytes the game reads")
+    context.scene.dkr.ai_line_vehicle = "VEHICLE_PLANE"
+    check(not race_ai_ops.read_route(context)[0].main,
+          "the plane now loads set 1, which this scene leaves empty")
+
+    tree = prefs.resolve(context)
+    names = {level.label: level.name for level in tree.levels()} if tree else {}
+    if "Ancient Lake" not in names:
+        print("  skip: no decomp assets")
+        return
+    bpy.ops.dkr.import_level(level=names["Ancient Lake"], with_geometry=False)
+    ai = bpy.context.scene.dkr_ai
+    check(ai.skill_2 == 1 and ai.adv1_4 == 6 and ai.set_2 == 1,
+          "importing Ancient Lake brings its difficulty and its plane's set")
+    check(header_ops.inherited_overrides(bpy.context).get("/unknown/unkC/2") == 1,
+          "and a remix lays it back over the inherited header")
+    bpy.context.scene.dkr.ai_line_vehicle = "VEHICLE_CAR"
+    lake = race_ai_ops.read_route(bpy.context)[0]
+    check(len(lake.main) > 10 and not lake.duplicates,
+          "Ancient Lake's car route loads (%d gates)" % len(lake.main))
+
+    fresh()
+    bpy.ops.dkr.ai_copy_difficulty(level=names["Ancient Lake"])
+    copied = header_ops.overrides(bpy.context)
+    check(bpy.context.scene.dkr_ai.adv2_4 == 7 and "/unknown/unk4F/2" not in copied,
+          "Copy Difficulty takes the levels and skills, not the checkpoint sets")
 
 
 def test_skybox():
@@ -1137,6 +1228,144 @@ def test_geometry_vertex_edit():
           "and the header bounds it recomputed")
 
 
+def test_geometry_colour_edit():
+    """Repaint one vertex: the colour reaches the file without a rebuild.
+
+    The baked lighting multiplies into the texture, so losing it is not a
+    subtle shading difference - it draws the track black. The in-place patch
+    used to write positions, flags and surface types and quietly drop colour,
+    which meant an author could repaint, export, see every other edit land, and
+    have no way to tell the lighting had not.
+    """
+    print("repainting a vertex")
+    from dkr_track_editor import level_model, level_model_encoder
+    from dkr_track_editor.operators import geometry as geometry_ops
+    from dkr_track_editor.operators import geometry_export
+
+    path, obj = _import_lake(include_hidden=True)
+    if path is None:
+        print("  skip: no extracted level models")
+        return
+
+    mesh = obj.data
+    base_model = level_model.load(path)
+    painted_at = 11
+    segment_index, vertex_index = _identity(mesh)[painted_at]
+    was = base_model.segments[segment_index].colours[vertex_index]
+    now = tuple(0 if channel == 255 else 255 for channel in was)
+
+    for channel, name in enumerate(geometry_ops.ATTR_COLOUR_CHANNELS):
+        attribute = mesh.attributes[name]
+        values = [0] * len(attribute.data)
+        attribute.data.foreach_get("value", values)
+        values[painted_at] = now[channel]
+        attribute.data.foreach_set("value", values)
+
+    edit = geometry_export.build_edited_model(bpy.context)
+    check(not edit.rebuilt,
+          "nothing was added or removed, so the file keeps its layout")
+    check(edit.summary.painted == 1,
+          "exactly one vertex is reported repainted (got %d)" % edit.summary.painted)
+
+    differing = [
+        (s, v)
+        for s, segment in enumerate(base_model.segments)
+        for v in range(len(segment.colours))
+        if tuple(segment.colours[v]) != tuple(edit.model.segments[s].colours[v])
+    ]
+    check(differing == [(segment_index, vertex_index)],
+          "exactly the repainted vertex differs in the file (got %r)" % (differing,))
+    check(tuple(edit.model.segments[segment_index].colours[vertex_index]) == now,
+          "and it carries the colour that was painted (%r -> %r)" % (was, now))
+
+    reparsed = level_model.parse(
+        level_model.decompress(level_model_encoder.pack(edit.model))
+    )
+    check(tuple(reparsed.segments[segment_index].colours[vertex_index]) == now,
+          "which reads back from the encoded model")
+
+
+def test_unpainted_colour_layer():
+    """An all-zero colour layer is not a black track, and it says so.
+
+    Blender starts a new colour attribute white, so an all-zero layer does not
+    come from Blender - it comes from carrying already-black vertices through
+    a mesh. Testing only that a layer exists let one through and built a track
+    black everywhere, with nothing anywhere saying why. Testing whether the
+    layer carries anything keeps the fallback and leaves a deliberate black
+    alone.
+    """
+    print("reading an all-zero colour layer")
+    from dkr_track_editor.operators import geometry as geometry_ops
+    from dkr_track_editor.operators import new_track
+
+    def mesh_with(layers):
+        fresh()
+        bpy.ops.mesh.primitive_plane_add()
+        mesh = bpy.context.active_object.data
+        for name, domain, colour in layers:
+            layer = mesh.color_attributes.new(name, "FLOAT_COLOR", domain)
+            if colour is not None:
+                layer.data.foreach_set(
+                    "color", list(colour) * len(layer.data))
+        return mesh
+
+    white = (255, 255, 255, 255)
+    name = geometry_ops.COLOUR_ATTRIBUTE
+
+    stats = {}
+    mesh = mesh_with([(name, "POINT", (0.0, 0.0, 0.0, 0.0))])
+    colours = new_track._read_colours(mesh, stats)
+    check(set(colours) == {white},
+          "an all-zero layer builds white, not black (got %r)" % (set(colours),))
+    check(stats.get("colour_pristine") == name,
+          "and the reason is recorded for the author (got %r)"
+          % (stats.get("colour_pristine"),))
+
+    # Black with an opaque alpha is a choice, and it survives.
+    stats = {}
+    mesh = mesh_with([(name, "POINT", (0.0, 0.0, 0.0, 1.0))])
+    colours = new_track._read_colours(mesh, stats)
+    check(set(colours) == {(0, 0, 0, 255)},
+          "black painted on purpose is kept (got %r)" % (set(colours),))
+    check("colour_pristine" not in stats,
+          "and is not reported as unpainted")
+
+    # Paint on one channel only is still paint.
+    stats = {}
+    mesh = mesh_with([(name, "POINT", (0.0, 0.0, 1.0, 0.0))])
+    colours = new_track._read_colours(mesh, stats)
+    check(set(colours) == {(0, 0, 255, 0)},
+          "a single painted channel counts as painted (got %r)" % (set(colours),))
+
+    # The layer the author did paint is named rather than guessed at.
+    stats = {}
+    mesh = mesh_with([(name, "POINT", (0.0, 0.0, 0.0, 0.0)),
+                      ("Color", "CORNER", (1.0, 0.5, 0.25, 1.0))])
+    colours = new_track._read_colours(mesh, stats)
+    check(set(colours) == {white}, "an all-zero layer still builds white")
+    check(stats.get("colour_elsewhere") == ["Color"],
+          "and the painted layer is named, not chosen (got %r)"
+          % (stats.get("colour_elsewhere"),))
+
+    # A layer Blender just created is white, which is real lighting.
+    stats = {}
+    mesh = mesh_with([(name, "POINT", None)])
+    colours = new_track._read_colours(mesh, stats)
+    check(set(colours) == {white},
+          "a freshly created layer is white and is kept (got %r)" % (set(colours),))
+    check("colour_pristine" not in stats,
+          "and is not reported as unpainted, because Blender starts it white")
+
+    # A baked layer on the wrong domain is reported as such.
+    stats = {}
+    mesh = mesh_with([(name, "CORNER", (1.0, 1.0, 1.0, 1.0))])
+    colours = new_track._read_colours(mesh, stats)
+    check(set(colours) == {white}, "a CORNER baked layer builds white")
+    check(str(stats.get("colour_domain")) == "CORNER",
+          "and its domain is reported (got %r)" % (stats.get("colour_domain"),))
+
+
 def test_geometry_refuses_orphans():
     """A vertex with no segment and no face has nowhere to go, and says so.
 
@@ -1595,6 +1824,123 @@ def test_geometry_add_geometry():
           % len(missing))
 
 
+def test_geometry_across_segments():
+    """A face built across the join between two segments is written, not refused.
+
+    Merging, filling or bridging over a segment boundary is ordinary modelling,
+    and the first thing an author tidying up a converted track does. The face
+    goes to one segment and the corners the other owns are copied into it.
+    """
+    print("geometry across segments")
+    from dkr_track_editor import level_model, level_model_encoder
+    from dkr_track_editor import level_model_layout as layout
+    from dkr_track_editor.operators import geometry as geometry_ops
+    from dkr_track_editor.operators import geometry_export
+
+    path, obj = _import_lake(include_hidden=True)
+    if path is None:
+        print("  skip: no extracted level models")
+        return
+
+    mesh = obj.data
+    owner = [d.value for d in mesh.attributes[geometry_ops.ATTR_SEGMENT].data]
+    positions = [v.co.copy() for v in mesh.vertices]
+    first = next(at for at, value in enumerate(owner) if value == 1)
+    others = sorted((at for at, value in enumerate(owner) if value == 2),
+                    key=lambda at: (positions[at] - positions[first]).length)
+    near, further = others[0], others[1]
+
+    bm = _edit_mesh(obj)
+    bm.verts.ensure_lookup_table()
+    # Held, not re-indexed: adding a vertex outdates bmesh's lookup table.
+    a, b, c = bm.verts[first], bm.verts[near], bm.verts[further]
+    bm.faces.new((a, b, c))
+    # And a vertex made from nothing between the same two segments.
+    middle = bm.verts.new((positions[first] + positions[near]) / 2.0)
+    bm.faces.new((a, middle, b))
+    import bmesh
+    bmesh.update_edit_mesh(mesh)
+    bpy.ops.object.mode_set(mode="OBJECT")
+
+    base = level_model.load(path)
+    try:
+        edit = geometry_export.build_edited_model(bpy.context)
+        refused = None
+    except geometry_export.GeometryExportError as error:
+        edit, refused = None, str(error)
+    check(refused is None, "a face across two segments exports (%s)" % refused)
+    if edit is None:
+        return
+    check(edit.model.triangle_count == base.triangle_count + 2,
+          "both new triangles are in the model (+%d)"
+          % (edit.model.triangle_count - base.triangle_count))
+    check(any("crossed between segments" in note for note in edit.notes),
+          "and the export says it copied corners across")
+    blob = level_model.decompress(level_model_encoder.pack(edit.model))
+    reparsed = level_model.parse(blob)
+    check(reparsed.triangle_count == edit.model.triangle_count
+          and not layout.check_windows(reparsed),
+          "it re-encodes, re-parses and every batch window still tiles")
+    check(not layout.bsp_problems(reparsed), "and the BSP still walks")
+
+
+def test_geometry_merge_by_distance():
+    """Merge by Distance over a whole track exports, and exports it intact.
+
+    The first thing an author tidying a converted track reaches for, and it
+    welds every boundary between segments. Blender averages integer attributes
+    as it welds, so it invents segment ids - which stretched six segment boxes
+    across Ancient Lake - and garbles the packed vertex colour. Both have to
+    come out right.
+    """
+    print("merge by distance")
+    from dkr_track_editor import level_model_layout as layout
+    from dkr_track_editor.operators import geometry as geometry_ops
+    from dkr_track_editor.operators import geometry_export
+
+    path, obj = _import_lake(include_hidden=True)
+    if path is None:
+        print("  skip: no extracted level models")
+        return
+
+    mesh = obj.data
+    raw = [d.value for d in mesh.attributes[geometry_ops.ATTR_COLOUR].data]
+    before = {}
+    for vertex, value in zip(mesh.vertices, raw):
+        where = tuple(int(round(c)) for c in scene.to_map(obj.matrix_world @ vertex.co))
+        before.setdefault(where, []).append(geometry_ops.unpack_colour(value))
+    count = len(mesh.vertices)
+
+    _edit_mesh(obj)
+    bpy.ops.mesh.select_all(action="SELECT")
+    bpy.ops.mesh.remove_doubles(threshold=0.5)
+    bpy.ops.object.mode_set(mode="OBJECT")
+    check(len(obj.data.vertices) < count,
+          "the merge welded the segment boundaries (%d -> %d vertices)"
+          % (count, len(obj.data.vertices)))
+
+    edit = geometry_export.build_edited_model(bpy.context)
+    check(not layout.oversized_segments(edit.model),
+          "no segment box stretches across the track (%s)"
+          % layout.oversized_segments(edit.model))
+
+    outside = 0
+    for segment in edit.model.segments:
+        for position, colour in zip(segment.vertices, segment.colours):
+            there = before.get(tuple(position))
+            if not there:
+                continue
+            for channel in range(4):
+                low = min(c[channel] for c in there) - 1
+                high = max(c[channel] for c in there) + 1
+                if not low <= colour[channel] <= high:
+                    outside += 1
+                    break
+    check(not outside,
+          "every vertex colour lies between the colours welded into it "
+          "(%d do not)" % outside)
+
+
 def test_geometry_remove_geometry():
     """Deleting faces has to shrink the track rather than be ignored."""
     print("removing geometry")
@@ -1763,28 +2109,33 @@ def test_header_from_scratch():
     fresh(level_type=None)
     check(not header_ops.overrides(bpy.context),
           "a fresh scene answers nothing")
-    check(sorted(header_ops.unanswered(bpy.context)) == ["/race-type", "/world"],
-          "and the two fields with no default are the ones outstanding (%r)"
+    check(header_ops.unanswered(bpy.context) == ["/race-type"],
+          "only the race type remains outstanding (%r)"
           % (header_ops.unanswered(bpy.context),))
 
     check(bpy.ops.dkr.header_defaults() == {"FINISHED"}, "Fill Defaults runs")
     filled = header_ops.overrides(bpy.context)
     check(len(filled) >= 10, "it answers most of the form (%d)" % len(filled))
-    check(sorted(header_ops.unanswered(bpy.context)) == ["/race-type", "/world"],
-          "but never invents a world or a race type, because zero is a real "
-          "value for both rather than an absence")
+    check(header_ops.unanswered(bpy.context) == ["/race-type"],
+          "the race type still needs an answer")
+    check(filled.get("/world") == "WORLD_CUSTOM_TRACKS",
+          "Fill Defaults selects Custom Tracks")
     check(header_ops.key_for("/race-type") not in bpy.context.scene,
           "and leaves what the Level Type owns to the Level Type")
 
     bpy.ops.dkr.set_level_type(mode="RACE")
-    check(header_ops.unanswered(bpy.context) == ["/world"],
-          "choosing the level type answers the race type")
+    check(not header_ops.unanswered(bpy.context),
+          "choosing the level type completes the default header")
+    check(header_ops.inherited_overrides(bpy.context)["/world"] == "WORLD_CUSTOM_TRACKS",
+          "remixes also default to Custom Tracks")
 
     world = _pick("World")
     if not world:
         print("  skip: the catalogue has no World enum")
         return
     bpy.context.scene[header_ops.key_for("/world")] = world
+    check(header_ops.inherited_overrides(bpy.context)["/world"] == world,
+          "an explicit world is respected for remixes")
     check(not header_ops.unanswered(bpy.context),
           "answering the world completes the header")
 
@@ -1820,18 +2171,12 @@ def test_header_reaches_the_package():
     try:
         target = os.path.join(temporary, "scratch-track.dkrmap")
 
-        # Answering only some of it is refused, not filled in: the field with
-        # no default is the world (the race type comes from the Level Type),
-        # and shipping zero for it would quietly make the track something else.
+        # A new race exports directly into Custom Tracks without choosing a world.
         bpy.ops.dkr.header_defaults()
-        try:
-            bpy.ops.dkr.export_dkrmap(filepath=target, validate_first=False)
-            check(False, "a partly answered header is refused")
-        except RuntimeError as error:
-            check("unanswered" in str(error),
-                  "a partly answered header is refused (%s)" % str(error)[:70])
-            check("/world" in str(error) and "/race-type" not in str(error),
-                  "and the message names the world, the one field left")
+        check(bpy.ops.dkr.export_dkrmap(filepath=target, validate_first=False) == {"FINISHED"},
+              "the default world exports without another answer")
+        with open(os.path.join(target, "header.bin"), "rb") as handle:
+            check(handle.read(1) == bytes([6]), "the package targets Custom Tracks")
 
         bpy.context.scene[header_ops.key_for("/world")] = world
         result = bpy.ops.dkr.export_dkrmap(filepath=target, validate_first=False)
@@ -2262,6 +2607,159 @@ def test_drop_to_surface():
     check(abs(zipper.location.z - centre.z) < 1.0,
           "it landed on the face it was above (%0.2f vs %0.2f)"
           % (zipper.location.z, centre.z))
+
+
+def test_click_to_place():
+    """Where a click in the viewport puts an object.
+
+    The modal session itself needs a window and a mouse, which a background
+    run has neither of; what it does with a click is this ray, tested here.
+    """
+    print("click to place")
+    from mathutils import Matrix, Vector
+    from dkr_track_editor.operators import snap
+
+    fresh()
+    context = bpy.context
+    context.scene.cursor.location = (0.0, 0.0, -50.0)
+    down = Vector((0.0, 0.0, -1.0))
+
+    at = snap.click_location(context, Vector((10.0, 20.0, 100.0)), down)
+    check(at is not None and (at - Vector((10.0, 20.0, -50.0))).length < 1e-4,
+          "with no track, a click lands on the plane through the cursor (%r)"
+          % (at,))
+    check(snap.click_location(context, Vector((0.0, 0.0, 100.0)),
+                              Vector((0.0, 0.0, 1.0))) is None,
+          "a click at the sky places nothing")
+
+    road = _flat_road(context)
+
+    slanted = Vector((1.0, 0.0, -1.0)).normalized()
+    at = snap.click_location(context, Vector((-100.0, 0.0, 100.0)), slanted)
+    check(at is not None and at.length < 1e-3,
+          "a slanted click lands where the ray meets the track (%r)" % (at,))
+
+    # The bug this replaces: a click past the edge of the track fell through
+    # to the cursor plane, which near the horizon is thousands of units off.
+    at = snap.click_location(context, Vector((2000.0, 0.0, 100.0)), down)
+    check(at is None, "a click that misses the track places nothing (%r)" % (at,))
+
+    road.hide_set(True)
+    at = snap.click_location(context, Vector((0.0, 0.0, 100.0)), down)
+    check(at is not None and abs(at.z + 50.0) < 1e-4,
+          "a hidden track is not clicked on (%r)" % (at,))
+    road.hide_set(False)
+
+    # A view looking straight down from z=100, drawing only depths 1..50 in
+    # front of the eye: the road, 100 below, is past its far clip.
+    near, far = 1.0, 50.0
+    looking_down = Matrix((
+        (1.0, 0.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0, 0.0),
+        (0.0, 0.0, -(far + near) / (far - near), -2.0 * far * near / (far - near)),
+        (0.0, 0.0, -1.0, 0.0),
+    )) @ Matrix.Translation((0.0, 0.0, -100.0))
+    at = snap.click_location(context, Vector((0.0, 0.0, 100.0)), down,
+                             matrix=looking_down)
+    check(at is None, "track past the far clip, not drawn, is not landed on")
+    far = 500.0
+    looking_down = Matrix((
+        (1.0, 0.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0, 0.0),
+        (0.0, 0.0, -(far + near) / (far - near), -2.0 * far * near / (far - near)),
+        (0.0, 0.0, -1.0, 0.0),
+    )) @ Matrix.Translation((0.0, 0.0, -100.0))
+    at = snap.click_location(context, Vector((0.0, 0.0, 100.0)), down,
+                             matrix=looking_down)
+    check(at is not None and at.length < 1e-3,
+          "with the far clip past it, the track is landed on (%r)" % (at,))
+
+    # No window to click in: invoking falls back to one object at the cursor.
+    for _ in range(2):
+        result = bpy.ops.dkr.place_object("INVOKE_DEFAULT",
+                                          object_id="ASSET_OBJECT_CHECKPOINT")
+        check(result == {"FINISHED"}, "invoked without a window, it places")
+    indices = sorted(o.get("index") for o in scene.iter_dkr_objects(context))
+    check(indices == [0, 1], "each checkpoint takes the next index (%r)"
+          % (indices,))
+    from dkr_track_editor.operators.edit import DKR_OT_place_object
+    check(DKR_OT_place_object.placing() is None,
+          "no placing session is left running")
+
+
+def _flat_road(context, location=(0.0, 0.0, 0.0)):
+    """A 1000-unit square of track at z=0, as the importer would mark it."""
+    from dkr_track_editor.operators import geometry as geometry_ops
+
+    mesh = bpy.data.meshes.new("road")
+    mesh.from_pydata([(-500.0, -500.0, 0.0), (500.0, -500.0, 0.0),
+                      (500.0, 500.0, 0.0), (-500.0, 500.0, 0.0)],
+                     [], [(0, 1, 2, 3)])
+    road = bpy.data.objects.new("road", mesh)
+    road.location = location
+    road[geometry_ops.PROP_GEOMETRY] = geometry_ops.GEOMETRY_KIND
+    context.scene.collection.objects.link(road)
+    context.view_layer.update()
+    return road
+
+
+def test_snapping_to_elements():
+    """The screen-space snaps, against a matrix instead of a window."""
+    print("snapping to elements")
+    import numpy as np
+    from mathutils import Matrix, Vector
+    from dkr_track_editor.operators import snap
+
+    # Top down, one unit to a pixel: world (-500..500) fills 1000 pixels.
+    flat = Matrix((
+        (1.0 / 500.0, 0.0, 0.0, 0.0),
+        (0.0, 1.0 / 500.0, 0.0, 0.0),
+        (0.0, 0.0, -0.001, 0.0),
+        (0.0, 0.0, 0.0, 1.0),
+    ))
+    size = (1000, 1000)
+    corners = np.array([(-500.0, -500.0, 0.0), (500.0, 500.0, 0.0)])
+    found = snap.nearest_points(corners, flat, size, (990.0, 995.0), 20.0)
+    check(len(found) == 1 and (found[0][1] - Vector((500.0, 500.0, 0.0))).length < 1e-6,
+          "the vertex under the mouse is caught (%r)" % (found,))
+    check(snap.nearest_points(corners, flat, size, (900.0, 900.0), 20.0) == [],
+          "a vertex further than the threshold is not")
+
+    # An edge running away from the eye: w = z. Halfway along it on screen
+    # is a third of the way along it in the world.
+    receding = Matrix((
+        (1.0, 0.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0, 0.0),
+        (0.0, 0.0, 0.5, 0.0),
+        (0.0, 0.0, 1.0, 0.0),
+    ))
+    vertices = np.array([(-1.0, 0.0, 1.0), (1.0, 0.0, 3.0)])
+    edges = np.array([(0, 1)])
+    found = snap.nearest_on_edges(vertices, edges, receding, size,
+                                  (400.0, 510.0), 20.0)
+    check(len(found) == 1, "the edge under the mouse is caught")
+    if found:
+        pixels, _w, _drawn = snap.project([found[0][1]], receding, size)
+        check(abs(pixels[0][0] - 400.0) < 1e-3 and abs(pixels[0][1] - 500.0) < 1e-3,
+              "the point on the edge is the one drawn under the mouse (%r)"
+              % (pixels[0],))
+        check((found[0][1] - Vector((-1.0 / 3.0, 0.0, 5.0 / 3.0))).length < 1e-6,
+              "undoing the perspective divide (%r)" % (found[0][1],))
+
+    # One unit a pixel: a grid of 1 is too fine to see, 10 still is, 100 is not.
+    step = snap.grid_step(Vector((0.0, 0.0, 0.0)), flat, size, 1.0, 10)
+    check(step == 100.0, "the grid step follows the zoom (%r)" % (step,))
+
+    fresh()
+    road = _flat_road(bpy.context, location=(10.0, 0.0, 5.0))
+    vertices, edges, faces = snap.Snapper()._read(
+        road, bpy.context.evaluated_depsgraph_get())
+    check(vertices.shape == (4, 3) and edges.shape == (4, 2) and faces.shape == (1, 3),
+          "the track is read as vertices, edges and face centres")
+    check(abs(vertices[:, 0].min() + 490.0) < 1e-4 and abs(vertices[0, 2] - 5.0) < 1e-4,
+          "in world space (%r)" % (vertices[0],))
+    check((Vector(faces[0]) - Vector((10.0, 0.0, 5.0))).length < 1e-4,
+          "the face centre too (%r)" % (faces[0],))
 
 
 def _texture_catalogue(context):
@@ -3017,6 +3515,140 @@ def test_track_from_mesh_keeps_material_textures():
         fresh()
 
 
+def _shown_pictures(obj):
+    """``{table index: the file its material draws, or None}``."""
+    from dkr_track_editor.operators import custom_textures as custom_ops
+    from dkr_track_editor.operators import geometry as geometry_ops
+
+    shown = {}
+    for material in obj.data.materials:
+        index = int(material.get(geometry_ops.PROP_TEXTURE_INDEX, -1))
+        if index < 0:
+            continue
+        node = custom_ops.image_node(material)
+        shown[index] = (os.path.normcase(os.path.normpath(
+            bpy.path.abspath(node.image.filepath))) if node else None)
+    return shown
+
+
+def test_moved_blend_rebuilds_its_textures():
+    """A .blend moved without its dkr_textures folder converts again correctly.
+
+    The case that shipped: a track converted in one folder, the .blend moved
+    to another without the folder beside it, and converted again after an
+    edit that left one material with no faces - which moves every later
+    texture table entry up. The materials are reused by entry, and with no PNG
+    to load each went on showing what its entry held before: the picture one
+    place along, all over the track, while the file itself was right.
+
+    The pictures are packed and their files deleted, as a glTF import leaves
+    them, so the .blend is the only thing left to rebuild them from.
+    """
+    print("a moved .blend rebuilds its own textures and shows them in place")
+    from dkr_track_editor import textures as texture_module
+    from dkr_track_editor.operators import custom_textures as custom_ops
+    from dkr_track_editor.operators import geometry as geometry_ops
+
+    fresh()
+    first = tempfile.mkdtemp(prefix="dkr-moved-from-")
+    second = tempfile.mkdtemp(prefix="dkr-moved-to-")
+    third = tempfile.mkdtemp(prefix="dkr-moved-again-")
+    try:
+        bpy.ops.wm.save_as_mainfile(filepath=os.path.join(first, "moving.blend"))
+        bpy.ops.mesh.primitive_grid_add(size=4000.0, x_subdivisions=4,
+                                        y_subdivisions=4)
+        source = bpy.context.active_object
+        mesh = source.data
+        for index, name in enumerate(("red", "green", "blue")):
+            path = _write_probe_image(first, name, 90 + 30 * index, 50)
+            material = _image_material(name, path)
+            custom_ops.image_of(material).pack()
+            os.remove(path)
+            mesh.materials.append(material)
+        for polygon in mesh.polygons:
+            polygon.material_index = polygon.index % 3
+
+        result = bpy.ops.dkr.track_from_mesh_blank(keep_source=True)
+        check(result == {"FINISHED"}, "the packed pictures convert (%r)" % (result,))
+        own = custom_ops.entries(bpy.context)
+        check(len(own) == 3
+              and all(e.source.startswith(custom_ops.PACKED) for e in own),
+              "each is recorded as a picture packed in the .blend (%r)"
+              % [e.source for e in own])
+        if len(own) != 3:
+            return
+        before = {e.name: texture_module.read_png(e.png) for e in own}
+
+        # The edit: red's faces become green, so red's material draws nothing
+        # and green and blue each move one table entry up.
+        bpy.ops.dkr.make_convertible(object_name=source.name)
+        for polygon in mesh.polygons:
+            if polygon.material_index == 0:
+                polygon.material_index = 1
+
+        # The move. The old folder stays where it was, as it did on the
+        # author's desktop, so the old materials still find their pictures.
+        bpy.ops.wm.save_as_mainfile(filepath=os.path.join(second, "moving.blend"))
+        check(len(custom_ops.missing(bpy.context)) == 3,
+              "moved without its folder, the scene knows all three are missing")
+
+        bpy.context.view_layer.objects.active = source
+        result = bpy.ops.dkr.track_from_mesh_blank(keep_source=True)
+        check(result == {"FINISHED"}, "the moved scene converts again (%r)" % (result,))
+        own = custom_ops.entries(bpy.context)
+        check(len(own) == 3, "reusing its textures rather than adding them again")
+        folder = custom_ops.folder(bpy.context)
+        check(os.path.samefile(os.path.dirname(folder), second)
+              and all(os.path.isfile(e.png) and os.path.isfile(e.original)
+                      and os.path.samefile(os.path.dirname(e.png), folder)
+                      for e in own),
+              "each PNG and its original were rebuilt beside the moved .blend")
+        check(all(texture_module.read_png(e.png) == before[e.name] for e in own),
+              "with the texels they had, so the HD pack keeps its names")
+
+        obj = geometry_ops.geometry_objects(bpy.context)[0]
+        table = geometry_ops.texture_table(obj)
+        ordinals = [texture_module.custom_ordinal(r["id"]) for r in table]
+        check(ordinals == [1, 2],
+              "the table moved up one, as the empty material asks (%r)" % ordinals)
+        wanted = {index: os.path.normcase(os.path.normpath(own[ordinal].png))
+                  for index, ordinal in enumerate(ordinals)}
+        shown = _shown_pictures(obj)
+        check(shown == wanted,
+              "and each material shows its own entry's picture, not the one "
+              "the entry held before the move (%r)" % shown)
+
+        # Moved again, and exported without converting: the export rebuilds.
+        bpy.ops.wm.save_as_mainfile(filepath=os.path.join(third, "moving.blend"))
+        settings = bpy.context.scene.dkr
+        settings.track_name = "Moving"
+        settings.track_id = "moving"
+        bpy.ops.dkr.place_object(object_id="ASSET_OBJECT_SETUPPOINT")
+        result = bpy.ops.dkr.export_dkrmap(
+            filepath=os.path.join(third, "moving.dkrmap"), validate_first=False)
+        check(result == {"FINISHED"},
+              "a scene moved again exports, rebuilding what it left (%r)" % (result,))
+        check(not custom_ops.missing(bpy.context),
+              "and nothing is missing afterwards")
+
+        # Nothing left to rebuild from: the entry shows no picture, not a stale one.
+        shutil.rmtree(custom_ops.folder(bpy.context))
+        bpy.data.images.remove(bpy.data.images["blue.png"])
+        check(bpy.ops.dkr.restore_custom_textures() == {"FINISHED"},
+              "the panel's button rebuilds what it can")
+        lost = [e.name for e in custom_ops.missing(bpy.context)]
+        check(lost == ["blue"],
+              "and leaves missing only the one whose picture is gone (%r)" % lost)
+        shown = _shown_pictures(obj)
+        check(shown.get(0) is not None and shown.get(1) is None,
+              "whose material then shows no picture rather than its old one (%r)"
+              % shown)
+    finally:
+        fresh()
+        for directory in (first, second, third):
+            shutil.rmtree(directory, ignore_errors=True)
+
+
 def test_track_from_mesh_survives_ctrl_j():
     """Pieces joined with Ctrl+J keep their mapping, whatever their maps were called.
 
@@ -3396,6 +4028,592 @@ def test_custom_texture_removal_keeps_the_numbering_honest():
         fresh()
 
 
+class _OperatorProperties:
+    """Check properties assigned to the button returned by layout.operator."""
+
+    def __init__(self, idname, rna):
+        object.__setattr__(self, "_idname", idname)
+        object.__setattr__(self, "_rna", rna)
+
+    def __setattr__(self, name, value):
+        if name not in self._rna.properties:
+            raise AttributeError("%s has no property %r" % (self._idname, name))
+        object.__setattr__(self, name, value)
+
+
+class _Layout:
+    """A stand-in for a panel's layout that checks what a panel asks it for.
+
+    Blender draws nothing in the background, so a panel's ``draw`` is only
+    reachable by calling it; this makes a missing property or operator fail
+    the way it would in the sidebar, and records what was drawn.
+    """
+
+    def __init__(self, drawn=None):
+        self.drawn = drawn if drawn is not None else []
+        self.active = True
+        self.alert = False
+        self.enabled = True
+        self.alignment = "EXPAND"
+        self.scale_y = 1.0
+
+    def _child(self, *args, **kwargs):
+        return _Layout(self.drawn)
+
+    row = column = box = split = grid_flow = column_flow = _child
+
+    def label(self, text="", **kwargs):
+        self.drawn.append(("label", text))
+
+    def separator(self, **kwargs):
+        pass
+
+    def template_icon(self, **kwargs):
+        pass
+
+    def prop(self, owner, name, **kwargs):
+        if not hasattr(owner, name):
+            raise AttributeError("the panel draws %r, which %r does not have"
+                                 % (name, owner))
+        self.drawn.append(("prop", name))
+
+    def _operator_type(self, idname):
+        module, name = idname.split(".")
+        operator = getattr(getattr(bpy.ops, module), name)
+        return operator.get_rna_type()
+
+    def operator(self, idname, **kwargs):
+        rna = self._operator_type(idname)
+        self.drawn.append(("operator", idname))
+        return _OperatorProperties(idname, rna)
+
+    def operator_menu_enum(self, idname, prop, **kwargs):
+        rna = self._operator_type(idname)
+        if prop not in rna.properties:
+            raise AttributeError("%s has no property %r" % (idname, prop))
+        if rna.properties[prop].type != "ENUM":
+            raise TypeError("%s.%s is not an enum" % (idname, prop))
+        self.drawn.append(("menu", idname))
+
+
+def _draw_panel(panel):
+    layout = _Layout()
+    panel.draw(types.SimpleNamespace(layout=layout), bpy.context)
+    return layout.drawn
+
+
+def _write_alpha_image(directory, name, width, height, kind):
+    """A picture with transparency: ``"holes"`` has hard holes, ``"soft"`` fades.
+
+    The holes are a checker of solid and clear cells with a one-pixel
+    half-covered rim on one side, the way an anti-aliased brush leaves them;
+    the fade runs alpha across the whole width.
+    """
+    image = bpy.data.images.new(name, width, height, alpha=True)
+    pixels = [0.0] * (width * height * 4)
+    for row in range(height):
+        for column in range(width):
+            at = (row * width + column) * 4
+            pixels[at] = 0.8
+            pixels[at + 1] = 0.4
+            pixels[at + 2] = 0.1
+            if kind == "soft":
+                alpha = column / max(1, width - 1)
+            else:
+                cell = ((column * 4) // width + (row * 4) // height) % 2
+                alpha = 1.0 if cell == 0 else 0.0
+                if cell == 1 and (column * 4) % width == 0:
+                    alpha = 0.5
+            pixels[at + 3] = alpha
+    image.pixels.foreach_set(pixels)
+    path = os.path.join(directory, name + ".png")
+    image.file_format = "PNG"
+    image.filepath_raw = path
+    image.save()
+    bpy.data.images.remove(image)
+    return path
+
+
+def _read_opaque(mesh):
+    values = [False] * len(mesh.polygons)
+    mesh.attributes["dkr_opaque"].data.foreach_get("value", values)
+    return values
+
+
+def _batches_of(model, texture_index):
+    """``[(segment, batch index, batch), ...]`` drawing one table entry."""
+    return [(segment, index, batch)
+            for segment in model.segments
+            for index, batch in enumerate(segment.batches)
+            if batch.texture_index == texture_index]
+
+
+def test_transparent_rom_texture_is_drawn():
+    """A see-through texture from the ROM lands in the pass that draws it.
+
+    The bug this closes: a road retextured with the ROM's water kept the opaque
+    side of ``numberofOpaqueBatches``, and ``render_level_segment`` never draws
+    a see-through batch there - nor, being outside its range, in the second
+    pass. The face vanished in game.
+    """
+    print("a see-through ROM texture is drawn")
+    from dkr_track_editor import level_model, level_model_encoder, transparency
+    from dkr_track_editor.operators import geometry as geometry_ops
+    from dkr_track_editor.operators import geometry_export
+
+    path, obj = _import_lake(include_hidden=True)
+    if path is None:
+        print("  skip: no extracted level models")
+        return
+    catalogue = _texture_catalogue(bpy.context)
+    if not catalogue:
+        print("  skip: no extracted textures")
+        return
+
+    base = level_model.load(path)
+    used = {texture.texture_id for texture in base.textures}
+    glass = next((e for e in catalogue if e.translucent and not e.animated
+                  and e.format == 0 and e.index not in used), None)
+    solid = next((e for e in catalogue if not e.translucent and not e.animated
+                  and e.format == 1 and e.index not in used), None)
+    if glass is None or solid is None:
+        print("  skip: no unused see-through and solid textures")
+        return
+
+    mesh = obj.data
+    flags = _read_flags(mesh)
+    opaque = _read_opaque(mesh)
+    road = [index for index, value in enumerate(flags)
+            if geometry_ops.category_of(geometry_ops.to_unsigned32(value))
+            == geometry_ops.SURFACE and opaque[index]][:10]
+    check(len(road) > 2, "there are solid road faces to retexture (%d)" % len(road))
+    if len(road) < 3:
+        return
+    _select_faces(mesh, road)
+
+    settings = bpy.context.scene.dkr
+    settings.texture_id = glass.index
+    settings.texture_mapping = "KEEP"
+    settings.texture_transparency = "AUTO"
+    result = bpy.ops.dkr.apply_texture()
+    check(result == {"FINISHED"}, "the see-through texture applies (%r)" % (result,))
+
+    opaque = _read_opaque(mesh)
+    check(not any(opaque[index] for index in road),
+          "the faces moved to the see-through side")
+    flags = _read_flags(mesh)
+    check(not any(geometry_ops.to_unsigned32(flags[index])
+                  & transparency.RENDER_CUTOUT for index in road),
+          "and blend rather than cut out, which is how the texture was made")
+    slot = mesh.polygons[road[0]].material_index
+    check(mesh.materials[slot].get(geometry_ops.PROP_LOOK) == transparency.BLEND,
+          "the material shows the picture blended")
+
+    added = len(base.textures)
+    edit = geometry_export.build_edited_model(bpy.context)
+    drawing = _batches_of(edit.model, added)
+    check(drawing and all(index >= segment.opaque_batches
+                          for segment, index, _b in drawing),
+          "every batch drawing it is in the second pass (%d batches)"
+          % len(drawing))
+    payload = level_model_encoder.pack(edit.model)
+    again = level_model.parse(level_model.decompress(payload))
+    check(all(index >= segment.opaque_batches
+              for segment, index, _b in _batches_of(again, added)),
+          "and stays there through the file")
+
+    # Cut out instead: the faces' own choice.
+    result = bpy.ops.dkr.set_face_transparency(look="CUTOUT")
+    check(result == {"FINISHED"}, "the faces can be cut out (%r)" % (result,))
+    flags = _read_flags(mesh)
+    check(all(geometry_ops.to_unsigned32(flags[index])
+              & transparency.RENDER_CUTOUT for index in road),
+          "and carry RENDER_CUTOUT")
+    edit = geometry_export.build_edited_model(bpy.context)
+    drawing = _batches_of(edit.model, added)
+    check(drawing and all(batch.flags & transparency.RENDER_CUTOUT
+                          and index >= segment.opaque_batches
+                          for segment, index, batch in drawing),
+          "a cut-out over a see-through texture is still drawn second, as "
+          "retail's are")
+
+    # A blend is not something a solid texture can be.
+    settings.texture_id = solid.index
+    settings.texture_transparency = "BLEND"
+    settings.texture_mapping = "PROJECT"
+    result = bpy.ops.dkr.apply_texture()
+    check(result == {"FINISHED"}, "a solid texture applies over them (%r)" % (result,))
+    opaque = _read_opaque(mesh)
+    check(all(opaque[index] for index in road),
+          "and the faces are back on the solid side")
+    flags = _read_flags(mesh)
+    check(not any(geometry_ops.to_unsigned32(flags[index])
+                  & transparency.RENDER_CUTOUT for index in road),
+          "asking a solid texture to blend leaves it solid, not cut out")
+    refused = _refused(lambda: bpy.ops.dkr.set_face_transparency(look="BLEND"))
+    check(refused is not None and "only be" in refused,
+          "and making the faces blend is refused with the reason (%s)" % refused)
+    edit = geometry_export.build_edited_model(bpy.context)
+    solid_index = len(base.textures) + 1
+    drawing = _batches_of(edit.model, solid_index)
+    check(drawing and all(index < segment.opaque_batches
+                          for segment, index, _b in drawing),
+          "the solid texture's batches are drawn in the first pass")
+    fresh()
+
+
+def test_custom_texture_transparency():
+    """A picture with alpha keeps it, from the import to the bytes the game reads."""
+    print("a custom texture with transparency")
+    from dkr_track_editor import dkrmap, transparency
+    from dkr_track_editor import textures as texture_module
+    from dkr_track_editor.operators import custom_textures as custom_ops
+    from dkr_track_editor.operators import geometry as geometry_ops
+    from dkr_track_editor.operators import geometry_export
+    from dkr_track_editor.operators import pack as pack_ops
+
+    fresh()
+    temporary = tempfile.mkdtemp(prefix="dkr-alpha-")
+    try:
+        bpy.ops.wm.save_as_mainfile(filepath=os.path.join(temporary, "alpha.blend"))
+        holes = _write_alpha_image(temporary, "fence", 96, 48, "holes")
+        soft = _write_alpha_image(temporary, "smoke", 40, 40, "soft")
+        flat = _write_probe_image(temporary, "flat", 60, 30)
+
+        bpy.ops.mesh.primitive_grid_add(size=4000.0, x_subdivisions=3,
+                                        y_subdivisions=3)
+        result = bpy.ops.dkr.track_from_mesh_blank(keep_source=False)
+        check(result == {"FINISHED"}, "a track builds from a plain mesh")
+        obj = geometry_ops.geometry_objects(bpy.context)[0]
+        settings = bpy.context.scene.dkr
+        rgba16 = str(texture_module.FORMAT_CODES["RGBA16"])
+
+        for source, expected in ((holes, "CUTOUT"), (soft, "BLEND"),
+                                 (flat, "OPAQUE")):
+            result = bpy.ops.dkr.add_custom_texture(
+                filepath=source, texture_format=rgba16, size="",
+                transparency="AUTO")
+            check(result == {"FINISHED"}, "%s imports" % os.path.basename(source))
+            record = settings.custom_textures[-1]
+            check(record.transparency == expected,
+                  "%s reads as %s (%s)" % (os.path.basename(source), expected,
+                                           record.transparency))
+        own = custom_ops.entries(bpy.context)
+        check([entry.render_mode for entry in own]
+              == ["TRANSPARENT", "TRANSPARENT", "OPAQUE"],
+              "and each is written with the render mode its look needs")
+
+        fence = own[0]
+        settings.texture_id = fence.index
+        settings.texture_transparency = "AUTO"
+        settings.texture_mapping = "PROJECT"
+        from dkr_track_editor.ui import panels
+        drawn = _draw_panel(panels.DKR_PT_textures)
+        check(("menu", "dkr.set_texture_transparency") in drawn
+              and ("prop", "texture_transparency") in drawn
+              and ("menu", "dkr.set_face_transparency") in drawn,
+              "the Textures panel offers the transparency controls")
+        check(("label", "Made cut out") in drawn,
+              "and says how the chosen texture is made")
+        check(any(kind == "operator" and text == "dkr.add_water"
+                  for kind, text in _draw_panel(panels.DKR_PT_water)),
+              "a track with no water still gets a Water panel with Add Water")
+        mesh = obj.data
+        _select_faces(mesh, range(len(mesh.polygons)))
+        result = bpy.ops.dkr.apply_texture()
+        check(result == {"FINISHED"}, "the fence applies (%r)" % (result,))
+        flags = _read_flags(mesh)
+        check(all(geometry_ops.to_unsigned32(value) & transparency.RENDER_CUTOUT
+                  for value in flags), "every face is cut out")
+        check(not any(_read_opaque(mesh)), "and drawn in the second pass")
+
+        edit = geometry_export.build_edited_model(bpy.context)
+        index = len(geometry_ops.base_textures(obj))
+        drawing = _batches_of(edit.model, index)
+        check(drawing and all(batch.flags & transparency.RENDER_CUTOUT
+                              and position >= segment.opaque_batches
+                              for segment, position, batch in drawing),
+              "the exported batches are cut out and drawn second (%d)"
+              % len(drawing))
+
+        payload = fence.encode()
+        check(payload[2] >> 4 == 0 and payload[2] & 0xF == 1,
+              "the payload is TRANSPARENT RGBA16")
+        alpha_bits = [payload[32 + i * 2 + 1] & 1
+                      for i in range(fence.width * fence.height)]
+        check(0 in alpha_bits and 1 in alpha_bits,
+              "and keeps both holes and solid texels")
+
+        # The HD copy is hardened at the same half the payload was.
+        original = custom_ops.original_for(bpy.context, fence.ordinal)
+        hd = pack_ops._hd_picture(types.SimpleNamespace(report=lambda *a: None),
+                                  fence, original)
+        check(hd != original and os.path.isfile(hd),
+              "the HD pack carries a hardened copy of a cut-out's original")
+        image = bpy.data.images.load(hd, check_existing=False)
+        alphas = set(round(value, 3) for value in list(image.pixels)[3::4])
+        bpy.data.images.remove(image)
+        check(alphas <= {0.0, 1.0}, "whose alpha is all or nothing (%s)"
+              % sorted(alphas)[:4])
+
+        # The texture's own look changes, and its faces follow.
+        result = bpy.ops.dkr.set_texture_transparency(look="OPAQUE")
+        check(result == {"FINISHED"}, "the fence can be made opaque")
+        check(not any(geometry_ops.to_unsigned32(value)
+                      & transparency.RENDER_CUTOUT for value in _read_flags(mesh)),
+              "its faces lose the cut-out")
+        check(all(_read_opaque(mesh)), "and move to the first pass")
+        check(custom_ops.entries(bpy.context)[0].encode()[2] >> 4 == 1,
+              "and the payload is written OPAQUE")
+        result = bpy.ops.dkr.set_texture_transparency(look="BLEND")
+        check(result == {"FINISHED"} and not any(_read_opaque(mesh)),
+              "made blended, its faces go back to the second pass")
+
+        smoke = own[1]
+        check(transparency.advice(smoke.transparency, smoke.format) is not None,
+              "a soft picture in RGBA16 is told that its blend is all or nothing")
+
+        # And out through the package: the manifest carries all three.
+        package = dkrmap.TrackPackage(
+            directory=os.path.join(temporary, "alpha.dkrmap"),
+            track_id="alpha", name="Alpha")
+        payloads = package.encode_textures(custom_ops.entries(bpy.context))
+        check([p[2] >> 4 for p in payloads] == [0, 0, 1],
+              "every payload's render mode matches its look")
+    finally:
+        fresh()
+        shutil.rmtree(temporary, ignore_errors=True)
+
+
+def test_track_from_mesh_keeps_alpha():
+    """A mesh textured with a cut-out converts into cut-out track geometry."""
+    print("track from mesh keeps a picture's alpha")
+    from dkr_track_editor import level_model, transparency
+    from dkr_track_editor.operators import geometry as geometry_ops
+
+    fresh()
+    temporary = tempfile.mkdtemp(prefix="dkr-alpha-mesh-")
+    try:
+        bpy.ops.wm.save_as_mainfile(filepath=os.path.join(temporary, "leaf.blend"))
+        holes = _write_alpha_image(temporary, "leaves", 64, 64, "holes")
+        bpy.ops.mesh.primitive_grid_add(size=3000.0, x_subdivisions=2,
+                                        y_subdivisions=2)
+        source = bpy.context.active_object
+        source.data.materials.append(_image_material("leaves", holes))
+        result = bpy.ops.dkr.track_from_mesh_blank(keep_source=False,
+                                                   keep_textures=True)
+        check(result == {"FINISHED"}, "the mesh converts (%r)" % (result,))
+        record = bpy.context.scene.dkr.custom_textures[0]
+        check(record.transparency == "CUTOUT", "its picture reads as a cut-out")
+        path = bpy.context.scene.dkr.geometry_path
+        model = level_model.load(path)
+        batches = [(segment, index, batch) for segment in model.segments
+                   for index, batch in enumerate(segment.batches)]
+        check(batches and all(batch.flags & transparency.RENDER_CUTOUT
+                              and index >= segment.opaque_batches
+                              for segment, index, batch in batches),
+              "and every batch in the model it wrote is cut out and drawn "
+              "second (%d)" % len(batches))
+        obj = geometry_ops.geometry_objects(bpy.context)[0]
+        check(not any(_read_opaque(obj.data)),
+              "the imported mesh agrees")
+    finally:
+        fresh()
+        shutil.rmtree(temporary, ignore_errors=True)
+
+
+def _faces_with(mesh, predicate):
+    from dkr_track_editor.operators import geometry as geometry_ops
+
+    return [index for index, value in enumerate(_read_flags(mesh))
+            if predicate(geometry_ops.to_unsigned32(value))]
+
+
+def _delete_faces(obj, faces):
+    import bmesh
+
+    edit = bmesh.new()
+    try:
+        edit.from_mesh(obj.data)
+        edit.faces.ensure_lookup_table()
+        bmesh.ops.delete(edit, geom=[edit.faces[i] for i in sorted(faces)],
+                         context="FACES")
+        edit.to_mesh(obj.data)
+    finally:
+        edit.free()
+    obj.data.update()
+
+
+def test_waves_on_ancient_lake():
+    """Ancient Lake's still lake becomes a wavy one, and stays one.
+
+    The whole path an author takes: remove the calm water, lay waves at its
+    height, and then do the things that used to wipe them out - re-segment,
+    and delete the water the waves are sized from.
+    """
+    print("waves on Ancient Lake")
+    from dkr_track_editor import level_model, water
+    from dkr_track_editor.operators import geometry as geometry_ops
+    from dkr_track_editor.operators import geometry_export
+    from dkr_track_editor.operators import pack as pack_ops
+
+    path, obj = _import_lake(include_hidden=True)
+    if path is None:
+        print("  skip: no extracted level models")
+        return
+    if not _texture_catalogue(bpy.context):
+        print("  skip: no extracted textures")
+        return
+    temporary = tempfile.mkdtemp(prefix="dkr-waves-")
+    try:
+        bpy.ops.wm.save_as_mainfile(filepath=os.path.join(temporary, "lake.blend"))
+        calm = _faces_with(obj.data, lambda f: water.is_water(f))
+        check(calm, "Ancient Lake has calm water (%d faces)" % len(calm))
+        check(bpy.ops.dkr.remove_water(which="CALM") == {"FINISHED"},
+              "the calm water is removed")
+        check(not _faces_with(obj.data, lambda f: water.is_water(f)),
+              "and none is left")
+
+        result = bpy.ops.dkr.add_water(kind="WAVES", level=2.0, area="TRACK",
+                                       tile=0, skip_dry=True)
+        check(result == {"FINISHED"}, "waves are laid at the lake's height (%r)"
+              % (result,))
+        obj = geometry_ops.geometry_objects(bpy.context)[0]
+        base = bpy.context.scene.dkr.geometry_path
+        check(base.endswith("lake-geometry.bin"),
+              "the track is its own base now (%s)" % os.path.basename(base))
+        model = level_model.load(base)
+        check(not water.problems(model), "the file is a valid wave grid (%s)"
+              % water.problems(model)[:1])
+        grid = water.simulate(model)
+        tiles = sum(grid.wavy)
+        check(tiles > 0, "with wave tiles (%d of %d segments)"
+              % (tiles, len(model.segments)))
+        check(len(model.segments) <= 127, "inside the segment limit")
+        summary = geometry_ops.water_summary(obj)
+        check(summary.get("tiles") == tiles and not summary.get("problems"),
+              "the Water panel's summary agrees (%s)" % summary)
+        from dkr_track_editor.ui import panels
+        bpy.context.scene.dkr.show_wave_details = True
+        drawn = _draw_panel(panels.DKR_PT_water)
+        check(("menu", "dkr.wave_preset") in drawn
+              and ("prop", "crest") in drawn and ("prop", "power") in drawn,
+              "the Water panel draws the wave settings and the presets")
+        check(any(kind == "label" and text.startswith("Waves: %d" % tiles)
+                  for kind, text in drawn),
+              "and says how many wave tiles there are")
+        check(pack_ops.geometry_has_waves(bpy.context),
+              "the export sees wave water on the mesh")
+
+        edit = geometry_export.build_edited_model(bpy.context)
+        check(not edit.rebuilt and edit.ships,
+              "an unchanged export patches the new base and still ships it")
+        check(not water.problems(edit.model), "and keeps the waves working")
+
+        bpy.ops.dkr.wave_preset(preset="PIRATE")
+        check(bpy.context.scene.dkr_water.power == 128,
+              "a preset sets the waves' header bytes (%d)"
+              % bpy.context.scene.dkr_water.power)
+        bpy.context.scene.dkr_water.seed = 121
+        check(bpy.context.scene.dkr_water.seed == 120,
+              "the pattern length stays even")
+
+        # Re-segmenting used to hand every segment hasWaves = 0.
+        check(bpy.ops.dkr.resegment() == {"FINISHED"}, "the track re-segments")
+        model = level_model.load(bpy.context.scene.dkr.geometry_path)
+        check(sum(water.simulate(model).wavy) == tiles
+              and not water.problems(model),
+              "and keeps every wave tile (%d)" % sum(water.simulate(model).wavy))
+
+        # Deleting the reference water leaves the tiles unsized.
+        obj = geometry_ops.geometry_objects(bpy.context)[0]
+        reference = _faces_with(obj.data, water.is_reference)
+        check(reference, "the reference water is on the mesh (%d faces)"
+              % len(reference))
+        _delete_faces(obj, reference)
+        edit = geometry_export.build_edited_model(bpy.context)
+        check(any("grid again" in note for note in edit.notes),
+              "the export notices and cuts the track again (%s)"
+              % [n for n in edit.notes if "wave" in n][:1])
+        check(not water.problems(edit.model)
+              and water.simulate(edit.model).reference is not None,
+              "and the waves have a new reference")
+        check(sum(water.simulate(edit.model).wavy) == tiles - 1,
+              "one tile fewer, since its water is gone")
+
+        check(bpy.ops.dkr.remove_water(which="WAVES") == {"FINISHED"},
+              "the waves are removed")
+        edit = geometry_export.build_edited_model(bpy.context)
+        check(not water.has_waves(edit.model),
+              "and the export switches every tile's waves off")
+    finally:
+        fresh()
+        shutil.rmtree(temporary, ignore_errors=True)
+
+
+def test_waves_from_scratch():
+    """A track modelled in Blender gets waves, and a header that can load them."""
+    print("waves on a track from a mesh")
+    from dkr_track_editor import level_header_template as template
+    from dkr_track_editor import level_model, water
+    from dkr_track_editor.operators import geometry as geometry_ops
+    from dkr_track_editor.operators import header as header_ops
+    from dkr_track_editor.operators import pack as pack_ops
+
+    fresh()
+    if not _texture_catalogue(bpy.context):
+        print("  skip: no extracted textures")
+        return
+    temporary = tempfile.mkdtemp(prefix="dkr-waves-mesh-")
+    try:
+        bpy.ops.wm.save_as_mainfile(filepath=os.path.join(temporary, "sea.blend"))
+        bpy.ops.mesh.primitive_grid_add(size=6000.0, x_subdivisions=7,
+                                        y_subdivisions=7)
+        check(bpy.ops.dkr.track_from_mesh_blank(keep_source=False) == {"FINISHED"},
+              "a flat track builds")
+        refused = _refused(lambda: bpy.ops.dkr.add_water(
+            kind="WAVES", level=-10.0, area="TRACK", tile=2000, skip_dry=True))
+        check(refused is not None and "dry" in refused,
+              "water under the ground is refused, and says why (%s)" % refused)
+
+        result = bpy.ops.dkr.add_water(kind="WAVES", level=10.0, area="TRACK",
+                                       tile=2000, skip_dry=True)
+        check(result == {"FINISHED"}, "waves above the ground are laid (%r)"
+              % (result,))
+        model = level_model.load(bpy.context.scene.dkr.geometry_path)
+        grid = water.simulate(model)
+        check(sum(grid.wavy) == 9 and len(model.segments) == 9,
+              "three by three tiles, each its own segment (%d wave, %d total)"
+              % (sum(grid.wavy), len(model.segments)))
+        check((grid.tile_w, grid.tile_h) == (2000, 2000),
+              "sized as asked (%dx%d)" % (grid.tile_w, grid.tile_h))
+        check(set(h for h, w in zip(grid.heights, grid.wavy) if w) == {10},
+              "at the level asked for")
+        water_entry = model.textures[-1]
+        check(water_entry.width == 16 and water_entry.format & 0xF == 0,
+              "drawn with retail's 16x16 RGBA32 water")
+
+        refused = _refused(lambda: bpy.ops.dkr.add_water(
+            kind="WAVES", level=10.0, area="TRACK", tile=1000))
+        check(refused is not None and "same size" in refused,
+              "a second tile size is refused (%s)" % refused)
+
+        # The header a scratch track writes names the wave detail texture.
+        bpy.ops.dkr.header_defaults()
+        world = _pick("World")
+        if world:
+            bpy.context.scene[header_ops.key_for("/world")] = world
+            document = pack_ops._authored_header(bpy.context)
+            check(template.lookup(document, water.DETAIL_POINTER)
+                  == water.DETAIL_TEXTURE,
+                  "the authored header names the wave detail texture")
+            check(template.lookup(document, "/waves/wave-power") == 256,
+                  "and carries wave settings")
+    finally:
+        fresh()
+        shutil.rmtree(temporary, ignore_errors=True)
+
+
 def main():
     dkr_track_editor.register()
     try:
@@ -3409,6 +4627,7 @@ def main():
         test_presets_and_tooltips()
         test_refresh_keeps_grids()
         test_import_sets_level_type()
+        test_race_ai()
         test_skybox()
         test_dkrmap_export()
         test_import_export_operators()
@@ -3421,6 +4640,8 @@ def main():
         test_geometry_schema_guard()
         test_geometry_batch_flags()
         test_geometry_add_geometry()
+        test_geometry_across_segments()
+        test_geometry_merge_by_distance()
         test_geometry_remove_geometry()
         test_geometry_rebuild_needs_the_whole_track()
         test_geometry_in_package()
@@ -3439,18 +4660,28 @@ def main():
         test_project_texture_onto_new_geometry()
         test_track_from_mesh_with_its_own_textures()
         test_track_from_mesh_keeps_material_textures()
+        test_moved_blend_rebuilds_its_textures()
         test_track_from_mesh_survives_ctrl_j()
         test_texture_browser_pieces()
         test_texture_side_operators()
         test_custom_texture_reaches_the_package()
         test_custom_texture_refuses_what_the_hardware_cannot_draw()
         test_custom_texture_removal_keeps_the_numbering_honest()
+        test_transparent_rom_texture_is_drawn()
+        test_custom_texture_transparency()
+        test_track_from_mesh_keeps_alpha()
+        test_waves_on_ancient_lake()
+        test_waves_from_scratch()
         test_scratch_track_ships_its_geometry()
         test_drop_to_surface()
+        test_click_to_place()
+        test_snapping_to_elements()
         test_place_shows_artwork()
         test_balloon_variants()
         test_slots()
         test_partial_export_is_safe()
+        test_geometry_colour_edit()
+        test_unpainted_colour_layer()
     finally:
         dkr_track_editor.unregister()
 

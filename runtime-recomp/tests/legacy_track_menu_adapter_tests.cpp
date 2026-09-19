@@ -11,7 +11,7 @@ struct Fixture {
     Bytes memory=Bytes(MiB,0);
     TrackMenuFields fields{};
     TrackMenuAdapter adapter;
-    Fixture(bool races=true):adapter(roots(),races) {
+    Fixture(bool races=true,std::vector<Root> courses=roots()):adapter(std::move(courses),races) {
         for(unsigned i=0;i<fields.size();++i)fields[i]=0x80001000+i*256;
         put(MenuField::FutureFunLand,65535,0,2);put(MenuField::Height,240);put(MenuField::HalfHeight,120);
         put(MenuField::PreviewCarrier,5);put(MenuField::LoadedCarrier,5);
@@ -130,6 +130,26 @@ void run() {
     rejects([&]{bad.adapter.apply(2,bad.memory,fields);});rejects([&]{bad.event(18);});
     rejects([&]{bad.adapter.install_names(bad.memory,0x80010000);});
     bad.select(4,0);bad.event(6,5);bad.event(7,0,1);rejects([&]{bad.event(8,6);});
+
+    // An appended .dkrmap level shares the legacy category but keeps its own
+    // level ID through background preview, confirmation, retry and return.
+    auto mixed=Fixture::roots();
+    mixed[1].carrier=65;mixed[1].name="AUTHORED COURSE";
+    Fixture authored(true,mixed);
+    authored.select(4,0);authored.input(1,0);
+    check(authored.get(MenuField::PreviewCarrier)==65,"Authored course lost its appended level ID");
+    authored.event(6,65);authored.event(7,0,1);
+    effect=authored.event(8,65);
+    check(effect.scene && effect.scene->carrier==65 && effect.scene->id==mixed[1].content_id,
+          "Authored preview did not retain its identity");
+    authored.put(MenuField::LoadedCarrier,65);authored.put(MenuField::Buttons,0x9000,16);
+    authored.event(2);check(authored.get(MenuField::Buttons,16)==0x9000,"Ready authored race cannot be confirmed");authored.event(3);
+    authored.event(12,2);effect=authored.event(14,65);
+    check(effect.scene && effect.scene->carrier==65,"Authored race lost its selection");
+    authored.event(15,17);effect=authored.event(14,65);
+    check(effect.scene && effect.scene->carrier==65,"Authored retry lost its selection");
+    authored.event(0);authored.event(1);authored.input(-1,0);
+    check(authored.get(MenuField::PreviewCarrier)==5,"Cannot navigate back to a legacy course");
 }
 }
 int main(){try{run();std::cout<<checks<<" native custom-menu adapter checks passed\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

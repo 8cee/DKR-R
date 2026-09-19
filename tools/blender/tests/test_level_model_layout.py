@@ -38,6 +38,7 @@ from __future__ import annotations
 import glob
 import os
 import sys
+from collections import Counter
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_HERE))
@@ -318,9 +319,172 @@ def check_collision_pressure(path):
     return None
 
 
+def _has_waves(model):
+    from dkr_track_editor import water
+
+    return water.has_waves(model)
+
+
+def check_resegment_batch_ceiling(path):
+    """A new segment's opaque-batch count must fit its byte.
+
+    ``numberofOpaqueBatches`` is a byte. A resegment that carried every source
+    batch into whichever new segment its faces landed in pushed one wave tile
+    of an authored track to 335 built from 20 distinct (texture, flags) pairs,
+    and the export died inside ``struct.pack`` saying only that a ``B`` wanted
+    0 to 255 - naming neither batches nor the segment. Merging what draws alike
+    is what keeps a crowded segment in range.
+    """
+    model = load(path)
+    if not any(len(segment.triangles) for segment in model.segments):
+        return None
+
+    level_model_layout.resegment(model)
+    over = [index for index, segment in enumerate(model.segments)
+            if segment.opaque_batches > 255]
+    if over:
+        return ("segments %r came out with more opaque batches than a u8 counts"
+                % over[:4])
+    try:
+        level_model_encoder.pack(model)
+    except Exception as error:  # noqa: BLE001 - any failure here is the finding
+        return "the resegmented model does not encode: %s" % error
+    return None
+
+
+def check_crowded_wave_batches(_path=None):
+    """Source batches must merge when a wave tile gathers their geometry.
+
+    Retail never reaches the opaque-batch byte's limit through resegment.
+    These two source segments each fit, but together carry over 255 opaque
+    batches into one wave tile. Rendering fields differ one at a time so the
+    test also catches merging batches that do not draw alike.
+    """
+    from dkr_track_editor import water
+
+    layout = level_model_layout
+    model = layout.blank_model([
+        level_model.TextureRef(5, 32, 32, 1, 0),
+        level_model.TextureRef(6, 32, 32, 1, 0),
+    ])
+    keys = [(0, 0, 0, 0, 0, True),
+            (1, 0, 0, 0, 0, True),
+            (0, water.RENDER_ANTI_ALIASING, 0, 0, 0, True),
+            (0, 0, 1, 0, 0, True),
+            (0, 0, 0, 1, 0, True),
+            (0, 0, 0, 0, 1, True),
+            (0, 0, 0, 0, 0, False)]
+    model.segments = []
+    for source in range(2):
+        segment = level_model.Segment(source)
+        faces, positions, colours = [], [], []
+        for serial in range(160):
+            number = source * 160 + serial
+            x, z = 10 + (number % 20) * 40, 10 + (number // 20) * 40
+            base = len(positions)
+            positions += [(x, -20, z), (x + 10, -20, z), (x, -20, z + 10)]
+            colours += [(number % 256, 80, 120, 255)] * 3
+            faces.append(layout.Face(
+                layout.BatchKey(*keys[serial % len(keys)], serial=serial),
+                (base, base + 1, base + 2),
+                ((serial, 0), (serial + 32, 0), (serial, 32)),
+                layout.TRI_FLAG_NO_COLLISION if serial % 2 else 0,
+            ))
+        if source == 0:
+            base = len(positions)
+            positions += [(0, 0, 0), (1000, 0, 0),
+                          (1000, 0, 1000), (0, 0, 1000)]
+            colours += [water.WATER_COLOUR] * 4
+            key = layout.BatchKey(0, water.WAVY_FLAGS | water.RENDER_WAVE_REFERENCE,
+                                  0, 0, 0, False, 160)
+            for corners in ((0, 1, 2), (0, 2, 3)):
+                faces.append(layout.Face(key, [base + i for i in corners],
+                                         ((0, 0), (1024, 0), (1024, 1024))))
+        layout.rebatch_segment(segment, faces, positions, colours)
+        model.segments.append(segment)
+
+    def content(model):
+        result = Counter()
+        for segment in model.segments:
+            faces, positions, colours = layout.decompose(segment)
+            for face in faces:
+                result[(face.key[:6], face.flags, face.uvs,
+                        tuple((positions[i], colours[i]) for i in face.vertices))] += 1
+        return result
+
+    if (any(s.opaque_batches > 255 for s in model.segments)
+            or sum(s.opaque_batches for s in model.segments) <= 255):
+        return "fixture must fit per source segment and overflow when gathered"
+    before = content(model)
+    count = layout.resegment(model)
+    if count != 1:
+        return "the crowded geometry did not gather into one wave tile"
+    segment = model.segments[0]
+    if segment.opaque_batches > 255:
+        return ("the wave tile inherited %d opaque batches (limit 255)"
+                % segment.opaque_batches)
+    problems = layout.check_windows(model) + water.problems(model)
+    if problems:
+        return problems[0]
+    again = level_model.parse(level_model.decompress(level_model_encoder.pack(model)))
+    if content(again) != before:
+        return "merging changed geometry, colours, UVs, flags or rendering fields"
+    return None
+
+
+def check_draw_triangle_count(_path=None):
+    """A shared-vertex grid fits the vertex window but overflows gSPPolygon."""
+    layout = level_model_layout
+    model = layout.blank_model()
+    positions = [(x * 100, 0, z * 100) for z in range(4) for x in range(5)]
+    colours = [(255, 255, 255, 255)] * len(positions)
+    key = layout.BatchKey(255, 0, 0, 0, 0, True)
+    faces = []
+    for z in range(3):
+        for x in range(4):
+            a = z * 5 + x
+            for corners in ((a, a + 5, a + 6), (a, a + 6, a + 1)):
+                faces.append(layout.Face(key, corners,
+                                         [positions[i][::2] for i in corners]))
+    segment = model.segments[0]
+    layout.rebatch_segment(segment, faces, positions, colours)
+    drawn = 0
+    for batch in segment.batches:
+        # The command in f3ddkr.h and its decoder in f3ddkr_rt64.cpp.
+        command = (((batch.face_count - 1) << 4 | 1) & 0xFF) << 16
+        drawn += ((command >> 20) & 0xF) + 1
+    if drawn != len(faces):
+        return "the renderer draws %d of %d triangles" % (drawn, len(faces))
+    layout.rebuild(model)
+    again = level_model.parse(level_model_encoder.encode(model))
+    rebuilt, pool, _colours = layout.decompose(again.segments[0])
+    expected = Counter((tuple(positions[i] for i in f.vertices), f.uvs)
+                       for f in faces)
+    actual = Counter((tuple(pool[i] for i in f.vertices), f.uvs) for f in rebuilt)
+    if actual != expected:
+        return "splitting draw calls changed geometry or UVs"
+    # Refuse a previously authored oversized batch rather than ship holes.
+    again.segments[0].batches[0].face_count = 17
+    try:
+        level_model_encoder.encode(again)
+    except level_model_encoder.LevelModelEncodeError as error:
+        if "16 per batch" not in str(error):
+            return "oversized draw count was refused without explaining the limit"
+    else:
+        return "the encoder accepted a batch the game cannot draw"
+    return None
+
+
 def check_resegment(path):
-    """Re-segmenting must keep every triangle and fix the crowding."""
+    """Re-segmenting must keep every triangle and fix the crowding.
+
+    A model with waves is cut into the wave grid instead, which cuts
+    triangles in two by design; ``test_water.py`` holds that path to what it
+    promises.
+    """
     blob, model = None, load(path)
+    if _has_waves(model):
+        return None
     before_triangles = sum(len(s.triangles) for s in model.segments)
     before_positions = {tuple(v) for s in model.segments for v in s.vertices}
     if before_triangles == 0:
@@ -365,7 +529,13 @@ def check_resegment(path):
 
 
 def check_resegment_bsp(path):
-    """The generated tree must satisfy the invariant retail satisfies."""
+    """The generated tree must be one the game can walk.
+
+    Walked the way ``traverse_segments_bsp_tree`` walks it, it has to draw
+    every segment exactly once. Resembling retail node by node is not enough:
+    the first tree this module built named each segment from its own node,
+    passed a structural check, and drew segment 255 of a 127-segment track.
+    """
     model = load(path)
     if sum(len(s.triangles) for s in model.segments) == 0:
         return None
@@ -375,33 +545,46 @@ def check_resegment_bsp(path):
         return "the BSP holds %d nodes for %d segments" % (
             len(model.bsp), len(model.segments)
         )
+    problems = level_model_layout.bsp_problems(model)
+    if problems:
+        return "the game cannot walk the generated BSP: %s" % "; ".join(problems)
 
-    seen, stack = set(), [0]
-    named = []
-    while stack:
-        node = stack.pop()
-        if node in seen or not 0 <= node < len(model.bsp):
-            continue
-        seen.add(node)
-        left, right, split_type, segment_index, _split = model.bsp[node]
-        if split_type > 2:
-            return "node %d has split axis %d" % (node, split_type)
-        if not 0 <= segment_index < len(model.segments):
-            return "node %d names segment %d" % (node, segment_index)
-        named.append(segment_index)
-        stack += [left, right]
-
-    if len(seen) != len(model.bsp):
-        return "%d of %d nodes are unreachable from the root" % (
-            len(model.bsp) - len(seen), len(model.bsp)
-        )
-    if len(set(named)) != len(named):
-        return "a segment is named by two nodes; retail never repeats one"
-    if set(named) != set(range(len(model.segments))):
-        return "%d segments are named by no node" % (
-            len(model.segments) - len(set(named))
-        )
+    # The shape that crashed: every node naming its own segment, segment 0
+    # holding a left subtree, so a run goes below zero.
+    crashing = [(1, -1, 0, 0, 0), (-1, 2, 0, 1, 0), (-1, -1, 0, 2, 0)]
+    if level_model_layout.draw_order(crashing, 3).count(255) != 1:
+        return "draw_order does not reproduce the game's segment 255"
     return None
+
+
+def check_retail_bsp_walks(path):
+    """Retail is the ground truth for the walk: every tree draws every segment
+    once, which is what makes bsp_problems safe to act on at export."""
+    problems = level_model_layout.bsp_problems(load(path))
+    return "; ".join(problems) if problems else None
+
+
+def check_built_bsp_on_retail_boxes(path):
+    """build_bsp over retail's own boxes and order walks too."""
+    model = load(path)
+    model.bsp = level_model_layout.build_bsp(model.bounding_boxes)
+    problems = level_model_layout.bsp_problems(model)
+    return "; ".join(problems) if problems else None
+
+
+def check_segment_ceiling(path):
+    """However fine the split is asked to be, the game's 127 holds."""
+    model = load(path)
+    triangles = sum(len(s.triangles) for s in model.segments)
+    if triangles <= level_model_layout.MAX_SEGMENTS or _has_waves(model):
+        return None
+    count = level_model_layout.resegment(model, target=1)
+    if count > level_model_layout.MAX_SEGMENTS:
+        return "%d segments from %d triangles" % (count, triangles)
+    if sum(len(s.triangles) for s in model.segments) != triangles:
+        return "loosening the split lost triangles"
+    problems = level_model_layout.bsp_problems(model)
+    return "; ".join(problems) if problems else None
 
 
 def check_resegment_relieves_pressure(path):
@@ -441,7 +624,19 @@ def check_resegment_relieves_pressure(path):
         return None  # this model did not end up crowded; nothing to relieve
 
     before = sum(len(s.triangles) for s in model.segments)
+    waves = _has_waves(model)
     level_model_layout.resegment(model)
+    if waves:
+        # Cut into the wave grid: triangles are split, not lost, and a wave
+        # track stretched past 127 squares joins its dry ones instead of
+        # failing. What matters is that the waves still work.
+        from dkr_track_editor import water
+
+        found = water.problems(model)
+        if found:
+            return "the stretched wave track came out broken: %s" % found[0]
+        level_model_encoder.encode(model)
+        return None
     if level_model_layout.check_collision_pressure(model):
         return ("re-segmenting left %d oversized segments on geometry it is "
                 "meant to fix" % len(level_model_layout.oversized_segments(model)))
@@ -501,7 +696,6 @@ def check_blank_model(_path=None):
 
 
 CASES = (
-    ("a model builds from nothing", check_blank_model),
     ("rebatch is the identity", check_rebatch_identity),
     ("retail satisfies the window rule", check_windows_on_retail),
     ("a rebuilt layout round trips", check_rebuilt_round_trip),
@@ -513,18 +707,33 @@ CASES = (
     ("out-of-range values are refused", check_range_refusals),
     ("collision pressure is calibrated", check_collision_pressure),
     ("resegment keeps every triangle", check_resegment),
-    ("the generated BSP is well formed", check_resegment_bsp),
+    ("resegment stays inside the u8 batch count", check_resegment_batch_ceiling),
+    ("the generated BSP walks", check_resegment_bsp),
+    ("every retail BSP walks", check_retail_bsp_walks),
+    ("build_bsp walks on retail boxes", check_built_bsp_on_retail_boxes),
+    ("resegment stays under 127", check_segment_ceiling),
     ("resegment relieves crowding", check_resegment_relieves_pressure),
 )
 
 
 def main():
+    failures = []
+    for label, case in (
+        ("a model builds from nothing", check_blank_model),
+        ("crowded wave batches merge", check_crowded_wave_batches),
+        ("every triangle reaches the renderer", check_draw_triangle_count),
+    ):
+        problem = case()
+        print("%-38s %s" % (label, "FAIL" if problem else "PASS"))
+        if problem:
+            print("    %s" % problem)
+            failures.append((label, problem))
+
     models = find_level_models()
     if not models:
         print("no extracted level models found under %s" % VANILLA)
-        return 0
+        return 1 if failures else 0
 
-    failures = []
     for label, case in CASES:
         bad = []
         for path in models:

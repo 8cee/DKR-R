@@ -3076,8 +3076,13 @@ extern "C" void dkr_netplay_character_select_ai_seed(
     dkr::runtime::netplay::seed_character_select_ai(rdram, context);
 }
 
+extern "C" void dkr_custom_tracks_prepare_level(std::uint8_t*, recomp_context*);
+
 extern "C" void dkr_netplay_gameplay_level_begin(std::uint8_t* rdram,
                                                     recomp_context* context) {
+    // The only hook at load_level_game's entry, before alloc_displaylist_heap.
+    // Custom tracks are offline-only, and retail levels keep the retail table.
+    dkr_custom_tracks_prepare_level(rdram, context);
     dkr::runtime::netplay::begin_gameplay_level(rdram, context);
 }
 
