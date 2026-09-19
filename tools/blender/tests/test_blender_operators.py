@@ -2609,6 +2609,159 @@ def test_drop_to_surface():
           % (zipper.location.z, centre.z))
 
 
+def test_click_to_place():
+    """Where a click in the viewport puts an object.
+
+    The modal session itself needs a window and a mouse, which a background
+    run has neither of; what it does with a click is this ray, tested here.
+    """
+    print("click to place")
+    from mathutils import Matrix, Vector
+    from dkr_track_editor.operators import snap
+
+    fresh()
+    context = bpy.context
+    context.scene.cursor.location = (0.0, 0.0, -50.0)
+    down = Vector((0.0, 0.0, -1.0))
+
+    at = snap.click_location(context, Vector((10.0, 20.0, 100.0)), down)
+    check(at is not None and (at - Vector((10.0, 20.0, -50.0))).length < 1e-4,
+          "with no track, a click lands on the plane through the cursor (%r)"
+          % (at,))
+    check(snap.click_location(context, Vector((0.0, 0.0, 100.0)),
+                              Vector((0.0, 0.0, 1.0))) is None,
+          "a click at the sky places nothing")
+
+    road = _flat_road(context)
+
+    slanted = Vector((1.0, 0.0, -1.0)).normalized()
+    at = snap.click_location(context, Vector((-100.0, 0.0, 100.0)), slanted)
+    check(at is not None and at.length < 1e-3,
+          "a slanted click lands where the ray meets the track (%r)" % (at,))
+
+    # The bug this replaces: a click past the edge of the track fell through
+    # to the cursor plane, which near the horizon is thousands of units off.
+    at = snap.click_location(context, Vector((2000.0, 0.0, 100.0)), down)
+    check(at is None, "a click that misses the track places nothing (%r)" % (at,))
+
+    road.hide_set(True)
+    at = snap.click_location(context, Vector((0.0, 0.0, 100.0)), down)
+    check(at is not None and abs(at.z + 50.0) < 1e-4,
+          "a hidden track is not clicked on (%r)" % (at,))
+    road.hide_set(False)
+
+    # A view looking straight down from z=100, drawing only depths 1..50 in
+    # front of the eye: the road, 100 below, is past its far clip.
+    near, far = 1.0, 50.0
+    looking_down = Matrix((
+        (1.0, 0.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0, 0.0),
+        (0.0, 0.0, -(far + near) / (far - near), -2.0 * far * near / (far - near)),
+        (0.0, 0.0, -1.0, 0.0),
+    )) @ Matrix.Translation((0.0, 0.0, -100.0))
+    at = snap.click_location(context, Vector((0.0, 0.0, 100.0)), down,
+                             matrix=looking_down)
+    check(at is None, "track past the far clip, not drawn, is not landed on")
+    far = 500.0
+    looking_down = Matrix((
+        (1.0, 0.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0, 0.0),
+        (0.0, 0.0, -(far + near) / (far - near), -2.0 * far * near / (far - near)),
+        (0.0, 0.0, -1.0, 0.0),
+    )) @ Matrix.Translation((0.0, 0.0, -100.0))
+    at = snap.click_location(context, Vector((0.0, 0.0, 100.0)), down,
+                             matrix=looking_down)
+    check(at is not None and at.length < 1e-3,
+          "with the far clip past it, the track is landed on (%r)" % (at,))
+
+    # No window to click in: invoking falls back to one object at the cursor.
+    for _ in range(2):
+        result = bpy.ops.dkr.place_object("INVOKE_DEFAULT",
+                                          object_id="ASSET_OBJECT_CHECKPOINT")
+        check(result == {"FINISHED"}, "invoked without a window, it places")
+    indices = sorted(o.get("index") for o in scene.iter_dkr_objects(context))
+    check(indices == [0, 1], "each checkpoint takes the next index (%r)"
+          % (indices,))
+    from dkr_track_editor.operators.edit import DKR_OT_place_object
+    check(DKR_OT_place_object.placing() is None,
+          "no placing session is left running")
+
+
+def _flat_road(context, location=(0.0, 0.0, 0.0)):
+    """A 1000-unit square of track at z=0, as the importer would mark it."""
+    from dkr_track_editor.operators import geometry as geometry_ops
+
+    mesh = bpy.data.meshes.new("road")
+    mesh.from_pydata([(-500.0, -500.0, 0.0), (500.0, -500.0, 0.0),
+                      (500.0, 500.0, 0.0), (-500.0, 500.0, 0.0)],
+                     [], [(0, 1, 2, 3)])
+    road = bpy.data.objects.new("road", mesh)
+    road.location = location
+    road[geometry_ops.PROP_GEOMETRY] = geometry_ops.GEOMETRY_KIND
+    context.scene.collection.objects.link(road)
+    context.view_layer.update()
+    return road
+
+
+def test_snapping_to_elements():
+    """The screen-space snaps, against a matrix instead of a window."""
+    print("snapping to elements")
+    import numpy as np
+    from mathutils import Matrix, Vector
+    from dkr_track_editor.operators import snap
+
+    # Top down, one unit to a pixel: world (-500..500) fills 1000 pixels.
+    flat = Matrix((
+        (1.0 / 500.0, 0.0, 0.0, 0.0),
+        (0.0, 1.0 / 500.0, 0.0, 0.0),
+        (0.0, 0.0, -0.001, 0.0),
+        (0.0, 0.0, 0.0, 1.0),
+    ))
+    size = (1000, 1000)
+    corners = np.array([(-500.0, -500.0, 0.0), (500.0, 500.0, 0.0)])
+    found = snap.nearest_points(corners, flat, size, (990.0, 995.0), 20.0)
+    check(len(found) == 1 and (found[0][1] - Vector((500.0, 500.0, 0.0))).length < 1e-6,
+          "the vertex under the mouse is caught (%r)" % (found,))
+    check(snap.nearest_points(corners, flat, size, (900.0, 900.0), 20.0) == [],
+          "a vertex further than the threshold is not")
+
+    # An edge running away from the eye: w = z. Halfway along it on screen
+    # is a third of the way along it in the world.
+    receding = Matrix((
+        (1.0, 0.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0, 0.0),
+        (0.0, 0.0, 0.5, 0.0),
+        (0.0, 0.0, 1.0, 0.0),
+    ))
+    vertices = np.array([(-1.0, 0.0, 1.0), (1.0, 0.0, 3.0)])
+    edges = np.array([(0, 1)])
+    found = snap.nearest_on_edges(vertices, edges, receding, size,
+                                  (400.0, 510.0), 20.0)
+    check(len(found) == 1, "the edge under the mouse is caught")
+    if found:
+        pixels, _w, _drawn = snap.project([found[0][1]], receding, size)
+        check(abs(pixels[0][0] - 400.0) < 1e-3 and abs(pixels[0][1] - 500.0) < 1e-3,
+              "the point on the edge is the one drawn under the mouse (%r)"
+              % (pixels[0],))
+        check((found[0][1] - Vector((-1.0 / 3.0, 0.0, 5.0 / 3.0))).length < 1e-6,
+              "undoing the perspective divide (%r)" % (found[0][1],))
+
+    # One unit a pixel: a grid of 1 is too fine to see, 10 still is, 100 is not.
+    step = snap.grid_step(Vector((0.0, 0.0, 0.0)), flat, size, 1.0, 10)
+    check(step == 100.0, "the grid step follows the zoom (%r)" % (step,))
+
+    fresh()
+    road = _flat_road(bpy.context, location=(10.0, 0.0, 5.0))
+    vertices, edges, faces = snap.Snapper()._read(
+        road, bpy.context.evaluated_depsgraph_get())
+    check(vertices.shape == (4, 3) and edges.shape == (4, 2) and faces.shape == (1, 3),
+          "the track is read as vertices, edges and face centres")
+    check(abs(vertices[:, 0].min() + 490.0) < 1e-4 and abs(vertices[0, 2] - 5.0) < 1e-4,
+          "in world space (%r)" % (vertices[0],))
+    check((Vector(faces[0]) - Vector((10.0, 0.0, 5.0))).length < 1e-4,
+          "the face centre too (%r)" % (faces[0],))
+
+
 def _texture_catalogue(context):
     """The ROM's 3D textures as the addon sees them, or ``[]``."""
     from dkr_track_editor import prefs, textures as texture_catalogue
@@ -4521,6 +4674,8 @@ def main():
         test_waves_from_scratch()
         test_scratch_track_ships_its_geometry()
         test_drop_to_surface()
+        test_click_to_place()
+        test_snapping_to_elements()
         test_place_shows_artwork()
         test_balloon_variants()
         test_slots()

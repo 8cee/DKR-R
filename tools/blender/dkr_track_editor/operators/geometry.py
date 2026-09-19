@@ -1759,18 +1759,30 @@ def surface_below(origin, targets, depsgraph, search_distance=20000.0,
     come back to the surface rather than be left buried. Shared with the start
     grid, which drops each start position it makes.
     """
-    best = None
     for direction in (Vector((0.0, 0.0, -1.0)), Vector((0.0, 0.0, 1.0))):
-        for target in targets:
-            world = _first_hit(target, depsgraph, origin, direction,
-                               search_distance, surface_only)
-            if world is None:
-                continue
-            distance = (world - origin).length
-            if best is None or distance < best[0]:
-                best = (distance, world)
-        if best is not None:
-            break
+        landing = nearest_hit(origin, direction, targets, depsgraph,
+                              search_distance, surface_only)
+        if landing is not None:
+            return landing
+    return None
+
+
+def nearest_hit(origin, direction, targets, depsgraph, search_distance,
+                surface_only=True):
+    """Nearest hit along one ray across every target, in world space.
+
+    The ray can point anywhere, which is what placing by clicking needs: it
+    casts from the viewport's eye through the mouse, not straight down.
+    """
+    best = None
+    for target in targets:
+        world = _first_hit(target, depsgraph, origin, direction,
+                           search_distance, surface_only)
+        if world is None:
+            continue
+        distance = (world - origin).length
+        if best is None or distance < best[0]:
+            best = (distance, world)
     return best[1] if best else None
 
 

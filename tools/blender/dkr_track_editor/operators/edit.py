@@ -7,6 +7,7 @@ from bpy.props import EnumProperty, StringProperty
 
 from .. import catalog as catalog_module, level_types, prefs, scene
 from ..gltf_io import MapObject
+from . import snap
 
 
 def _catalog():
@@ -89,8 +90,57 @@ def object_type_items(self, context):
                  items or [("NONE", "no types in this category", "")])
 
 
+#: Appended to every Place button's tooltip.
+CLICK_HINT = ("Click on the track to place one per left click, snapping as the "
+              "viewport's magnet says (hold Ctrl to flip it); Esc or "
+              "right-click stops.")
+
+
+def _inside(rect, x, y):
+    return (rect.x <= x < rect.x + rect.width
+            and rect.y <= y < rect.y + rect.height)
+
+
+def _view_under(context, event):
+    """The 3D viewport under the mouse, as ``(region, view, coordinate)``.
+
+    ``None`` over anything else - the sidebar, a header, the toolbar, another
+    editor - so those keep working while placing. The sidebar overlaps the
+    viewport's own region rather than sitting beside it, so lying inside the
+    viewport's rectangle is not enough: nothing else may be on top.
+    """
+    x, y = event.mouse_x, event.mouse_y
+    for area in context.window.screen.areas:
+        if area.type != "VIEW_3D" or not _inside(area, x, y):
+            continue
+        view = None
+        for region in area.regions:
+            if not _inside(region, x, y):
+                continue
+            if region.type != "WINDOW":
+                return None
+            view = region
+        if view is None or view.data is None:
+            return None
+        return view, view.data, (x - view.x, y - view.y)
+    return None
+
+
+def _snap_summary(context, snapping):
+    """What a click snaps to, in the viewport's own words."""
+    if not snapping:
+        return "no snapping (Ctrl snaps)"
+    names = {item.identifier: item.name for item in
+             bpy.types.ToolSettings.bl_rna.properties["snap_elements"].enum_items}
+    chosen = context.scene.tool_settings.snap_elements
+    useful = [names[e] for e in names if e in chosen and e not in
+              ("FACE", "FACE_PROJECT", "FACE_NEAREST", "VOLUME",
+               "EDGE_PERPENDICULAR")]
+    return "snapping to %s (Ctrl: off)" % (", ".join(useful) or "the surface")
+
+
 class DKR_OT_place_object(bpy.types.Operator):
-    """Add a DKR object at the 3D cursor"""
+    """Place DKR objects by clicking on the track, one per left click"""
 
     bl_idname = "dkr.place_object"
     bl_label = "Place DKR Object"
@@ -106,6 +156,11 @@ class DKR_OT_place_object(bpy.types.Operator):
         default="", options={"SKIP_SAVE"},
     )
 
+    #: The placing session running now. Pressing another Place button while
+    #: one runs hands it the new type rather than starting a second session on
+    #: top, which would swallow the first one's clicks and its Esc.
+    _session = None
+
     @classmethod
     def description(cls, context, properties):
         """Each Place button says what it places, not what placing is."""
@@ -115,19 +170,182 @@ class DKR_OT_place_object(bpy.types.Operator):
             object_type = None
         if object_type is None:
             return cls.__doc__
-        return level_types.place_description(
+        return "%s %s" % (level_types.place_description(
             object_type, level_types.current_key(context.scene.dkr),
             level_types.preset(properties.preset) if properties.preset else None,
-        )
+        ), CLICK_HINT)
+
+    @classmethod
+    def placing(cls):
+        """``(object_id, preset)`` the running session places, or ``None``."""
+        session = cls._session
+        if session is None:
+            return None
+        try:
+            return session.object_id, session.preset
+        except ReferenceError:  # freed without being told, e.g. an add-on reload
+            cls._session = None
+            return None
 
     def execute(self, context):
-        catalog = _catalog()
+        """Scripts and tests: one object at the 3D cursor, no clicking."""
+        object_type = self._type(context)
+        if object_type is None:
+            return {"CANCELLED"}
+        self._place(context, object_type, context.scene.cursor.location)
+        return {"FINISHED"}
+
+    def invoke(self, context, event):
+        object_type = self._type(context)
+        if object_type is None:
+            return {"CANCELLED"}
+        self.object_id = object_type.object_id
+
+        running = DKR_OT_place_object._session
+        if running is not None:
+            try:
+                running.object_id = self.object_id
+                running.preset = self.preset
+                running._show_status(context)
+            except ReferenceError:
+                DKR_OT_place_object._session = None
+            else:
+                return {"CANCELLED"}
+
+        window = context.window
+        if window is None or not any(
+                area.type == "VIEW_3D" for area in window.screen.areas):
+            return self.execute(context)  # nowhere to click
+
+        self._placed = []
+        self._snapper = snap.Snapper()
+        self._snapping = None
+        DKR_OT_place_object._session = self
+        window.cursor_modal_set("CROSSHAIR")
+        snap.start_marker()
+        self._hover(context, event)
+        context.window_manager.modal_handler_add(self)
+        return {"RUNNING_MODAL"}
+
+    def modal(self, context, event):
+        if event.type in {"MOUSEMOVE", "LEFT_CTRL", "RIGHT_CTRL"}:
+            # Ctrl flips snapping the moment it goes down, not on the next
+            # move, as it does while moving an object.
+            self._hover(context, event)
+            return {"PASS_THROUGH"}
+        if event.value != "PRESS":
+            return {"PASS_THROUGH"}
+        if event.type in {"ESC", "RIGHTMOUSE", "RET", "NUMPAD_ENTER"}:
+            self._stop(context)
+            # Each click pushed its own undo step. Finishing would push one
+            # more, and offer a redo panel whose re-run places at the cursor.
+            return {"CANCELLED"}
+        if event.type == "Z" and (event.ctrl or event.oskey) and not event.shift:
+            # Blender's undo is not safe to run under a modal operator, and
+            # taking back the last click is what an author means here anyway.
+            self._remove_last(context)
+            return {"RUNNING_MODAL"}
+        if event.type != "LEFTMOUSE" or event.alt:
+            return {"PASS_THROUGH"}  # navigation, including Alt+click orbit
+
+        if _view_under(context, event) is None:
+            return {"PASS_THROUGH"}
+        found = self._pick(context, event)
+        if found is None:
+            self.report({"WARNING"}, "no track under the mouse; nothing placed")
+            return {"RUNNING_MODAL"}
+        location, _kind = found
+
+        object_type = self._type(context)
+        if object_type is None:
+            self._stop(context)
+            return {"CANCELLED"}
+        empty = self._place(context, object_type, location)
+        # By name: a Python reference would not survive an undo run from the
+        # Edit menu, which a click on the header still reaches.
+        self._placed.append(empty.name)
+        bpy.ops.ed.undo_push(message="Place %s" % self._label())
+        return {"RUNNING_MODAL"}
+
+    def cancel(self, context):
+        """Blender ending the session itself: a file load, a closed window."""
+        self._stop(context)
+
+    def _pick(self, context, event):
+        """``(location, kind)`` a click here would place at, or ``None``."""
+        view = _view_under(context, event)
+        if view is None:
+            return None
+        region, view3d, coordinate = view
+        return self._snapper.pick(context, region, view3d, coordinate,
+                                  self._snaps(context, event))
+
+    @staticmethod
+    def _snaps(context, event):
+        """The magnet, flipped while Ctrl is held."""
+        return context.scene.tool_settings.use_snap != bool(event.ctrl)
+
+    def _hover(self, context, event):
+        """Move the marker to where a click would land, and say how it snaps."""
+        if snap.show_marker(self._pick(context, event)):
+            for area in context.screen.areas if context.screen else ():
+                if area.type == "VIEW_3D":
+                    area.tag_redraw()
+        snapping = self._snaps(context, event)
+        if snapping != self._snapping:
+            self._snapping = snapping
+            self._show_status(context)
+
+    def _stop(self, context):
+        if DKR_OT_place_object._session is self:
+            DKR_OT_place_object._session = None
+        snap.stop_marker()
+        if context.window is not None:
+            context.window.cursor_modal_restore()
+        if context.workspace is not None:
+            context.workspace.status_text_set(None)
+        for area in context.screen.areas if context.screen else ():
+            area.tag_redraw()  # the Place button stops showing pressed
+
+    def _show_status(self, context):
+        if context.workspace is not None:
+            context.workspace.status_text_set(
+                "Placing %s: left-click on the track  ·  %s  ·  Ctrl+Z removes "
+                "the last  ·  Esc or right-click to finish"
+                % (self._label(), _snap_summary(context, self._snapping)))
+        for area in context.screen.areas if context.screen else ():
+            area.tag_redraw()
+
+    def _remove_last(self, context):
+        while self._placed:
+            obj = bpy.data.objects.get(self._placed.pop())
+            if obj is None:
+                continue  # already deleted by hand
+            name = obj.name
+            bpy.data.objects.remove(obj, do_unlink=True)
+            bpy.ops.ed.undo_push(message="Remove %s" % name)
+            self.report({"INFO"}, "removed %s" % name)
+            return
+        self.report({"INFO"}, "nothing placed this time to remove")
+
+    def _label(self):
+        chosen = level_types.preset(self.preset) if self.preset else None
+        if chosen is not None and chosen.object_id == self.object_id:
+            return chosen.label
+        object_type = _catalog().get(self.object_id)
+        return object_type.label if object_type else self.object_id
+
+    def _type(self, context):
         object_id = self.object_id or context.scene.dkr.object_type
-        object_type = catalog.get(object_id)
+        object_type = _catalog().get(object_id)
         if object_type is None:
             self.report({"ERROR"}, "unknown object type %r" % object_id)
-            return {"CANCELLED"}
+        return object_type
 
+    def _place(self, context, object_type, location):
+        """One object of this type at a world position; the object."""
+        catalog = _catalog()
+        object_id = object_type.object_id
         fields = object_type.fresh_fields()
         chosen = level_types.preset(self.preset) if self.preset else None
         if chosen is not None and chosen.object_id == object_id:
@@ -139,7 +357,7 @@ class DKR_OT_place_object(bpy.types.Operator):
         placed = MapObject(
             object_id=object_id,
             name=object_type.node_name,
-            translation=scene.to_map(context.scene.cursor.location),
+            translation=scene.to_map(location),
             fields=fields,
         )
 
@@ -170,11 +388,12 @@ class DKR_OT_place_object(bpy.types.Operator):
             self.report({"WARNING"}, "placed %s, which a %s level does not use"
                         % (shown, level_types.label(key)))
         else:
-            index = (" (racerIndex %d)" % fields["racerIndex"]
-                     if "racerIndex" in fields else "")
+            unique = UNIQUE_FIELDS.get(object_id, (None,))[0]
+            index = (" (%s %d)" % (unique, fields[unique])
+                     if unique in fields else "")
             self.report({"INFO"}, "placed %s%s in the %s map"
                         % (shown, index, scene.slot_of(empty)))
-        return {"FINISHED"}
+        return empty
 
 
 #: Blender's enum callbacks hand their strings to C without taking a reference,

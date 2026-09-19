@@ -25,6 +25,7 @@ from ..operators import new_track as new_track_ops
 from ..operators import race_ai as race_ai_ops
 from ..operators import skybox as skybox_ops
 from ..operators import start_grid
+from ..operators.edit import DKR_OT_place_object
 from ..operators.edit import object_type_items  # noqa: F401 - kept for callers
 
 CATEGORY = "DKR"
@@ -880,6 +881,16 @@ class DKR_PT_place(DkrPanel, bpy.types.Panel):
         layout.prop(settings, "show_incompatible",
                     text="Show incompatible types%s"
                     % (" (%d hidden)" % hidden if hidden else ""))
+
+        placing = DKR_OT_place_object.placing()
+        if placing is None:
+            _dim_label(layout, "Pick a type, then left-click on the track",
+                       icon="RESTRICT_SELECT_OFF")
+        else:
+            info_box(layout, context, "Placing the pressed type. Left-click on "
+                     "the track for each one. The header's magnet snaps it "
+                     "and Ctrl flips that; Esc or right-click stops.",
+                     icon="REC")
         layout.separator()
 
         entries = level_types.visible_types(
@@ -894,14 +905,14 @@ class DKR_PT_place(DkrPanel, bpy.types.Panel):
             grid = box.grid_flow(row_major=True, columns=2, even_columns=True,
                                  align=True)
             for entry in featured:
-                _place_button(grid, entry)
+                _place_button(grid, entry, placing)
 
         box = layout.box()
         box.label(text="All types (%d)" % len(entries))
         column = box.column(align=True)
         for entry in entries[:60]:
             row = column.row(align=True)
-            _place_button(row, entry)
+            _place_button(row, entry, placing)
             row.operator("dkr.select_by_type", text="",
                          icon="RESTRICT_SELECT_OFF").object_id = entry.object_type.object_id
         if len(entries) > 60:
@@ -910,14 +921,18 @@ class DKR_PT_place(DkrPanel, bpy.types.Panel):
             _dim_label(box, "Nothing in this tab for this level type")
 
 
-def _place_button(layout, entry):
+def _place_button(layout, entry, placing=None):
     if entry.preset is not None:
         icon = entry.preset.icon
     else:
         icon = "NONE" if entry.ok else "ERROR"
-    op = layout.operator("dkr.place_object", text=entry.label, icon=icon)
+    pid = entry.preset.pid if entry.preset else ""
+    # Pressed while its placing session runs: the viewport shows nothing of
+    # which type the next click will drop.
+    op = layout.operator("dkr.place_object", text=entry.label, icon=icon,
+                         depress=placing == (entry.object_type.object_id, pid))
     op.object_id = entry.object_type.object_id
-    op.preset = entry.preset.pid if entry.preset else ""
+    op.preset = pid
 
 
 class DKR_PT_minimap(DkrPanel, bpy.types.Panel):
