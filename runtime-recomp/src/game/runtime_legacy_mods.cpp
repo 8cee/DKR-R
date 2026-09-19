@@ -8,6 +8,7 @@
 #include "mods/legacy_character_menu_render.hpp"
 #include "mods/legacy_character_stage.hpp"
 #include "mods/legacy_character_presentation.hpp"
+#include "mods/legacy_heap_policy.hpp"
 #if DKR_LEGACY_QUALIFICATION
 #include "legacy_runtime_qualification.hpp"
 #endif
@@ -211,6 +212,13 @@ extern "C" int dkr_legacy_character_menu(std::uint8_t* rdram,recomp_context* ctx
         return 0;
     }catch(const ultramodern::thread_terminated&){throw;}
      catch(const std::exception& error){legacy::fail(error.what());}
+}
+extern "C" void dkr_legacy_heap_capacity(std::uint8_t*,recomp_context* ctx) {
+    const auto end=dkr::mods::legacy_heap_end(std::uint32_t(ctx->r15),recomp::mem_size,
+        bool(dkr::runtime::legacy::session.load()));
+    if(end!=std::uint32_t(ctx->r15))
+        std::fprintf(stderr,"[legacy][memory] offline custom-session pool uses existing 8 MiB RDRAM; stock/online pool unchanged\n");
+    ctx->r15=static_cast<gpr>(static_cast<std::int32_t>(end));
 }
 extern "C" std::uint32_t dkr_legacy_character_portrait_lookup(std::uint8_t* rdram,recomp_context* ctx,std::uint32_t racer_base) {
     using namespace dkr::runtime;

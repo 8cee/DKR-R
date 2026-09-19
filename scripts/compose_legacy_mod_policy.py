@@ -450,6 +450,8 @@ def main() -> None:
         result=compose_character_menu(result,menu,elf_sections(args.elf),elf_functions(args.elf,(1,2)))
         from legacy_character_presentation_policy import compose_presentation
         result=compose_presentation(result,args.elf,fragment['revision'],elf_sections(args.elf),elf_functions(args.elf,(1,2)))
+    from legacy_model_cache_policy import compose_model_cache
+    result=compose_model_cache(result,args.elf,fragment['revision'],elf_sections(args.elf),elf_functions(args.elf,(1,2)))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     # A build artifact, never a mutation of a versioned policy or protected C.
     args.output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")

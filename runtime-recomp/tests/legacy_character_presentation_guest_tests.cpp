@@ -23,7 +23,7 @@ Bytes memory(8*MiB);CharacterMenuFields fields=[] {CharacterMenuFields f;f.fill(
 CharacterMenuMemory g(memory,fields);unsigned checks=0,next=0x80400000,random_value=0,random_calls=0,points=0,plays=0;
 unsigned last_sound=0,last_priority=0,last_bank=0,last_handle=0,echoes=0,lookup_calls=0,random_begin=0,random_end=0;
 std::vector<unsigned> drawn;
-bool trial=false,hud_mode=false;struct StopDrawing {};
+bool trial=false,hud_mode=false,fail_hud_asset=false;unsigned hud_failures=0;struct StopDrawing {};
 constexpr unsigned Settings=0x80300000,Object=0x80310000,Racer=0x80320000,Stack=0x807f0000;
 #if DKR_TEST_REVISION==77
 constexpr unsigned PostRace=0x80126c54,ResultObjects=0x800e0a24,Results=0x800e0bec,Order=0x800e0cec,
@@ -90,10 +90,13 @@ extern "C" void menu_racer_portraits(std::uint8_t*,recomp_context*){for(unsigned
 extern "C" void texrect_draw(std::uint8_t*,recomp_context* c){drawn.push_back(hud_mode?g.read(unsigned(c->r5)):unsigned(c->r5));if(!hud_mode && drawn.size()==4)throw StopDrawing{};}
 extern "C" void texrect_draw_scaled(std::uint8_t*,recomp_context* c){drawn.push_back(g.read(unsigned(c->r5)));}
 extern "C" void cam_get_viewport_layout(std::uint8_t*,recomp_context* c){c->r2=0;}
-extern "C" void load_texture(std::uint8_t* m,recomp_context* c){texture(m,c);}
+extern "C" void load_texture(std::uint8_t* m,recomp_context* c){if(fail_hud_asset)c->r2=0;else texture(m,c);}
 extern "C" void object_model_init(std::uint8_t*,recomp_context* c){c->r2=0;}
 extern "C" void spawn_object(std::uint8_t*,recomp_context* c){c->r2=0;}
-extern "C" void tex_load_sprite(std::uint8_t*,recomp_context* c){c->r2=0;}
+extern "C" void tex_load_sprite(std::uint8_t*,recomp_context* c){c->r2=fail_hud_asset?0:ptr(0x80214000);}
+extern "C" void dkr_hud_asset_load_failed(std::uint8_t*,recomp_context*){++hud_failures;}
+extern "C" void render_ortho_triangle_image(std::uint8_t*,recomp_context* c){drawn.push_back(unsigned(c->r7));}
+extern "C" void cam_get_active_camera(std::uint8_t*,recomp_context* c){c->r2=ptr(0x80218000);}
 extern "C" void rand_range(std::uint8_t*,recomp_context* c){++random_calls;c->r2=random_value;}
 extern "C" void sound_count(std::uint8_t*,recomp_context* c){c->r2=1023;}
 extern "C" void sndp_play(std::uint8_t*,recomp_context* c){++plays;last_sound=unsigned(c->r5);last_handle=unsigned(c->r6);}
@@ -112,8 +115,8 @@ NOOP(set_current_dialogue_background_colour) NOOP(set_current_dialogue_box_coord
 NOOP(set_current_text_background_colour) NOOP(set_current_text_colour) NOOP(set_dialogue_font)
 NOOP(set_text_background_colour) NOOP(set_text_colour) NOOP(set_text_font) NOOP(sprite_opaque)
 NOOP(stubbed_printf)
-NOOP(hud_balloons) NOOP(hud_speedometre) NOOP(rdp_init) NOOP(cam_get_active_camera)
-NOOP(hud_draw_model) NOOP(mtx_cam_push) NOOP(mtx_pop) NOOP(render_object) NOOP(render_ortho_triangle_image)
+NOOP(hud_balloons) NOOP(hud_speedometre) NOOP(rdp_init)
+NOOP(hud_draw_model) NOOP(mtx_cam_push) NOOP(mtx_pop) NOOP(render_object)
 NOOP(dkr_hud_element_begin) NOOP(dkr_hud_element_end)
 NOOP(cinematic_free) NOOP(load_level_for_menu) NOOP(music_change_off)
 extern "C" void do_break(std::uint32_t){throw Error("Native fixture reached an arithmetic break");}
@@ -198,5 +201,22 @@ int main(){try {
    check(g.read(Cache+59*4)==StockTexture,"Custom HUD replaced the stock donor cache");
   }
  }
- std::cout<<checks<<" native portrait/voice pipeline checks passed (v"<<DKR_TEST_REVISION<<").\n";return 0;
+ // Non-portrait HUD assets must keep their identity and coordinates after
+ // custom portrait draws, including a failed load followed by a successful retry.
+ for(unsigned element:{0U,12U,13U})for(bool failed_first:{false,true})for(bool scaled:{false,true}) {
+  const unsigned hud=Hud+element*32,asset=element==0?1:element;
+  g.write(hud+6,asset,2);g.write(hud+8,scaled?0x3fc00000:0x3f800000);
+  g.write(hud+12,0x42480000);g.write(hud+16,0x42700000);g.write(hud+24,0,2);
+  g.write(Ids+asset*2,(element==0?0xc000:0x8000)|126,2);g.write(Cache+asset*4,0);
+  g.write(HudColour,0xffffffff);g.write(HudPal,0,1);g.write(0x80000300,1);
+  auto draw=[&] {c=context();c.f_odd=&c.f0.u32h;c.r4=ptr(DisplayList);c.r5=ptr(HudMat);c.r6=ptr(HudMat+4);c.r7=ptr(hud);
+   hud_element_render(memory.data(),&c);check(unsigned(c.r29)==Stack,"HUD draw changed caller stack");};
+  const auto failures=hud_failures;drawn.clear();fail_hud_asset=failed_first;
+  if(failed_first){draw();check(drawn.empty() && hud_failures==failures+1,"Failed HUD asset was not diagnosed");}
+  fail_hud_asset=false;draw();
+  check(drawn.size()==1,"Ready/Go/position failed to draw after custom portrait or allocation retry");
+  check(g.read(hud+12)==0x42480000 && g.read(hud+16)==0x42700000,"HUD draw leaked a coordinate adjustment");
+  check(g.read(Cache+asset*4)!=0,"HUD asset retry was not cached");
+ }
+ std::cout<<checks<<" native portrait/voice/HUD pipeline checks passed (v"<<DKR_TEST_REVISION<<").\n";return 0;
  }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

@@ -1,7 +1,12 @@
-# DKR-R 1.0.5 Beta 9
+# DKR-R 1.0.5 Beta 10
 
-This playtest build corrects custom-character selection facing and expands
-custom portrait/voice coverage while retaining the Blender Track Lab additions.
+This playtest build repairs failed model-load cache accounting in US v1.0,
+safely rejects null model instances, and gives offline custom-mod sessions
+the native expansion-memory heap extent within the existing 8 MiB renderer
+boundary. Stock and online sessions keep their original heap extent.
+HUD asset-load failures now produce a bounded diagnostic instead of being silent.
+Custom-character selection facing, portraits, voices, HUD placement and Blender
+Track Lab additions are retained. Visual HUD acceptance remains a playtest check.
 Track Lab is available in **Mods/Hacks**, directly below **Magic Codes**, with
 its Blender working-folder, import and testing controls intact.
 Custom legacy mods remain offline-only, with at most two active custom characters.

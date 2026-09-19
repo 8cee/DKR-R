@@ -18,6 +18,39 @@ spec.loader.exec_module(presentation)
 
 
 class PipelineTests(unittest.TestCase):
+    def test_cache_failure_policy_is_hash_pinned_and_conflict_checked(self):
+        import sys
+        with patch.object(sys,'path',[str(ROOT/'scripts'),*sys.path]):
+            from legacy_model_cache_policy import compose_model_cache, ELFS
+        class Elf:
+            def read_bytes(self): return b'isolated cache failure fixture'
+        elf=Elf()
+        for rev in ('us.v77','us.v80'):
+            words={0x80001000:0x27bdffe0}
+            symbols={'model_instance_init':{(0x80001000,4)}}
+            heap=0x80070b50 if rev=='us.v77' else 0x80070d90
+            hud=0x800aa7ac if rev=='us.v77' else 0x800aad08
+            words.update({heap:0x01e42823,hud:0})
+            symbols.update({'mempool_init_main':{(heap,4)},'hud_element_render':{(hud,4)}})
+            if rev=='us.v77':
+                words.update({0x8005f99c:0x27bdffa8,0x8005fcb4:0x8fbf0024})
+                symbols.update({'object_model_init':{(0x8005f99c,0x400)},
+                    'gModelCacheCount':{(0x8011d62c,4)},'D_8011D634':{(0x8011d634,4)}})
+            sections=[(pc,struct.pack('>I',word)) for pc,word in words.items()]
+            base={'functionHooks':[],'instructionPatches':[]}
+            with self.assertRaises(ValueError):compose_model_cache(base,elf,rev,sections,symbols)
+            with patch.dict(ELFS,{rev:hashlib.sha256(elf.read_bytes()).hexdigest()}):
+                result=compose_model_cache(base,elf,rev,sections,symbols)
+                self.assertEqual(base,{'functionHooks':[],'instructionPatches':[]})
+                self.assertEqual(len(result['functionHooks']),5 if rev=='us.v77' else 3)
+                for site in result['functionHooks']:
+                    for key,field in [('functionHooks','beforeVram'),('instructionPatches','vram')]:
+                        conflict=copy.deepcopy(base);conflict[key].append({field:site['beforeVram']})
+                        with self.assertRaises(ValueError):compose_model_cache(conflict,elf,rev,sections,symbols)
+                for i,(pc,data) in enumerate(sections):
+                    bad=sections.copy();bad[i]=(pc,bytes([data[0]^1])+data[1:])
+                    with self.assertRaises(ValueError):compose_model_cache(base,elf,rev,bad,symbols)
+
     def test_presentation_rejects_conflicts_and_changed_signatures(self):
         class FixtureElf:
             def read_bytes(self): return b'isolated synthetic presentation fixture'
