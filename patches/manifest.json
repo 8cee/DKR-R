@@ -227,6 +227,10 @@
         {
           "path": "patches/rt64/0023-use-host-shader-tools-for-android-cross-build.patch",
           "sha256": "80a0e43cb3c79a0262e9c65fcd8f5722d5f0d517aa7ae461a40c13c086767e37"
+        },
+        {
+          "path": "patches/rt64/0024-android-zstd-portable-qsort.patch",
+          "sha256": "d11d98fbe105a682e3231cc3d6020c2924c2b3a0abce15cd683312354716c590"
         }
       ]
     },
