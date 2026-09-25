@@ -13,9 +13,8 @@ import android.util.Log;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.SurfaceHolder;
-import android.view.Gravity;
 import android.widget.Button;
-import android.widget.FrameLayout;
+import android.widget.RelativeLayout;
 
 import org.libsdl.app.SDLActivity;
 
@@ -49,9 +48,10 @@ public final class DkrSdlActivity extends SDLActivity {
         nativeRestartInit();
 
         virtualPad = new VirtualPadView(this);
-        addContentView(virtualPad, new android.view.ViewGroup.LayoutParams(
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT));
+        RelativeLayout.LayoutParams padLayout = new RelativeLayout.LayoutParams(
+                RelativeLayout.LayoutParams.MATCH_PARENT,
+                RelativeLayout.LayoutParams.MATCH_PARENT);
+        mLayout.addView(virtualPad, padLayout);
 
         Button touchToggle = new Button(this);
         touchToggle.setText(virtualPad.isPadVisible() ? "HIDE" : "TOUCH");
@@ -60,12 +60,13 @@ public final class DkrSdlActivity extends SDLActivity {
             virtualPad.setPadVisible(!virtualPad.isPadVisible());
             touchToggle.setText(virtualPad.isPadVisible() ? "HIDE" : "TOUCH");
         });
-        FrameLayout.LayoutParams toggleLayout = new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.BOTTOM | Gravity.END);
+        RelativeLayout.LayoutParams toggleLayout = new RelativeLayout.LayoutParams(
+                RelativeLayout.LayoutParams.WRAP_CONTENT,
+                RelativeLayout.LayoutParams.WRAP_CONTENT);
+        toggleLayout.addRule(RelativeLayout.ALIGN_PARENT_END);
+        toggleLayout.addRule(RelativeLayout.ALIGN_PARENT_BOTTOM);
         toggleLayout.setMargins(12, 12, 20, 20);
-        addContentView(touchToggle, toggleLayout);
+        mLayout.addView(touchToggle, toggleLayout);
 
         if (mSurface != null) {
             mSurface.getHolder().addCallback(new SurfaceHolder.Callback() {
