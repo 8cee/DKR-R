@@ -25,6 +25,10 @@ public final class MainActivity extends Activity {
     private static final int EXPORT_BUNDLE = 1011;
     private static final int IMPORT_PAK_BASE = 1100;
     private static final int EXPORT_PAK_BASE = 1200;
+    private static final int NATIVE_PICK_BASE = 3000;
+
+    private static volatile MainActivity activeInstance;
+    private static volatile int pendingNativeKind = -1;
 
     private TextView statusView;
 
@@ -32,9 +36,13 @@ public final class MainActivity extends Activity {
     private static native String nativeBootstrap(String filesDir);
     private static native String nativeVersion();
     private static native void nativeSetResumed(boolean resumed);
+    private static native void nativeBridgeInit();
+    private static native void nativeOnFilePicked(int kind, boolean ok, String stagedPath);
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
+        activeInstance = this;
+        nativeBridgeInit();
         String bootstrap = nativeBootstrap(getFilesDir().getAbsolutePath());
 
         LinearLayout content = new LinearLayout(this);
@@ -93,6 +101,61 @@ public final class MainActivity extends Activity {
         content.addView(button);
     }
 
+    public static boolean requestNativeFilePicker(int kind) {
+        MainActivity activity = activeInstance;
+        if (activity == null || activity.isFinishing() || pendingNativeKind != -1) return false;
+        pendingNativeKind = kind;
+        activity.runOnUiThread(() -> {
+            try {
+                Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                intent.addCategory(Intent.CATEGORY_OPENABLE);
+                intent.setType("application/octet-stream");
+                if (kind == 0) {
+                    intent.putExtra(Intent.EXTRA_MIME_TYPES,
+                            new String[]{"application/octet-stream", "application/x-n64-rom", "*/*"});
+                }
+                activity.startActivityForResult(intent, NATIVE_PICK_BASE + kind);
+            } catch (Exception e) {
+                pendingNativeKind = -1;
+                nativeOnFilePicked(kind, false, "");
+            }
+        });
+        return true;
+    }
+
+    private String stageNativeSelection(Uri uri, int kind) throws Exception {
+        File inbox = new File(getCacheDir(), "saf-inbox");
+        if (!inbox.exists() && !inbox.mkdirs()) {
+            throw new IllegalStateException("Could not create SAF staging directory.");
+        }
+        String extension;
+        switch (kind) {
+            case 0: extension = ".rom"; break;
+            case 1: extension = ".bin"; break;
+            case 2: extension = ".dkrsave"; break;
+            case 3: extension = ".mpk"; break;
+            case 4: extension = ".zip"; break;
+            default: extension = ".dat"; break;
+        }
+        File staged = new File(inbox, "picked-" + System.currentTimeMillis() + "-" + kind + extension);
+        try (InputStream in = getContentResolver().openInputStream(uri);
+             FileOutputStream out = new FileOutputStream(staged)) {
+            if (in == null) throw new IllegalStateException("Could not open selected file.");
+            byte[] buffer = new byte[64 * 1024];
+            long total = 0;
+            int read;
+            while ((read = in.read(buffer)) > 0) {
+                total += read;
+                if (total > 1024L * 1024L * 1024L) {
+                    throw new IllegalArgumentException("Selected file exceeds the 1 GiB staging limit.");
+                }
+                out.write(buffer, 0, read);
+            }
+            out.getFD().sync();
+        }
+        return staged.getAbsolutePath();
+    }
+
     @Override protected void onResume() { super.onResume(); nativeSetResumed(true); }
     @Override protected void onPause() { nativeSetResumed(false); super.onPause(); }
 
@@ -144,6 +207,19 @@ public final class MainActivity extends Activity {
         if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
         Uri uri = data.getData();
 
+        if (requestCode >= NATIVE_PICK_BASE && requestCode < NATIVE_PICK_BASE + 32) {
+            int kind = requestCode - NATIVE_PICK_BASE;
+            try {
+                String path = stageNativeSelection(uri, kind);
+                nativeOnFilePicked(kind, true, path);
+            } catch (Exception e) {
+                nativeOnFilePicked(kind, false, "");
+            } finally {
+                pendingNativeKind = -1;
+            }
+            return;
+        }
+
         try {
             if (requestCode == IMPORT_SAVE) {
                 statusView.setText(SaveTransfer.importAdventure(getContentResolver(), uri, getFilesDir()));
@@ -193,6 +269,11 @@ public final class MainActivity extends Activity {
         RomInspector.Result inspection = RomInspector.inspect(dst);
         statusView.setText(inspection.describe() + "\n\nStored privately at:\n" + dst.getAbsolutePath());
         if (!inspection.candidate) dst.delete();
+    }
+
+    @Override protected void onDestroy() {
+        if (activeInstance == this) activeInstance = null;
+        super.onDestroy();
     }
 
     private void toast(String message) { Toast.makeText(this, message, Toast.LENGTH_LONG).show(); }

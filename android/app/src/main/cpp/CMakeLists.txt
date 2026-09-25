@@ -8,6 +8,7 @@ add_library(dkr_android SHARED
     "${ANDROID_COMPAT_DIR}/android_paths.cpp"
     "${ANDROID_COMPAT_DIR}/app_lifecycle.cpp"
     "${ANDROID_COMPAT_DIR}/crash_handler.cpp"
+    "${ANDROID_COMPAT_DIR}/file_bridge.cpp"
 )
 
 target_compile_features(dkr_android PRIVATE cxx_std_20)
