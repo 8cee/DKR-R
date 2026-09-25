@@ -116,6 +116,7 @@ final class VirtualPadView extends View {
         super.onDraw(canvas);
         if (!visiblePad) return;
 
+        syncMenuMode();
         if (menuMode) {
             drawControl(canvas, menu, 0xCC6F7A86);
             return;
@@ -152,6 +153,7 @@ final class VirtualPadView extends View {
 
     @Override public boolean onTouchEvent(MotionEvent event) {
         if (!visiblePad) return false;
+        syncMenuMode();
         int action = event.getActionMasked();
         int index = event.getActionIndex();
         int pointerId = event.getPointerId(index);
@@ -241,8 +243,8 @@ final class VirtualPadView extends View {
         } else if (c == menu) {
             if (pressed) {
                 releaseGameplayControls();
-                menuMode = !menuMode;
                 ControllerBridge.nativeToggleOverlay();
+                menuMode = ControllerBridge.nativeOverlayVisible();
             }
         } else if (c.keyCode >= 0) {
             ControllerBridge.nativeSetButton(DEVICE_ID, c.keyCode, pressed);
@@ -254,6 +256,12 @@ final class VirtualPadView extends View {
         float rightX = cLeft ? -1f : 0f;
         ControllerBridge.nativeSetAxis(
                 DEVICE_ID, stickX, -stickY, rightX, 0f, 0f, 0f);
+    }
+
+    private void syncMenuMode() {
+        if (menuMode && !ControllerBridge.nativeOverlayVisible()) {
+            menuMode = false;
+        }
     }
 
     private void releaseGameplayControls() {
