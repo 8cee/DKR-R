@@ -33,7 +33,8 @@ The script:
 4. builds RT64's host-side `file_to_c`;
 5. enables `DKR_ANDROID_FULL_RUNTIME`;
 6. passes the two generated CPU directories into the Android CMake build;
-7. builds the ARM64 APK.
+7. uses a project Gradle wrapper when available, a system Gradle when installed, or downloads and SHA-256-verifies the pinned Gradle 8.10.2 distribution into the ignored build cache;
+8. builds the ARM64 APK.
 
 The complete runtime is linked through the Android-safe `DKRPortGame` static
 target and enters through `DkrSdlActivity -> DKRAndroidHostMain -> DkrMain`.

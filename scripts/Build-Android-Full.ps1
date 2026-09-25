@@ -93,16 +93,54 @@ if ($V80) {
     Remove-Item Env:DKR_ANDROID_GENERATED_V80 -ErrorAction SilentlyContinue
 }
 
-$gradle = Get-Command gradle -ErrorAction SilentlyContinue
-if (-not $gradle) {
-    throw 'Gradle was not found on PATH. Install/use Gradle 8.10.2, matching the Android CI.'
+function Resolve-Gradle {
+    $wrapper = Join-Path $AndroidRoot 'gradlew.bat'
+    if (Test-Path -LiteralPath $wrapper -PathType Leaf) {
+        return $wrapper
+    }
+
+    $installed = Get-Command gradle -ErrorAction SilentlyContinue
+    if ($installed) {
+        return $installed.Source
+    }
+
+    $version = '8.10.2'
+    $toolRoot = Join-Path $Root "build\tools\gradle-$version"
+    $gradleExe = Join-Path $toolRoot "gradle-$version\bin\gradle.bat"
+    if (Test-Path -LiteralPath $gradleExe -PathType Leaf) {
+        return $gradleExe
+    }
+
+    New-Item -ItemType Directory -Force -Path $toolRoot | Out-Null
+    $zip = Join-Path $toolRoot "gradle-$version-bin.zip"
+    $shaFile = "$zip.sha256"
+    $url = "https://services.gradle.org/distributions/gradle-$version-bin.zip"
+
+    Write-Host ""
+    Write-Host "==> Downloading pinned Gradle $version" -ForegroundColor Cyan
+    Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $zip
+    Invoke-WebRequest -UseBasicParsing -Uri "$url.sha256" -OutFile $shaFile
+
+    $expected = (Get-Content -LiteralPath $shaFile -Raw).Trim().ToLowerInvariant()
+    $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($expected -ne $actual) {
+        Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
+        throw "Gradle $version checksum mismatch. Expected $expected, got $actual."
+    }
+
+    Expand-Archive -LiteralPath $zip -DestinationPath $toolRoot -Force
+    if (-not (Test-Path -LiteralPath $gradleExe -PathType Leaf)) {
+        throw "Pinned Gradle was extracted but gradle.bat was not found: $gradleExe"
+    }
+    return $gradleExe
 }
 
+$Gradle = Resolve-Gradle
 $task = if ($Configuration -eq 'Release') { 'assembleRelease' } else { 'assembleDebug' }
 Invoke-Checked "Building full DKR-R Android $Configuration APK" {
     Push-Location $AndroidRoot
     try {
-        & $gradle.Source --no-daemon --stacktrace $task
+        & $Gradle --no-daemon --stacktrace $task
     } finally {
         Pop-Location
     }
