@@ -1,5 +1,6 @@
 #include "legacy_import_library.hpp"
 #include "legacy_mod_process.hpp"
+#include "legacy_mod_stage.hpp"
 #include <json/json.hpp>
 #include <algorithm>
 #include <chrono>
@@ -148,7 +149,9 @@ bool ImportLibrary::start(std::filesystem::path source,std::vector<std::filesyst
                 bool imported_tracks=false,imported_characters=false;
                 if(!scan) {
                     if(roms.empty() || roms.size()>8) throw Error("Import an original Game Pak in the Play tab first (maximum eight source files).");
+#if !defined(__ANDROID__)
                     if(!worker_.is_absolute() || !std::filesystem::is_regular_file(worker_)) throw Error("The packaged mod importer is missing. Re-extract the complete DKR-R package.");
+#endif
                     unsigned reviews=0;for(const auto& entry:std::filesystem::directory_iterator(root_/"reviews"))if(digest(path_text(entry.path().filename())))++reviews;
                     if(reviews>=MaxReviews) throw Error("The import review library is full (128 reviews).");
                     std::random_device random;Bytes nonce(32);for(auto& byte:nonce)byte=static_cast<std::uint8_t>(random());
@@ -159,6 +162,28 @@ bool ImportLibrary::start(std::filesystem::path source,std::vector<std::filesyst
                     auto encoded=request.dump();
                     if(encoded.size()>64*1024)throw Error("The importer request exceeds its size limit.");
                     write_new_file(job/"request.json",View(reinterpret_cast<const std::uint8_t*>(encoded.data()),encoded.size()));
+#if defined(__ANDROID__)
+                    WorkerResult result{WorkerOutcome::Completed,0};
+                    try {
+                        unsigned event_count=0;
+                        const auto report=[&](const Progress& progress) {
+                            if(stop.stop_requested()) return false;
+                            if(++event_count>512) throw Error("Import progress budget exceeded.");
+                            if(progress.count>32 || progress.patch>progress.count)
+                                throw Error("Invalid import progress event.");
+                            std::scoped_lock lock(mutex_);
+                            view_.stage=progress.stage;
+                            view_.patch=progress.patch;
+                            view_.count=progress.count;
+                            publish();
+                            return true;
+                        };
+                        stage_import(source,roms,job/"content",report);
+                    } catch(...) {
+                        result={WorkerOutcome::Failed,1};
+                        throw;
+                    }
+#else
                     auto next_poll=std::chrono::steady_clock::now();
                     const auto result=run_worker(worker_,job/"request.json",[&] {
                         if(stop.stop_requested())return false;
@@ -177,6 +202,7 @@ bool ImportLibrary::start(std::filesystem::path source,std::vector<std::filesyst
                         if(count>32 || patch>count)throw Error("Invalid import progress event.");
                         std::scoped_lock lock(mutex_);view_.stage=stage;view_.patch=patch;view_.count=count;publish();return true;
                     });
+#endif
                     if(result.outcome==WorkerOutcome::Cancelled || stop.stop_requested()) throw Error("Import cancelled. Stock tracks, ROMs and saves were not changed.");
                     if(result.outcome==WorkerOutcome::TimedOut)throw Error("Import exceeded its time budget and was stopped safely.");
                     if(result.outcome!=WorkerOutcome::Completed) {
