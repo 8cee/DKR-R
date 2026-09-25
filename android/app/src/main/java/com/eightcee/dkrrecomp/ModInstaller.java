@@ -93,6 +93,9 @@ final class ModInstaller {
                 if (!staging.mkdirs()) throw new IllegalStateException("Could not create staging directory.");
                 unzipSafely(tempZip, staging);
 
+                File packagedArchive = new File(staging, ".catalog-package.zip");
+                copyFile(tempZip, packagedArchive);
+
                 File metadata = new File(staging, "mod.json");
                 try (FileOutputStream out = new FileOutputStream(metadata)) {
                     out.write(mod.toString(2).getBytes(StandardCharsets.UTF_8));
@@ -177,6 +180,20 @@ final class ModInstaller {
                 }
                 zin.closeEntry();
             }
+        }
+    }
+
+    static File packageArchive(File installedDirectory) {
+        return new File(installedDirectory, ".catalog-package.zip");
+    }
+
+    private static void copyFile(File source, File destination) throws Exception {
+        try (FileInputStream in = new FileInputStream(source);
+             FileOutputStream out = new FileOutputStream(destination)) {
+            byte[] buffer = new byte[64 * 1024];
+            int n;
+            while ((n = in.read(buffer)) > 0) out.write(buffer, 0, n);
+            out.getFD().sync();
         }
     }
 
