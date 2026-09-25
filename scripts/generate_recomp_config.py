@@ -19,7 +19,9 @@ def string_list(entries: list[dict[str, object]]) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--policy", required=True, type=Path)
-    parser.add_argument("--elf", required=True, type=Path)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--elf", type=Path)
+    source.add_argument("--symbols-file", type=Path)
     parser.add_argument("--rom", required=True, type=Path)
     parser.add_argument("--output-functions", required=True, type=Path)
     parser.add_argument("--entrypoint", required=True)
@@ -30,6 +32,8 @@ def main() -> int:
     arguments = parser.parse_args()
     if arguments.functions_per_output_file is not None and arguments.functions_per_output_file < 1:
         parser.error("--functions-per-output-file must be positive")
+    if arguments.symbols_file is not None and arguments.use_mdebug:
+        parser.error("--use-mdebug is only valid with --elf")
     source_granularity = (f"functions_per_output_file = {arguments.functions_per_output_file}\n"
                           if arguments.functions_per_output_file is not None else "")
 
@@ -73,7 +77,7 @@ def main() -> int:
 [input]
 entrypoint = {arguments.entrypoint}
 use_mdebug = {str(arguments.use_mdebug).lower()}
-elf_path = {toml_string(arguments.elf.resolve().as_posix())}
+{("elf_path = " + toml_string(arguments.elf.resolve().as_posix())) if arguments.elf is not None else ("symbols_file_path = " + toml_string(arguments.symbols_file.resolve().as_posix()))}
 rom_file_path = {toml_string(arguments.rom.resolve().as_posix())}
 output_func_path = {toml_string(arguments.output_functions.resolve().as_posix())}
 {source_granularity}manual_funcs = [{manual}]
