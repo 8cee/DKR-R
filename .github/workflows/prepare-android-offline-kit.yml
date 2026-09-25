@@ -42,17 +42,20 @@ jobs:
           python3 scripts/bootstrap_dependencies.py --force
           python3 scripts/apply_dependency_patches.py
 
-      - name: Populate Gradle offline cache
-        working-directory: android
-        shell: bash
-        run: |
-          gradle --no-daemon --stacktrace testDebugUnitTest assembleDebug
-
       - name: Build host RT64 file_to_c
         shell: bash
         run: |
           cmake -S extern/rt64/src/tools/file_to_c -B build/host-file-to-c -DCMAKE_BUILD_TYPE=Release
           cmake --build build/host-file-to-c --parallel
+          FILE_TO_C="$PWD/build/host-file-to-c/file_to_c"
+          test -x "$FILE_TO_C"
+          echo "RT64_HOST_FILE_TO_C=$FILE_TO_C" >> "$GITHUB_ENV"
+
+      - name: Populate Gradle offline cache
+        working-directory: android
+        shell: bash
+        run: |
+          gradle --no-daemon --stacktrace testDebugUnitTest assembleDebug
 
       - name: Pack source and dependencies
         shell: bash
