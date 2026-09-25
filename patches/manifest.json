@@ -226,7 +226,7 @@
         },
         {
           "path": "patches/rt64/0023-use-host-shader-tools-for-android-cross-build.patch",
-          "sha256": "2c4f297943f6d6958093452b68fe3363895f3ab09dbeef534982393746c41fc1"
+          "sha256": "80a0e43cb3c79a0262e9c65fcd8f5722d5f0d517aa7ae461a40c13c086767e37"
         }
       ]
     },
