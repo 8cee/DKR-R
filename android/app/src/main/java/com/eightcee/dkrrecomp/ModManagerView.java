@@ -21,7 +21,7 @@ final class ModManagerView {
 
     ModManagerView(Activity activity) {
         this.activity = activity;
-        this.modsRoot = new File(activity.getFilesDir(), "mods");
+        this.modsRoot = new File(activity.getFilesDir(), "catalog-mods");
 
         root = new LinearLayout(activity);
         root.setOrientation(LinearLayout.VERTICAL);
