@@ -113,6 +113,7 @@ target_compile_definitions(dkr_runtime_platform_android PRIVATE
 target_include_directories(dkr_runtime_platform_android PRIVATE
     "${DKR_RUNTIME_GAME_DIR}"
     "${DKR_ANDROID_NMR_DIR}/ultramodern/include"
+    "${DKR_ANDROID_NMR_DIR}/thirdparty"
     "${sdl2_SOURCE_DIR}/include"
 )
 target_link_libraries(dkr_runtime_platform_android PRIVATE dkr_android_input SDL2-static android log)
@@ -163,6 +164,7 @@ if(DKR_ANDROID_BUILD_RT64_PROBE AND NOT DKR_ANDROID_FULL_RUNTIME)
     target_include_directories(dkr_runtime_platform_rt64_probe PRIVATE
         "${DKR_RUNTIME_GAME_DIR}"
         "${DKR_ANDROID_NMR_DIR}/ultramodern/include"
+        "${DKR_ANDROID_NMR_DIR}/thirdparty"
         "${sdl2_SOURCE_DIR}/include"
         "${DKR_ANDROID_RT64_DIR}/src"
         "${DKR_ANDROID_RT64_DIR}/src/contrib"
