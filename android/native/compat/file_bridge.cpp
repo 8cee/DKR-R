@@ -45,12 +45,10 @@ bool cache_activity(JNIEnv* env, jclass activity_class) {
     jmethodID export_method = env->GetStaticMethodID(
         global, "requestNativeExport",
         "(ILjava/lang/String;Ljava/lang/String;)Z");
-    if (export_method == nullptr) {
-        if (env->ExceptionCheck()) env->ExceptionClear();
-        env->DeleteGlobalRef(global);
-        __android_log_print(ANDROID_LOG_ERROR, kTag,
-                            "SAF bridge: active Activity lacks requestNativeExport");
-        return false;
+    if (export_method == nullptr && env->ExceptionCheck()) {
+        // The temporary MainActivity bootstrap does not need native exports.
+        // DkrSdlActivity provides this method once the full runtime is active.
+        env->ExceptionClear();
     }
 
     std::scoped_lock lock(g_mutex);
