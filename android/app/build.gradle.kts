@@ -21,6 +21,10 @@ android {
         externalNativeBuild {
             cmake {
                 cppFlags += listOf("-std=c++20", "-fexceptions", "-frtti")
+                val hostFileToC = System.getenv("RT64_HOST_FILE_TO_C")
+                if (!hostFileToC.isNullOrBlank()) {
+                    arguments += "-DRT64_HOST_FILE_TO_C=$hostFileToC"
+                }
             }
         }
 

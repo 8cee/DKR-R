@@ -18,6 +18,10 @@ FetchContent_MakeAvailable(sdl2)
 
 set(ANDROID_COMPAT_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../../native/compat")
 set(DKR_RUNTIME_GAME_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../../../runtime-recomp/src/game")
+set(DKR_REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../../../")
+set(DKR_ANDROID_NMR_DIR "${DKR_REPO_ROOT}/extern/n64-modern-runtime")
+set(DKR_ANDROID_RT64_DIR "${DKR_REPO_ROOT}/extern/rt64")
+set(RT64_HOST_FILE_TO_C "" CACHE FILEPATH "Host file_to_c executable for Android RT64 cross-build")
 
 add_library(dkr_android_compat STATIC
     "${ANDROID_COMPAT_DIR}/android_paths.cpp"

@@ -43,6 +43,19 @@ jobs:
       - name: Install SDK and NDK
         run: "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
 
+      - name: Prepare pinned runtime dependencies
+        run: |
+          python3 scripts/bootstrap_dependencies.py --only n64-modern-runtime --only rt64
+          bash scripts/apply-dependency-patches.sh
+
+      - name: Build RT64 host file_to_c
+        run: |
+          cmake -S extern/rt64/src/tools/file_to_c -B build/host-file-to-c -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/host-file-to-c --config Release --parallel
+          FILE_TO_C="$PWD/build/host-file-to-c/file_to_c"
+          test -x "$FILE_TO_C"
+          echo "RT64_HOST_FILE_TO_C=$FILE_TO_C" >> "$GITHUB_ENV"
+
       - name: Build debug APK
         working-directory: android
         run: gradle --no-daemon --stacktrace assembleDebug
