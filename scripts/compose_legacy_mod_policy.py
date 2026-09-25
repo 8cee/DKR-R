@@ -145,6 +145,17 @@ def metadata_context(symbols_path: Path, rom_path: Path):
     return sections, bounds
 
 
+def apply_fragment_bounds(symbols: dict, fragment: dict) -> None:
+    """Overlay reviewed fragment function/data bounds onto inferred metadata."""
+    for name, body in fragment.get("functions", {}).items():
+        address = int(body["vram"], 0)
+        size = int(body["size"])
+        symbols[name] = {(address, size)}
+    for field in fragment.get("fields", []):
+        address = int(field["address"], 0)
+        size = int(field["size"])
+        symbols[field["name"]] = {(address, size)}
+
 def verify_function_bounds(policy: dict, fragment: dict, functions: dict) -> None:
     functions = copy.deepcopy(functions)
     for manual in policy.get("manualFunctions", []):
@@ -507,6 +518,8 @@ def main() -> None:
         functions = copy.deepcopy(symbols)
 
     policy, fragment = json.loads(args.policy.read_text()), json.loads(args.fragment.read_text())
+    apply_fragment_bounds(symbols, fragment)
+    apply_fragment_bounds(functions, fragment)
     verify_function_bounds(policy, fragment, functions)
     result = compose(policy, fragment, sections)
     if args.qualification and not args.scene_runtime:
@@ -518,16 +531,22 @@ def main() -> None:
         if not args.scene_runtime or args.qualification:
             raise ValueError("Track Select requires scene ownership and cannot use the cyclic menu-load probe")
         menu = json.loads(args.track_menu.read_text())
+        apply_fragment_bounds(symbols, menu)
+        apply_fragment_bounds(functions, menu)
         if menu.get("revision") != fragment.get("revision"):
             raise ValueError("Track-menu and asset revisions differ")
         result = compose_track_menu(result, menu, sections, symbols)
     if args.characters:
         if not args.scene_runtime:raise ValueError('Character adapter requires boot/scene asset ownership')
         character=json.loads(args.characters.read_text())
+        apply_fragment_bounds(symbols, character)
+        apply_fragment_bounds(functions, character)
         if character.get('revision')!=fragment.get('revision'):raise ValueError('Character and asset revisions differ')
         result=compose_characters(result,character,sections,symbols)
     if args.character_menu:
         menu=json.loads(args.character_menu.read_text())
+        apply_fragment_bounds(symbols, menu)
+        apply_fragment_bounds(functions, menu)
         if not args.characters or menu.get('revision')!=fragment.get('revision'):raise ValueError('Character menu requires matching resource ownership')
         result=compose_character_menu(result,menu,sections,symbols)
         from legacy_character_presentation_policy import compose_presentation
