@@ -86,7 +86,6 @@ add_library(dkr_android_compat STATIC
     "${ANDROID_COMPAT_DIR}/android_paths.cpp"
     "${ANDROID_COMPAT_DIR}/app_lifecycle.cpp"
     "${ANDROID_COMPAT_DIR}/crash_handler.cpp"
-    "${ANDROID_COMPAT_DIR}/file_bridge.cpp"
     "${ANDROID_COMPAT_DIR}/app_restart.cpp"
 )
 set_target_properties(dkr_android_compat PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -241,7 +240,10 @@ target_link_libraries(dkr_runtime_portability_probe PRIVATE android log)
 
 endif()
 
-add_library(dkr_android SHARED dkr_android.cpp)
+add_library(dkr_android SHARED
+    dkr_android.cpp
+    "${ANDROID_COMPAT_DIR}/file_bridge.cpp"
+)
 target_compile_features(dkr_android PRIVATE cxx_std_20)
 target_compile_definitions(dkr_android PRIVATE
     DKR_ANDROID_FULL_RUNTIME=$<BOOL:${DKR_ANDROID_FULL_RUNTIME}>
