@@ -17,10 +17,10 @@ final class CatalogModNative {
 
     private CatalogModNative() {}
 
-    private static native String nativeActivate(String target, String archivePath, String filesDir);
+    private static native String nativeActivate(String target, String archivePath, String filesDir, String expectedNativeId);
     private static native String nativeDeactivate(String target, String nativeId, String filesDir);
 
-    static Result activate(File filesDir, File archive, String target) {
+    static Result activate(File filesDir, File archive, String target, String expectedNativeId) {
         if (target == null || target.equals("library")) {
             return new Result(true, "", "Stored in catalog library.");
         }
@@ -30,7 +30,8 @@ final class CatalogModNative {
         if (archive == null || !archive.isFile()) {
             return new Result(false, "", "Verified package archive is missing.");
         }
-        return parse(nativeActivate(target, archive.getAbsolutePath(), filesDir.getAbsolutePath()));
+        return parse(nativeActivate(target, archive.getAbsolutePath(), filesDir.getAbsolutePath(),
+                expectedNativeId == null ? "" : expectedNativeId));
     }
 
     static Result deactivate(File filesDir, String target, String nativeId) {
