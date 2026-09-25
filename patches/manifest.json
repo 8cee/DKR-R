@@ -131,7 +131,7 @@
         },
         {
           "path": "patches/n64recomp/0004-allow-symbol-context-entrypoint-by-vram.patch",
-          "sha256": "c1aaab308cf5b16e19ca04f932004c024790ba0ee3b80410a0b858aaae4d23f6"
+          "sha256": "8db488fae550d4bd60da87443cd92a3a9d667d7fc67c5af8a5bd1eb32d4ca1ec"
         }
       ]
     },
