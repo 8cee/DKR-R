@@ -99,11 +99,17 @@ final class ModCatalogClient {
             String category = ModInstaller.safeId(mod.getString("category"));
             String url = mod.getString("downloadUrl");
             String sha = mod.getString("sha256");
+            String installTarget = mod.optString("installTarget", "library");
             if (name.isEmpty() || version.isEmpty()) {
                 throw new IllegalArgumentException("Mod " + id + " has an empty name/version.");
             }
             if (!isCategory(category)) {
                 throw new IllegalArgumentException("Mod " + id + " uses unsupported category " + category + ".");
+            }
+            if (!installTarget.equals("library") &&
+                    !installTarget.equals("custom-track") &&
+                    !installTarget.equals("texture-pack")) {
+                throw new IllegalArgumentException("Mod " + id + " uses unsupported installTarget " + installTarget + ".");
             }
             if (!url.startsWith("https://")) {
                 throw new IllegalArgumentException("Mod " + id + " download must use HTTPS.");
