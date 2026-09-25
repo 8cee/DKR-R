@@ -1,0 +1,107 @@
+name: Prepare Android Offline Build Kit
+
+"on":
+  workflow_dispatch: {}
+  push:
+    branches:
+      - android
+    paths:
+      - .github/workflows/prepare-android-offline-kit.yml
+
+jobs:
+  kit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+
+      - name: Install SDK and NDK
+        shell: bash
+        run: |
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "ndk;27.2.12479018" \
+            "cmake;3.22.1"
+
+      - name: Prepare all pinned dependencies
+        shell: bash
+        run: |
+          python3 scripts/bootstrap_dependencies.py --force
+          python3 scripts/apply_dependency_patches.py
+
+      - name: Populate Gradle offline cache
+        working-directory: android
+        shell: bash
+        run: |
+          gradle --no-daemon --stacktrace testDebugUnitTest assembleDebug
+
+      - name: Build host RT64 file_to_c
+        shell: bash
+        run: |
+          cmake -S extern/rt64/src/tools/file_to_c -B build/host-file-to-c -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/host-file-to-c --parallel
+
+      - name: Pack source and dependencies
+        shell: bash
+        run: |
+          mkdir -p build/offline-kit
+          tar --exclude=.git --exclude=build/offline-kit --exclude=android/app/build \
+              -I 'zstd -3 -T0' -cf build/offline-kit/dkr-source-deps.tar.zst .
+
+      - name: Pack Android SDK subset
+        shell: bash
+        run: |
+          SDK="$ANDROID_HOME"
+          tar -C "$SDK" -I 'zstd -3 -T0' -cf build/offline-kit/android-sdk.tar.zst \
+            platforms/android-35 \
+            build-tools/35.0.0 \
+            ndk/27.2.12479018 \
+            cmake/3.22.1
+
+      - name: Pack Gradle and offline caches
+        shell: bash
+        run: |
+          GRADLE_BIN="$(readlink -f "$(command -v gradle)")"
+          GRADLE_ROOT="$(cd "$(dirname "$GRADLE_BIN")/.." && pwd)"
+          mkdir -p build/offline-kit/gradle-root
+          cp -a "$GRADLE_ROOT"/. build/offline-kit/gradle-root/
+          mkdir -p build/offline-kit/gradle-home
+          cp -a "$HOME/.gradle/caches" build/offline-kit/gradle-home/
+          cp -a "$HOME/.gradle/native" build/offline-kit/gradle-home/ 2>/dev/null || true
+          tar -C build/offline-kit -I 'zstd -3 -T0' -cf build/offline-kit/gradle-offline.tar.zst \
+            gradle-root gradle-home
+          rm -rf build/offline-kit/gradle-root build/offline-kit/gradle-home
+
+      - name: Upload source/deps
+        uses: actions/upload-artifact@v4
+        with:
+          name: DKR-offline-source-deps
+          path: build/offline-kit/dkr-source-deps.tar.zst
+          compression-level: 0
+
+      - name: Upload Android SDK
+        uses: actions/upload-artifact@v4
+        with:
+          name: DKR-offline-android-sdk
+          path: build/offline-kit/android-sdk.tar.zst
+          compression-level: 0
+
+      - name: Upload Gradle offline kit
+        uses: actions/upload-artifact@v4
+        with:
+          name: DKR-offline-gradle
+          path: build/offline-kit/gradle-offline.tar.zst
+          compression-level: 0
