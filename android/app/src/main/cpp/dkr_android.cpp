@@ -439,7 +439,7 @@ Java_com_eightcee_dkrrecomp_CatalogModNative_nativeActivate(
 
         return env->NewStringUTF("ERR\n\nUnsupported catalog activation target.");
     } catch (const std::exception& e) {
-        const std::string result = std::string("ERR\n") + e.what();
+        const std::string result = std::string("ERR\n\n") + e.what();
         return env->NewStringUTF(result.c_str());
     }
 #else
