@@ -2,7 +2,7 @@ diff --git a/src/hle/rt64_application_window.cpp b/src/hle/rt64_application_wind
 index 2bd58d4..77a1f72 100644
 --- a/src/hle/rt64_application_window.cpp
 +++ b/src/hle/rt64_application_window.cpp
-@@ -48,7 +48,11 @@ namespace RT64 {
+@@ -48,6 +48,10 @@ namespace RT64 {
  
          windowHandle = window;
  
@@ -14,7 +14,7 @@ index 2bd58d4..77a1f72 100644
 +#   elif defined(RT64_SDL_WINDOW_VULKAN)
          sdlWindow = window;
  #   endif
-@@ -101,7 +105,19 @@ namespace RT64 {
+@@ -101,7 +105,20 @@ namespace RT64 {
          bounds.width = rect.right - rect.left;
          bounds.height = rect.bottom - rect.top;
  #   elif defined(__ANDROID__)
@@ -36,7 +36,7 @@ index 2bd58d4..77a1f72 100644
  #   elif defined(__linux__) || defined(__APPLE__)
          if (SDL_VideoInit(nullptr) != 0) {
              printf("Failed to init SDL2 video: %s\n", SDL_GetError());
-@@ -145,9 +161,9 @@ namespace RT64 {
+@@ -145,10 +162,10 @@ namespace RT64 {
          SDL_GetWindowWMInfo(sdlWindow, &wmInfo);
  #   if defined(_WIN32)
          windowHandle = wmInfo.info.win.window;
@@ -49,7 +49,7 @@ index 2bd58d4..77a1f72 100644
  #   elif defined(__linux__)
          windowHandle.display = wmInfo.info.x11.display;
          windowHandle.window = wmInfo.info.x11.window;
-@@ -227,10 +243,10 @@ namespace RT64 {
+@@ -227,10 +244,10 @@ namespace RT64 {
  #   elif defined(__APPLE__)
          windowWrapper->toggleFullscreen();
  #   elif defined(RT64_SDL_WINDOW_VULKAN)
@@ -62,7 +62,7 @@ index 2bd58d4..77a1f72 100644
          }
          fullScreen = newFullScreen;
  #   endif
-@@ -277,7 +293,7 @@ namespace RT64 {
+@@ -277,8 +294,8 @@ namespace RT64 {
          if ((refreshRate % 10) == 9) {
              refreshRate++;
          }
@@ -72,7 +72,7 @@ index 2bd58d4..77a1f72 100644
          if (displayIndex < 0) {
              fprintf(stderr, "SDL_GetWindowDisplayIndex failed. Error: %s.\n", SDL_GetError());
              return;
-@@ -345,7 +361,7 @@ namespace RT64 {
+@@ -345,8 +362,8 @@ namespace RT64 {
          GetWindowRect(windowHandle, &rect);
          newWindowLeft = rect.left;
          newWindowTop = rect.top;
