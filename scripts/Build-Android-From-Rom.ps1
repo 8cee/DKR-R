@@ -66,9 +66,26 @@ function Resolve-HostCMake {
 }
 
 $CMake = Resolve-HostCMake
+$NinjaCandidates = @(
+    (Join-Path (Split-Path -Parent $CMake) 'ninja.exe'),
+    (Get-Command ninja -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue)
+) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } |
+    Select-Object -Unique
+$Ninja = $NinjaCandidates | Select-Object -First 1
+if (-not $Ninja) {
+    throw 'Ninja was not found. Android Studio CMake normally includes ninja.exe beside cmake.exe.'
+}
+
 $HostRecompBuild = Join-Path $BuildRoot 'android-host-n64recomp'
+$configureRecompArgs = @(
+    '-S', $N64RecompSource,
+    '-B', $HostRecompBuild,
+    '-G', 'Ninja',
+    "-DCMAKE_MAKE_PROGRAM=$Ninja",
+    '-DCMAKE_BUILD_TYPE=Release'
+)
 Invoke-Checked 'Configuring pinned host N64Recomp' {
-    & $CMake -S $N64RecompSource -B $HostRecompBuild -DCMAKE_BUILD_TYPE=Release
+    & $CMake @configureRecompArgs
 }
 Invoke-Checked 'Building pinned host N64Recomp' {
     & $CMake --build $HostRecompBuild --config Release --target N64RecompCLI --parallel

@@ -119,10 +119,27 @@ Invoke-Checked 'Applying pinned dependency patches' {
     & $Python $patchScript
 }
 
+$NinjaCandidates = @(
+    (Join-Path (Split-Path -Parent $SdkCMake) 'ninja.exe'),
+    (Get-Command ninja -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue)
+) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } |
+    Select-Object -Unique
+$Ninja = $NinjaCandidates | Select-Object -First 1
+if (-not $Ninja) {
+    throw 'Ninja was not found. Android Studio CMake normally includes ninja.exe beside cmake.exe.'
+}
+
 $HostBuild = Join-Path $Root 'build\android-host-file-to-c'
 $Rt64ToolSource = Join-Path $Root 'extern\rt64\src\tools\file_to_c'
+$configureFileToCArgs = @(
+    '-S', $Rt64ToolSource,
+    '-B', $HostBuild,
+    '-G', 'Ninja',
+    "-DCMAKE_MAKE_PROGRAM=$Ninja",
+    '-DCMAKE_BUILD_TYPE=Release'
+)
 Invoke-Checked 'Configuring RT64 host file_to_c' {
-    & $SdkCMake -S $Rt64ToolSource -B $HostBuild -DCMAKE_BUILD_TYPE=Release
+    & $SdkCMake @configureFileToCArgs
 }
 Invoke-Checked 'Building RT64 host file_to_c' {
     & $SdkCMake --build $HostBuild --config Release --parallel
