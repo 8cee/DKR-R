@@ -1,0 +1,80 @@
+name: Prepare Android SDK Chunks
+
+"on":
+  workflow_dispatch: {}
+  push:
+    branches:
+      - android
+    paths:
+      - .github/workflows/prepare-android-sdk-chunks.yml
+
+jobs:
+  sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install SDK and NDK
+        shell: bash
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "ndk;27.2.12479018" \
+            "cmake;3.22.1"
+
+      - name: Pack SDK base and split NDK
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/dkr-sdk-chunks"
+          tar -C "$ANDROID_HOME" -I 'zstd -3 -T0' \
+            -cf "$RUNNER_TEMP/dkr-sdk-chunks/sdk-base.tar.zst" \
+            platforms/android-35 build-tools/35.0.0 cmake/3.22.1
+          tar -C "$ANDROID_HOME" -I 'zstd -3 -T0' \
+            -cf "$RUNNER_TEMP/dkr-sdk-chunks/ndk.tar.zst" \
+            ndk/27.2.12479018
+          split -b 250M -d -a 2 \
+            "$RUNNER_TEMP/dkr-sdk-chunks/ndk.tar.zst" \
+            "$RUNNER_TEMP/dkr-sdk-chunks/ndk.part."
+          rm "$RUNNER_TEMP/dkr-sdk-chunks/ndk.tar.zst"
+          ls -lh "$RUNNER_TEMP/dkr-sdk-chunks"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DKR-sdk-base
+          path: ${{ runner.temp }}/dkr-sdk-chunks/sdk-base.tar.zst
+          compression-level: 0
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DKR-ndk-part-00
+          path: ${{ runner.temp }}/dkr-sdk-chunks/ndk.part.00
+          compression-level: 0
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DKR-ndk-part-01
+          path: ${{ runner.temp }}/dkr-sdk-chunks/ndk.part.01
+          compression-level: 0
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DKR-ndk-part-02
+          path: ${{ runner.temp }}/dkr-sdk-chunks/ndk.part.02
+          compression-level: 0
+
+      - name: Check optional fourth chunk
+        id: chunk3
+        shell: bash
+        run: |
+          if test -f "$RUNNER_TEMP/dkr-sdk-chunks/ndk.part.03"; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: steps.chunk3.outputs.exists == 'true'
+        with:
+          name: DKR-ndk-part-03
+          path: ${{ runner.temp }}/dkr-sdk-chunks/ndk.part.03
+          compression-level: 0
