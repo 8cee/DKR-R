@@ -12,6 +12,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SYMBOL_CONTEXT_TOOL = ROOT / "scripts" / "generate_dkr_symbol_context.py"
 CONFIG_TOOL = ROOT / "scripts" / "generate_recomp_config.py"
+COMPOSE_TOOL = ROOT / "scripts" / "compose_legacy_mod_policy.py"
 RUNTIME = ROOT / "runtime-recomp"
 
 SYMBOL_RE = re.compile(r"^([A-Za-z_.$][\w.$]*)\s*=\s*(0x[0-9A-Fa-f]+);")
@@ -49,16 +50,28 @@ def main() -> int:
         / "symbols"
         / f"symbol_addrs.us.{args.revision}.txt"
     )
-    policy = RUNTIME / f"dkr.us.{args.revision}.recomp-policy.json"
+    base_policy = RUNTIME / f"dkr.us.{args.revision}.recomp-policy.json"
+    legacy_fragment = RUNTIME / f"legacy-mods.{args.revision}.recomp-fragment.json"
+    track_menu_fragment = RUNTIME / f"legacy-track-menu.{args.revision}.recomp-fragment.json"
+    character_fragment = RUNTIME / f"legacy-characters.{args.revision}.recomp-fragment.json"
+    character_menu_fragment = RUNTIME / f"legacy-character-menu.{args.revision}.recomp-fragment.json"
     if not symbols.is_file():
         raise RuntimeError(f"Pinned DKR symbols are missing: {symbols}")
-    if not policy.is_file():
-        raise RuntimeError(f"DKR recomp policy is missing: {policy}")
+    for required in (
+        base_policy,
+        legacy_fragment,
+        track_menu_fragment,
+        character_fragment,
+        character_menu_fragment,
+    ):
+        if not required.is_file():
+            raise RuntimeError(f"DKR recompilation input is missing: {required}")
     if not args.n64recomp.is_file():
         raise RuntimeError(f"N64Recomp executable is missing: {args.n64recomp}")
 
     workspace = ROOT / "build" / "android-recomp" / args.revision
     context = workspace / "symbols.toml"
+    composed_policy = workspace / "composed-policy.json"
     config = workspace / "recomp.toml"
 
     if args.output.exists():
@@ -68,9 +81,23 @@ def main() -> int:
 
     run([
         sys.executable,
+        str(COMPOSE_TOOL),
+        "--policy", str(base_policy),
+        "--fragment", str(legacy_fragment),
+        "--symbols", str(symbols),
+        "--rom", str(args.rom.resolve()),
+        "--scene-runtime",
+        "--track-menu", str(track_menu_fragment),
+        "--characters", str(character_fragment),
+        "--character-menu", str(character_menu_fragment),
+        "--output", str(composed_policy),
+    ])
+
+    run([
+        sys.executable,
         str(SYMBOL_CONTEXT_TOOL),
         "--symbols", str(symbols),
-        "--policy", str(policy),
+        "--policy", str(composed_policy),
         "--output", str(context),
     ])
 
@@ -78,7 +105,7 @@ def main() -> int:
     run([
         sys.executable,
         str(CONFIG_TOOL),
-        "--policy", str(policy),
+        "--policy", str(composed_policy),
         "--symbols-file", str(context),
         "--rom", str(args.rom.resolve()),
         "--output-functions", str(args.output.resolve()),
@@ -95,6 +122,7 @@ def main() -> int:
             f"N64Recomp did not produce a usable {args.revision} payload"
         )
 
+    print(f"[OK] Fully composed Patch Pipeline: {composed_policy}")
     print(
         f"[OK] DKR US {args.revision}: {len(sources)} generated CPU source files"
     )
