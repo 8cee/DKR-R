@@ -96,6 +96,22 @@ function Require-GeneratedPayload([string]$Path, [string]$Revision) {
 }
 
 Require-GeneratedPayload $V77 'DKR US v1.0 / v77'
+
+$RequiredRuntimeInputs = @(
+    (Join-Path $Root 'runtime-recomp\RecompiledRSP\aspMain.cpp'),
+    (Join-Path $Root 'runtime-recomp\dkr.us.v77.recomp-policy.json'),
+    (Join-Path $Root 'runtime-recomp\legacy-mods.v77.recomp-fragment.json'),
+    (Join-Path $Root 'runtime-recomp\legacy-track-menu.v77.recomp-fragment.json'),
+    (Join-Path $Root 'runtime-recomp\legacy-characters.v77.recomp-fragment.json'),
+    (Join-Path $Root 'runtime-recomp\legacy-character-menu.v77.recomp-fragment.json')
+)
+foreach ($required in $RequiredRuntimeInputs) {
+    if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+        throw "Required full-runtime input is missing: $required"
+    }
+}
+Write-Host '[OK] Full-runtime RSP and Patch Pipeline inputs are present.' -ForegroundColor Green
+
 if ($V80) {
     Require-GeneratedPayload $V80 'DKR US Rev A / v80'
 } else {
