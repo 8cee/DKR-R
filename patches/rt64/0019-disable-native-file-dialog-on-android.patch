@@ -1,5 +1,4 @@
 diff --git a/src/gui/rt64_file_dialog.cpp b/src/gui/rt64_file_dialog.cpp
-index 8ed9961..68c0e55 100644
 --- a/src/gui/rt64_file_dialog.cpp
 +++ b/src/gui/rt64_file_dialog.cpp
 @@ -6,7 +6,9 @@
@@ -12,7 +11,7 @@ index 8ed9961..68c0e55 100644
  
  namespace RT64 {
      // FileDialog
-@@ -14,13 +16,18 @@ namespace RT64 {
+@@ -14,13 +16,18 @@
      std::atomic<bool> FileDialog::isOpen = false;
  
      void FileDialog::initialize() {
@@ -31,7 +30,7 @@ index 8ed9961..68c0e55 100644
      static std::vector<nfdnfilteritem_t> convertFilters(const std::vector<FileFilter> &filters) {
          std::vector<nfdnfilteritem_t> nfdFilters;
          for (const FileFilter &filter : filters) {
-@@ -27,8 +34,12 @@ namespace RT64 {
+@@ -29,8 +36,12 @@
  
          return nfdFilters;
      }
@@ -44,7 +43,7 @@ index 8ed9961..68c0e55 100644
          isOpen = true;
  
          std::filesystem::path path;
-@@ -41,9 +52,13 @@ namespace RT64 {
+@@ -43,9 +54,13 @@
  
          isOpen = false;
          return path;
@@ -56,9 +55,9 @@ index 8ed9961..68c0e55 100644
 +        return {};
 +#else
          isOpen = true;
-         
+ 
          std::filesystem::path path;
-@@ -58,9 +73,13 @@ namespace RT64 {
+@@ -59,9 +74,13 @@
  
          isOpen = false;
          return path;
@@ -72,7 +71,7 @@ index 8ed9961..68c0e55 100644
          isOpen = true;
  
          std::filesystem::path path;
-@@ -75,5 +94,6 @@ namespace RT64 {
+@@ -75,5 +94,6 @@
  
          isOpen = false;
          return path;
