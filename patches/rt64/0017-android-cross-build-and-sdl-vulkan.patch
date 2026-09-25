@@ -11,7 +11,7 @@ diff --git a/CMakeLists.txt b/CMakeLists.txt
          set (DXC "LD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/src/contrib/dxc/lib/x64" "${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64/dxc-linux")
      else()
          set (DXC "LD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/src/contrib/dxc/lib/arm64" "${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/arm64/dxc-linux")
-@@ -68,8 +70,27 @@ else()
+@@ -68,12 +70,29 @@ else()
  set(ZSTD_LEGACY_SUPPORT OFF)
  set(ZSTD_BUILD_STATIC ON)
  set(ZSTD_BUILD_SHARED OFF)
@@ -44,7 +44,7 @@ diff --git a/CMakeLists.txt b/CMakeLists.txt
 +if ((CMAKE_SYSTEM_NAME MATCHES "Linux" OR ANDROID) AND RT64_SDL_WINDOW_VULKAN)
      set(PLUME_SDL_VULKAN_ENABLED TRUE)
  elseif (APPLE)
-@@ -301,7 +322,7 @@ add_compile_definitions(
+@@ -301,7 +320,7 @@ add_compile_definitions(
      IMGUI_IMPL_VULKAN_NO_PROTOTYPES
  )
  
