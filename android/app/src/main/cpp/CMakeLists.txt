@@ -17,6 +17,7 @@ FetchContent_Declare(sdl2
 FetchContent_MakeAvailable(sdl2)
 
 set(ANDROID_COMPAT_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../../native/compat")
+set(DKR_RUNTIME_GAME_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../../../runtime-recomp/src/game")
 
 add_library(dkr_android_compat STATIC
     "${ANDROID_COMPAT_DIR}/android_paths.cpp"
@@ -46,7 +47,6 @@ target_link_libraries(dkr_runtime_platform_android PRIVATE SDL2-static android l
 # Compile a dependency-light slice of the real DKR-R runtime with the NDK on
 # every APK build. This catches Android portability regressions before RT64 and
 # the generated recomp payload are brought into the Android link.
-set(DKR_RUNTIME_GAME_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../../../runtime-recomp/src/game")
 add_library(dkr_runtime_portability_probe STATIC
     "${DKR_RUNTIME_GAME_DIR}/runtime_support.cpp"
     "${DKR_RUNTIME_GAME_DIR}/dkr_save_codec.cpp"
