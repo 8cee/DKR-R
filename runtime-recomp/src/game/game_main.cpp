@@ -1,4 +1,4 @@
-#include "game_registration.hpp"
+#include "game_main.hpp"\n#include "game_registration.hpp"
 #include "revision_addresses.hpp"
 #include "null_renderer.hpp"
 #include "rev_a_asset_mutex.hpp"
