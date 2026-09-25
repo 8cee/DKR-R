@@ -27,8 +27,11 @@ final class ModCompatibility {
     static String currentGameRevision(File filesDir) {
         File rom = new File(filesDir, "roms/dkr.rom");
         if (!rom.isFile()) return null;
-        RomInspector.Result result = RomInspector.inspect(rom);
-        if (!result.candidate || result.country != 0x45) return null; // NTSC-U
+        return revisionTag(RomInspector.inspect(rom));
+    }
+
+    static String revisionTag(RomInspector.Result result) {
+        if (result == null || !result.candidate || result.country != 0x45) return null; // NTSC-U
         if (result.revision == 0) return "v77";
         if (result.revision == 1) return "v80";
         return null;
