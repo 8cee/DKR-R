@@ -114,6 +114,19 @@ Write-Host '[OK] Full-runtime RSP and Patch Pipeline inputs are present.' -Foreg
 
 if ($V80) {
     Require-GeneratedPayload $V80 'DKR US Rev A / v80'
+    $RequiredV80Inputs = @(
+        (Join-Path $Root 'runtime-recomp\dkr.us.v80.recomp-policy.json'),
+        (Join-Path $Root 'runtime-recomp\legacy-mods.v80.recomp-fragment.json'),
+        (Join-Path $Root 'runtime-recomp\legacy-track-menu.v80.recomp-fragment.json'),
+        (Join-Path $Root 'runtime-recomp\legacy-characters.v80.recomp-fragment.json'),
+        (Join-Path $Root 'runtime-recomp\legacy-character-menu.v80.recomp-fragment.json')
+    )
+    foreach ($required in $RequiredV80Inputs) {
+        if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+            throw "Required v80 Patch Pipeline input is missing: $required"
+        }
+    }
+    Write-Host '[OK] Rev A / v80 Patch Pipeline inputs are present.' -ForegroundColor Green
 } else {
     Write-Host '[INFO] No v80 payload supplied; this APK will support DKR US v1.0 only.' -ForegroundColor Yellow
 }
