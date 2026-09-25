@@ -127,7 +127,7 @@
         },
         {
           "path": "patches/n64recomp/0003-skip-host-tools-on-android.patch",
-          "sha256": "40cf26712a76262358541c4dd5609618874119caa693a7c842623732bbf56b0d"
+          "sha256": "585053bf1bb6917f9700f867db2fbc96adc1be2c826668e22cfb83ee5559bdfc"
         }
       ]
     },
