@@ -15,6 +15,10 @@ From PowerShell:
 
 ```powershell
 .\scripts\Build-Android-Full.ps1 \
+  -GeneratedV77 C:\path\to\RecompiledFuncs-v77
+
+# Optional Rev A support:
+.\scripts\Build-Android-Full.ps1 \
   -GeneratedV77 C:\path\to\RecompiledFuncs-v77 \
   -GeneratedV80 C:\path\to\RecompiledFuncs-v80
 ```
@@ -23,7 +27,7 @@ Use `-Configuration Release` for a release APK.
 
 The script:
 
-1. validates that both generated source trees contain code and `funcs.h`;
+1. validates the required v77 source tree and optional v80 source tree contain code and `funcs.h`;
 2. prepares every revision pinned in `dependencies.lock.json`;
 3. applies the checksummed dependency patch manifest;
 4. builds RT64's host-side `file_to_c`;

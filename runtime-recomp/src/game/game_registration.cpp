@@ -159,6 +159,11 @@ bool dkr::runtime::ValidateRomForLauncher(const std::filesystem::path& rom_path,
         error = rom::describe(identity);
         return false;
     }
+    if (payload_for(identity.revision) == nullptr) {
+        error = "This DKR-R build does not include the CPU payload for " +
+                rom::describe(identity) + ".";
+        return false;
+    }
     error.clear();
     return true;
 }

@@ -115,8 +115,8 @@ def main() -> int:
     parser.add_argument("--n64recomp", required=True, type=pathlib.Path)
     parser.add_argument("--v77-elf", required=True, type=pathlib.Path)
     parser.add_argument("--v77-rom", required=True, type=pathlib.Path)
-    parser.add_argument("--v80-elf", required=True, type=pathlib.Path)
-    parser.add_argument("--v80-rom", required=True, type=pathlib.Path)
+    parser.add_argument("--v80-elf", type=pathlib.Path)
+    parser.add_argument("--v80-rom", type=pathlib.Path)
     parser.add_argument(
         "--output-root",
         type=pathlib.Path,
@@ -153,21 +153,27 @@ def main() -> int:
         nm=args.nm,
         readelf=readelf,
     )
-    generate(
-        revision="v80",
-        elf=args.v80_elf.resolve(),
-        rom=args.v80_rom.resolve(),
-        output=output_root / "v80",
-        policy=RUNTIME / "dkr.us.v80.recomp-policy.json",
-        n64recomp=args.n64recomp.resolve(),
-        nm=args.nm,
-        readelf=readelf,
-    )
+    if (args.v80_elf is None) != (args.v80_rom is None):
+        raise RuntimeError("--v80-elf and --v80-rom must be supplied together")
+    if args.v80_elf is not None:
+        generate(
+            revision="v80",
+            elf=args.v80_elf.resolve(),
+            rom=args.v80_rom.resolve(),
+            output=output_root / "v80",
+            policy=RUNTIME / "dkr.us.v80.recomp-policy.json",
+            n64recomp=args.n64recomp.resolve(),
+            nm=args.nm,
+            readelf=readelf,
+        )
 
     print("")
     print("[OK] Android CPU payload generation complete.")
     print(f"v77: {output_root / 'v77'}")
-    print(f"v80: {output_root / 'v80'}")
+    if args.v80_elf is not None:
+        print(f"v80: {output_root / 'v80'}")
+    else:
+        print("v80: not generated (v77-only Android build)")
     print("No ROM bytes were copied into the generated output directories.")
     return 0
 

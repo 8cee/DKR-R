@@ -3,8 +3,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$GeneratedV77,
 
-    [Parameter(Mandatory = $true)]
-    [string]$GeneratedV80,
+    [string]$GeneratedV80 = "",
 
     [ValidateSet('Debug', 'Release')]
     [string]$Configuration = 'Debug',
@@ -18,7 +17,10 @@ Set-StrictMode -Version Latest
 $Root = Split-Path -Parent $PSScriptRoot
 $AndroidRoot = Join-Path $Root 'android'
 $V77 = (Resolve-Path -LiteralPath $GeneratedV77).Path
-$V80 = (Resolve-Path -LiteralPath $GeneratedV80).Path
+$V80 = ""
+if (-not [string]::IsNullOrWhiteSpace($GeneratedV80)) {
+    $V80 = (Resolve-Path -LiteralPath $GeneratedV80).Path
+}
 
 function Invoke-Checked([string]$Label, [scriptblock]$Command) {
     Write-Host ""
@@ -43,7 +45,11 @@ function Require-GeneratedPayload([string]$Path, [string]$Revision) {
 }
 
 Require-GeneratedPayload $V77 'DKR US v1.0 / v77'
-Require-GeneratedPayload $V80 'DKR US Rev A / v80'
+if ($V80) {
+    Require-GeneratedPayload $V80 'DKR US Rev A / v80'
+} else {
+    Write-Host '[INFO] No v80 payload supplied; this APK will support DKR US v1.0 only.' -ForegroundColor Yellow
+}
 
 if (-not (Get-Command python -ErrorAction SilentlyContinue) -and
     -not (Get-Command python3 -ErrorAction SilentlyContinue)) {
@@ -81,7 +87,11 @@ if (-not $FileToC) {
 $env:RT64_HOST_FILE_TO_C = $FileToC.FullName
 $env:DKR_ANDROID_FULL_RUNTIME = '1'
 $env:DKR_ANDROID_GENERATED_V77 = $V77
-$env:DKR_ANDROID_GENERATED_V80 = $V80
+if ($V80) {
+    $env:DKR_ANDROID_GENERATED_V80 = $V80
+} else {
+    Remove-Item Env:DKR_ANDROID_GENERATED_V80 -ErrorAction SilentlyContinue
+}
 
 $gradle = Get-Command gradle -ErrorAction SilentlyContinue
 if (-not $gradle) {
