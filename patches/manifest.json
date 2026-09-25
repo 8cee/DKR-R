@@ -124,6 +124,10 @@
         {
           "path": "patches/n64recomp/0002-name-recomp-context-struct.patch",
           "sha256": "6cf31eebf6a5f0a9a31c2912f562f8ef977c0a43dfffd76531f3ceb94ae2bee7"
+        },
+        {
+          "path": "patches/n64recomp/0003-skip-host-tools-on-android.patch",
+          "sha256": "40cf26712a76262358541c4dd5609618874119caa693a7c842623732bbf56b0d"
         }
       ]
     },
@@ -210,7 +214,7 @@
         },
         {
           "path": "patches/rt64/0021-skip-nfd-link-on-android.patch",
-          "sha256": "3a109c7f4e798d68905eb6ad6d71c1317913dd07f98679db3b0fe07686c45bbb"
+          "sha256": "5622323c727858dc5eac1feaa3bd2b198411414d7ca876c1bfc0ce992daa1bb5"
         }
       ]
     },

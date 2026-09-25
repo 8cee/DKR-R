@@ -1,0 +1,17 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 4c2ef20..adb55bd 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -117,6 +117,7 @@ target_include_directories(N64RecompElf PRIVATE
+ 
+ target_link_libraries(N64RecompElf fmt)
+ 
++if (NOT ANDROID)
+ # N64 recompiler executable
+ project(N64RecompCLI)
+ add_executable(N64RecompCLI)
+@@ -179,6 +180,7 @@ target_include_directories(LiveRecompTest PRIVATE
+ )
+ 
+ target_link_libraries(LiveRecompTest LiveRecomp)
++endif()
