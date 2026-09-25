@@ -17,6 +17,7 @@ final class ModManagerView {
     private final Activity activity;
     private final LinearLayout root;
     private final File modsRoot;
+    private JSONObject currentCatalog;
 
     ModManagerView(Activity activity) {
         this.activity = activity;
@@ -41,6 +42,8 @@ final class ModManagerView {
         refresh.setText("Refresh Mod Server");
         refresh.setOnClickListener(v -> refresh());
         root.addView(refresh);
+
+        refresh();
     }
 
     View view() {
@@ -51,8 +54,12 @@ final class ModManagerView {
         showLoading();
         ModCatalogClient.fetchCatalog(
                 BuildConfig.MOD_SERVER_URL,
-                catalog -> activity.runOnUiThread(() -> renderCatalog(catalog)),
+                catalog -> activity.runOnUiThread(() -> {
+                    currentCatalog = catalog;
+                    renderCatalog(catalog);
+                }),
                 error -> activity.runOnUiThread(() -> {
+                    currentCatalog = null;
                     clearDynamicRows();
                     addInfo(error);
                     toast(error);
@@ -68,7 +75,10 @@ final class ModManagerView {
         clearDynamicRows();
         JSONArray mods = catalog.optJSONArray("mods");
         int count = mods == null ? 0 : mods.length();
-        addInfo("Server online • " + count + " mod" + (count == 1 ? "" : "s"));
+        String revision = ModCompatibility.currentGameRevision(activity.getFilesDir());
+        addInfo("Server online • " + count + " mod" + (count == 1 ? "" : "s") +
+                "\nApp " + BuildConfig.VERSION_NAME +
+                " • ROM " + (revision == null ? "not selected / unsupported" : revision));
 
         if (count == 0) {
             addInfo("No mods are published in the catalog yet.");
@@ -91,6 +101,8 @@ final class ModManagerView {
         JSONObject installed = ModInstaller.installedMetadata(modsRoot, mod);
         String installedVersion = installed == null ? null : installed.optString("version", "");
         boolean sameVersion = installedVersion != null && installedVersion.equals(version);
+        ModCompatibility.Verdict installVerdict =
+                ModCompatibility.canInstall(activity.getFilesDir(), modsRoot, mod);
 
         TextView title = new TextView(activity);
         title.setText(name + (version.isEmpty() ? "" : "  " + version));
@@ -104,7 +116,10 @@ final class ModManagerView {
         if (installedVersion != null) {
             details.append("\nInstalled: ").append(installedVersion.isEmpty() ? "unknown" : installedVersion);
         }
+        appendCompatibility(details, mod);
+        if (!installVerdict.allowed) details.append("\nBlocked: ").append(installVerdict.reason);
         if (!description.isEmpty()) details.append("\n").append(description);
+
         TextView detailView = new TextView(activity);
         detailView.setText(details.toString());
         detailView.setPadding(0, 0, 0, 4);
@@ -115,26 +130,82 @@ final class ModManagerView {
 
         Button install = new Button(activity);
         install.setText(installed == null ? "Install" : (sameVersion ? "Reinstall" : "Update"));
+        install.setEnabled(installVerdict.allowed);
         install.setOnClickListener(v -> installMod(mod, install));
         actions.addView(install);
 
         if (installed != null) {
+            ModCompatibility.Verdict removeVerdict = ModCompatibility.canRemove(modsRoot, mod);
             Button remove = new Button(activity);
             remove.setText("Remove");
+            remove.setEnabled(removeVerdict.allowed);
+            if (!removeVerdict.allowed) remove.setContentDescription(removeVerdict.reason);
             remove.setOnClickListener(v -> {
+                ModCompatibility.Verdict latest = ModCompatibility.canRemove(modsRoot, mod);
+                if (!latest.allowed) {
+                    toast(latest.reason);
+                    refreshLocal();
+                    return;
+                }
                 if (ModInstaller.remove(modsRoot, mod)) {
                     toast(name + " removed.");
-                    refresh();
+                    refreshLocal();
                 } else {
                     toast("Could not remove " + name + ".");
                 }
             });
             actions.addView(remove);
+            if (!removeVerdict.allowed) {
+                TextView removalNote = new TextView(activity);
+                removalNote.setText("Cannot remove: " + removeVerdict.reason);
+                removalNote.setPadding(0, 2, 0, 2);
+                root.addView(removalNote);
+            }
         }
         root.addView(actions);
     }
 
+    private void appendCompatibility(StringBuilder details, JSONObject mod) {
+        JSONArray revisions = mod.optJSONArray("gameRevisions");
+        if (revisions != null && revisions.length() > 0) {
+            details.append("\nROM: ");
+            for (int i = 0; i < revisions.length(); i++) {
+                if (i > 0) details.append(", ");
+                details.append(revisions.optString(i));
+            }
+        }
+        String minApp = mod.optString("minAppVersion", "").trim();
+        if (!minApp.isEmpty()) details.append("\nRequires app ").append(minApp).append("+");
+
+        JSONArray dependencies = mod.optJSONArray("dependencies");
+        if (dependencies != null && dependencies.length() > 0) {
+            details.append("\nRequires: ");
+            appendArray(details, dependencies);
+        }
+
+        JSONArray conflicts = mod.optJSONArray("conflicts");
+        if (conflicts != null && conflicts.length() > 0) {
+            details.append("\nConflicts: ");
+            appendArray(details, conflicts);
+        }
+    }
+
+    private static void appendArray(StringBuilder out, JSONArray values) {
+        for (int i = 0; i < values.length(); i++) {
+            if (i > 0) out.append(", ");
+            out.append(values.optString(i));
+        }
+    }
+
     private void installMod(JSONObject mod, Button button) {
+        ModCompatibility.Verdict verdict =
+                ModCompatibility.canInstall(activity.getFilesDir(), modsRoot, mod);
+        if (!verdict.allowed) {
+            toast(verdict.reason);
+            refreshLocal();
+            return;
+        }
+
         final String name = mod.optString("name", mod.optString("id", "mod"));
         button.setEnabled(false);
         button.setText("Installing…");
@@ -142,7 +213,7 @@ final class ModManagerView {
             @Override public void onSuccess(File installedDirectory) {
                 activity.runOnUiThread(() -> {
                     toast(name + " installed.");
-                    refresh();
+                    refreshLocal();
                 });
             }
 
@@ -154,6 +225,11 @@ final class ModManagerView {
                 });
             }
         });
+    }
+
+    private void refreshLocal() {
+        if (currentCatalog != null) renderCatalog(currentCatalog);
+        else refresh();
     }
 
     private void clearDynamicRows() {
