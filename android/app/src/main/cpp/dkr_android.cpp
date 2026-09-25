@@ -9,6 +9,7 @@
 #include "save_manager.hpp"
 #include "runtime_support.hpp"
 #include "rom_revision.hpp"
+#include "game_main.hpp"
 #include "android_input_bridge.hpp"
 
 extern "C" JNIEXPORT jstring JNICALL
@@ -159,16 +160,33 @@ Java_com_eightcee_dkrrecomp_MainActivity_nativeInputStatus(JNIEnv* env, jclass) 
 
 
 extern "C" int DKRAndroidHostMain(int argc, char** argv) {
+    const char* files_dir =
+        argc > 1 && argv != nullptr && argv[1] != nullptr ? argv[1] : "";
+
     try {
-        if (argc > 1 && argv != nullptr && argv[1] != nullptr) {
-            dkr::android::configure_paths(argv[1]);
-            dkr::runtime::saves::configure(argv[1]);
-            dkr::runtime::support::configure(argv[1]);
-        }
+        dkr::android::configure_paths(files_dir);
+        dkr::runtime::saves::configure(files_dir);
+        dkr::runtime::support::configure(files_dir);
         dkr::android::install_crash_handler();
         dkr::android::lifecycle::set_resumed(true);
         dkr::android::lifecycle::set_surface_available(true);
+
+#if DKR_ANDROID_FULL_RUNTIME
+        // SDLActivity's argv[1]/argv[2] are Android storage paths, not DKR-R
+        // desktop positional arguments. Rebuild the command line explicitly so
+        // DkrMain sees a config directory and no ROM, which opens its launcher.
+        char program[] = "DKR-R";
+        char config_option[] = "--config";
+        char* runtime_argv[] = {
+            program,
+            config_option,
+            const_cast<char*>(files_dir),
+            nullptr
+        };
+        return DkrMain(3, runtime_argv);
+#else
         return 0;
+#endif
     } catch (...) {
         return 1;
     }
