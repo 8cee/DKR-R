@@ -206,7 +206,7 @@
         },
         {
           "path": "patches/rt64/0018-android-sdl-window-support.patch",
-          "sha256": "3ffe4cbc5e445f8531753483210065064b13e7499e8dc4927bd35053b7897e25"
+          "sha256": "a756c26f46104cb993ac5e4851a9879b558df38894d2108ce0c10116c36b0fa7"
         },
         {
           "path": "patches/rt64/0019-disable-native-file-dialog-on-android.patch",
