@@ -1,7 +1,7 @@
 diff --git a/src/main.cpp b/src/main.cpp
 --- a/src/main.cpp
 +++ b/src/main.cpp
-@@ -444,13 +444,18 @@ int main(int argc, char** argv) {
+@@ -444,13 +444,17 @@ int main(int argc, char** argv) {
          if (config.has_entrypoint) {
              bool found_entrypoint = false;
  
