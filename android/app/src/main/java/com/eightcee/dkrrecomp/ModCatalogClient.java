@@ -115,6 +115,34 @@ final class ModCatalogClient {
             if (size > 512L * 1024L * 1024L) {
                 throw new IllegalArgumentException("Mod " + id + " exceeds the 512 MiB archive limit.");
             }
+
+            JSONArray revisions = mod.optJSONArray("gameRevisions");
+            if (revisions != null) {
+                for (int j = 0; j < revisions.length(); j++) {
+                    String revision = revisions.getString(j);
+                    if (!revision.equals("v77") && !revision.equals("v80")) {
+                        throw new IllegalArgumentException("Mod " + id + " has unsupported ROM revision " + revision + ".");
+                    }
+                }
+            }
+
+            validateIdArray(mod, id, "dependencies");
+            validateIdArray(mod, id, "conflicts");
+        }
+    }
+
+    private static void validateIdArray(JSONObject mod, String id, String field) throws Exception {
+        JSONArray values = mod.optJSONArray(field);
+        if (values == null) return;
+        Set<String> unique = new HashSet<>();
+        for (int i = 0; i < values.length(); i++) {
+            String value = ModInstaller.safeId(values.getString(i));
+            if (id.equals(value)) {
+                throw new IllegalArgumentException("Mod " + id + " cannot list itself in " + field + ".");
+            }
+            if (!unique.add(value)) {
+                throw new IllegalArgumentException("Mod " + id + " repeats " + value + " in " + field + ".");
+            }
         }
     }
 
