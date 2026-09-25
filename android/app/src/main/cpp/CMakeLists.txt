@@ -114,6 +114,8 @@ target_include_directories(dkr_runtime_platform_android PRIVATE
     "${DKR_RUNTIME_GAME_DIR}"
     "${DKR_ANDROID_NMR_DIR}/ultramodern/include"
     "${DKR_ANDROID_NMR_DIR}/thirdparty"
+    "${DKR_ANDROID_NMR_DIR}/thirdparty/concurrentqueue"
+    "${DKR_ANDROID_NMR_DIR}/thirdparty/sse2neon"
     "${DKR_ANDROID_NMR_DIR}/N64Recomp/include"
     "${sdl2_SOURCE_DIR}/include"
     "${ANDROID_COMPAT_DIR}"
@@ -155,31 +157,6 @@ if(DKR_ANDROID_BUILD_RT64_PROBE AND NOT DKR_ANDROID_FULL_RUNTIME)
         )
     endif()
 
-    add_library(dkr_runtime_platform_rt64_probe STATIC
-        "${DKR_RUNTIME_GAME_DIR}/runtime_platform.cpp"
-    )
-    target_compile_features(dkr_runtime_platform_rt64_probe PRIVATE cxx_std_20)
-    target_compile_definitions(dkr_runtime_platform_rt64_probe PRIVATE
-        DKR_RUNTIME_HAS_RT64=1
-        DKR_RUNTIME_HAS_SDL3_INPUT_HOST=0
-    )
-    target_include_directories(dkr_runtime_platform_rt64_probe PRIVATE
-        "${DKR_RUNTIME_GAME_DIR}"
-        "${DKR_ANDROID_NMR_DIR}/ultramodern/include"
-        "${DKR_ANDROID_NMR_DIR}/thirdparty"
-        "${sdl2_SOURCE_DIR}/include"
-        "${DKR_ANDROID_RT64_DIR}/src"
-        "${DKR_ANDROID_RT64_DIR}/src/contrib"
-        "${ANDROID_COMPAT_DIR}"
-    )
-    target_link_libraries(dkr_runtime_platform_rt64_probe PRIVATE
-        dkr_android_input
-        SDL2-static
-        rt64
-        ultramodern
-        android
-        log
-    )
 endif()
 
 if(DKR_ANDROID_FULL_RUNTIME)
@@ -287,7 +264,6 @@ else()
 endif()
 if(DKR_ANDROID_BUILD_RT64_PROBE AND NOT DKR_ANDROID_FULL_RUNTIME)
     target_link_libraries(dkr_android PRIVATE rt64)
-    add_dependencies(dkr_android dkr_runtime_platform_rt64_probe)
 endif()
 
 # Match the robust Android packaging used by the DK64 port and Android's
