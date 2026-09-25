@@ -2,6 +2,7 @@ package com.eightcee.dkrrecomp;
 
 import android.app.Activity;
 import android.content.Intent;
+import android.content.ComponentName;
 import android.net.Uri;
 import android.os.Bundle;
 import android.view.Gravity;
@@ -71,6 +72,7 @@ public final class MainActivity extends Activity {
         content.addView(statusView);
 
         addButton(content, "Select legally obtained DKR ROM", this::chooseRom);
+        addButton(content, "Launch Native DKR-R", this::launchNativeDkr);
         addButton(content, "Import Adventure Save", this::importSave);
         addButton(content, "Export Adventure Save", this::exportSave);
         addButton(content, "Import Full Save Bundle", this::importBundle);
@@ -165,6 +167,11 @@ public final class MainActivity extends Activity {
     @Override protected void onPause() { nativeSetResumed(false); super.onPause(); }
 
     private void chooseRom() { openFile(PICK_ROM); }
+
+    private void launchNativeDkr() {
+        Intent intent = new Intent(this, DkrSdlActivity.class);
+        startActivity(intent);
+    }
     private void importSave() { openFile(IMPORT_SAVE); }
     private void importBundle() { openFile(IMPORT_BUNDLE); }
     private void importPak(int channel) { openFile(IMPORT_PAK_BASE + channel); }
