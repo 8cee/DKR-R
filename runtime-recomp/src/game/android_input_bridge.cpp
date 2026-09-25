@@ -195,4 +195,9 @@ Sample sample(std::size_t player) {
     return out;
 }
 
+Sample sample_touch() {
+    std::scoped_lock lock(g_mutex);
+    return sample_controller(g_virtual_touch);
+}
+
 } // namespace dkr::runtime::android_input

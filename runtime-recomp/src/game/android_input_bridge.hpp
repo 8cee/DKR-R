@@ -18,5 +18,6 @@ void set_axes(int device_id, float left_x, float left_y,
 void remove_device(int device_id);
 void clear();
 [[nodiscard]] Sample sample(std::size_t player);
+[[nodiscard]] Sample sample_touch();
 
 } // namespace dkr::runtime::android_input

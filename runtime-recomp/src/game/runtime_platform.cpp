@@ -2182,8 +2182,8 @@ void dkr::runtime::platform::set_audio_frequency(std::uint32_t frequency) {
 }
 
 void dkr::runtime::platform::poll_input() {
-#if defined(__ANDROID__)
-    // Until the SDL/RT64 Android host is fully linked, Android's Activity feeds
+#if defined(__ANDROID__) && !DKR_RUNTIME_HAS_RT64
+    // Before the SDL/RT64 Android host is linked, Android's Activity feeds
     // physical gamepad state through the native bridge. Publish it using the
     // same N64 button/stick representation consumed by the rest of DKR-R.
     const bool online_routing =
@@ -2285,6 +2285,18 @@ void dkr::runtime::platform::poll_input() {
                 !online_routing,
                 player == (online_routing ? online_profile : 0U));
         }
+#if defined(__ANDROID__)
+        if (player == 0U && !gameplay_blocked) {
+            const auto touch = dkr::runtime::android_input::sample_touch();
+            state.buttons = static_cast<std::uint16_t>(
+                state.buttons | touch.buttons);
+            if (std::abs(touch.stick_x) > 0.001F ||
+                std::abs(touch.stick_y) > 0.001F) {
+                state.stick_x = touch.stick_x;
+                state.stick_y = touch.stick_y;
+            }
+        }
+#endif
         g_physical_buttons[player].store(state.buttons, std::memory_order_release);
         g_physical_stick_x[player].store(state.stick_x, std::memory_order_release);
         g_physical_stick_y[player].store(state.stick_y, std::memory_order_release);
