@@ -187,6 +187,24 @@ final class ModInstaller {
         return new File(installedDirectory, ".catalog-package.zip");
     }
 
+    static boolean recordActivation(File installedDirectory, String target, String nativeId) {
+        try {
+            File metadataFile = new File(installedDirectory, "mod.json");
+            JSONObject metadata = readMetadata(metadataFile);
+            if (metadata == null) return false;
+            metadata.put("activatedTarget", target == null ? "library" : target);
+            if (nativeId == null || nativeId.isEmpty()) metadata.remove("activatedNativeId");
+            else metadata.put("activatedNativeId", nativeId);
+            try (FileOutputStream out = new FileOutputStream(metadataFile)) {
+                out.write(metadata.toString(2).getBytes(StandardCharsets.UTF_8));
+                out.getFD().sync();
+            }
+            return true;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
     private static void copyFile(File source, File destination) throws Exception {
         try (FileInputStream in = new FileInputStream(source);
              FileOutputStream out = new FileOutputStream(destination)) {
