@@ -108,7 +108,9 @@ final class ModCatalogClient {
             }
             if (!installTarget.equals("library") &&
                     !installTarget.equals("custom-track") &&
-                    !installTarget.equals("texture-pack")) {
+                    !installTarget.equals("texture-pack") &&
+                    !installTarget.equals("legacy-track") &&
+                    !installTarget.equals("legacy-character")) {
                 throw new IllegalArgumentException("Mod " + id + " uses unsupported installTarget " + installTarget + ".");
             }
             if (!url.startsWith("https://")) {
