@@ -32,8 +32,15 @@ final class ModInstaller {
 
     static JSONObject installedMetadata(File modsRoot, JSONObject mod) {
         try {
-            File metadata = new File(installedDirectory(modsRoot, mod), "mod.json");
-            if (!metadata.isFile()) return null;
+            return readMetadata(new File(installedDirectory(modsRoot, mod), "mod.json"));
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    static JSONObject readMetadata(File metadata) {
+        try {
+            if (metadata == null || !metadata.isFile()) return null;
             try (FileInputStream in = new FileInputStream(metadata);
                  ByteArrayOutputStream out = new ByteArrayOutputStream()) {
                 byte[] buffer = new byte[8192];
