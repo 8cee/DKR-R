@@ -1,5 +1,7 @@
 package com.eightcee.dkrrecomp;
 
+import android.content.Context;
+import android.hardware.input.InputManager;
 import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
@@ -7,9 +9,37 @@ import android.view.MotionEvent;
 final class ControllerBridge {
     private ControllerBridge() {}
 
+    private static InputManager inputManager;
+    private static final InputManager.InputDeviceListener DEVICE_LISTENER =
+            new InputManager.InputDeviceListener() {
+                @Override public void onInputDeviceAdded(int deviceId) {}
+                @Override public void onInputDeviceChanged(int deviceId) {}
+                @Override public void onInputDeviceRemoved(int deviceId) {
+                    nativeRemoveDevice(deviceId);
+                }
+            };
+
     static native void nativeSetButton(int deviceId, int keyCode, boolean pressed);
     static native void nativeSetAxis(
             int deviceId, float lx, float ly, float rx, float ry, float lt, float rt);
+    static native void nativeRemoveDevice(int deviceId);
+
+    static void register(Context context) {
+        if (inputManager != null) return;
+        InputManager manager =
+                (InputManager) context.getSystemService(Context.INPUT_SERVICE);
+        if (manager == null) return;
+        inputManager = manager;
+        manager.registerInputDeviceListener(DEVICE_LISTENER, null);
+    }
+
+    static void unregister() {
+        InputManager manager = inputManager;
+        inputManager = null;
+        if (manager != null) {
+            manager.unregisterInputDeviceListener(DEVICE_LISTENER);
+        }
+    }
 
     static boolean handleKey(KeyEvent event) {
         if ((event.getSource() & InputDevice.SOURCE_GAMEPAD) == 0 &&

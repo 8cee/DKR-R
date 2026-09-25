@@ -64,6 +64,12 @@ Java_com_eightcee_dkrrecomp_ControllerBridge_nativeSetAxis(
 }
 
 
+extern "C" JNIEXPORT void JNICALL
+Java_com_eightcee_dkrrecomp_ControllerBridge_nativeRemoveDevice(
+        JNIEnv*, jclass, jint device) {
+    dkr::runtime::android_input::remove_device(static_cast<int>(device));
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_eightcee_dkrrecomp_MainActivity_nativeSaveStatus(JNIEnv* env, jclass) {
     const auto info = dkr::runtime::saves::adventure_info();

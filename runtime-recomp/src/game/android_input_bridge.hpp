@@ -15,6 +15,7 @@ void set_key(int device_id, int android_key_code, bool pressed);
 void set_axes(int device_id, float left_x, float left_y,
               float right_x, float right_y,
               float left_trigger, float right_trigger);
+void remove_device(int device_id);
 void clear();
 [[nodiscard]] Sample sample(std::size_t player);
 

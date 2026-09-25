@@ -110,6 +110,16 @@ void set_axes(int device_id, float left_x, float left_y,
     controller->right_trigger = std::clamp(right_trigger, 0.0F, 1.0F);
 }
 
+void remove_device(int device_id) {
+    std::scoped_lock lock(g_mutex);
+    for (auto& controller : g_controllers) {
+        if (controller.device_id == device_id) {
+            controller = {};
+            return;
+        }
+    }
+}
+
 void clear() {
     std::scoped_lock lock(g_mutex);
     g_controllers = {};

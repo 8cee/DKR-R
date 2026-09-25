@@ -40,6 +40,7 @@ public final class DkrSdlActivity extends SDLActivity {
             throw new IllegalStateException("Could not install DKR-R runtime assets.", error);
         }
         super.onCreate(state);
+        ControllerBridge.register(this);
         nativeBridgeInit();
         nativeRestartInit();
 
@@ -265,6 +266,7 @@ public final class DkrSdlActivity extends SDLActivity {
     }
 
     @Override protected void onDestroy() {
+        ControllerBridge.unregister();
         if (activeInstance == this) activeInstance = null;
         boolean killForRestart = restartRequested;
         restartRequested = false;
