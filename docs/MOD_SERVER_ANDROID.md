@@ -20,9 +20,9 @@ A catalog has `schemaVersion`, `generatedAt`, and a `mods` array. Schema version
 
 ## Android client behavior
 
-The launcher can refresh the catalog, show installed versions, install a new mod, update/reinstall an existing mod, and remove an installed mod. Installed metadata is written to `mod.json` beside the unpacked payload so the launcher can compare the installed catalog version with the current server entry.
+The launcher automatically refreshes the catalog, shows installed versions, install/update state, app/ROM compatibility, dependencies and conflicts, and can remove installed mods. Installed metadata is written to `mod.json` beside the unpacked payload so the launcher can compare the installed catalog version with the current server entry and evaluate dependency relationships.
 
-The client rejects an unsupported catalog schema, duplicate IDs, invalid categories, non-HTTPS download URLs, malformed SHA-256 values, oversized catalog responses, and declared archives above 512 MiB.
+The client rejects an unsupported catalog schema, duplicate IDs, invalid categories, invalid ROM revision tags, malformed dependency/conflict IDs, self-dependencies/self-conflicts, duplicate relationship entries, non-HTTPS download URLs, malformed SHA-256 values, oversized catalog responses, and declared archives above 512 MiB.
 
 Downloads are always SHA-256 verified. If `size` is supplied, the downloaded byte count must also match it. ZIP extraction rejects paths that escape the staging directory, limits archives to 10,000 entries, and caps expanded data at 1 GiB. Activation uses a staging directory plus a temporary previous-version directory so a failed replacement restores the old install instead of leaving a partially installed mod.
 
@@ -36,6 +36,8 @@ Installed layout:
 
 The app must never distribute the DKR ROM or copyrighted game assets through the mod service. Catalog packages should contain only redistributable mod content and metadata.
 
-## Remaining compatibility work
+## Compatibility rules
 
-The schema already reserves `gameRevisions`, `minAppVersion`, `dependencies`, and `conflicts`. The launcher currently parses these fields but does not yet resolve dependency graphs or block installs by active ROM revision/app version. Those checks should be added before publishing a public production catalog with interdependent mods.
+If `gameRevisions` is present, the launcher requires a supported selected US ROM and only enables installation when its revision is listed. US revision 0 maps to DKR-R `v77`; revision 1 maps to `v80`. `minAppVersion` is compared against the Android app version, all IDs in `dependencies` must already be installed, and any installed ID listed in `conflicts` blocks installation.
+
+Removal is also dependency-aware: a mod cannot be removed while another installed mod lists it as a dependency. Version-constrained dependencies and automatic dependency installation are intentionally not part of schema version 1.
