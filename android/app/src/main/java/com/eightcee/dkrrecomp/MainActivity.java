@@ -77,7 +77,8 @@ public final class MainActivity extends Activity {
         statusView.setText("Android bootstrap: " + bootstrap + "\nNative: " + nativeVersion()
                 + "\n\nData: " + getFilesDir().getAbsolutePath()
                 + "\nSaves: " + new File(getFilesDir(), "saves").getAbsolutePath()
-                + "\nMods: " + new File(getFilesDir(), "mods").getAbsolutePath());
+                + "\nNative mods: " + new File(getFilesDir(), "mods").getAbsolutePath()
+                + "\nCatalog library: " + new File(getFilesDir(), "catalog-mods").getAbsolutePath());
         statusView.setTextSize(15);
         statusView.setPadding(0, 24, 0, 24);
         content.addView(statusView);
