@@ -1,25 +1,46 @@
-diff --git a/src/gui/rt64_file_dialog.cpp b/src/gui/rt64_file_dialog.cpp
---- a/src/gui/rt64_file_dialog.cpp
-+++ b/src/gui/rt64_file_dialog.cpp
-@@ -7,5 +7,16 @@
- #include <cassert>
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -306,6 +306,12 @@ if (CMAKE_SYSTEM_NAME MATCHES "Linux" AND RT64_SDL_WINDOW_VULKAN)
+     add_compile_definitions("RT64_SDL_WINDOW_VULKAN")
+ endif()
  
-+#if defined(__ANDROID__)
++if (ANDROID)
++    set(RT64_FILE_DIALOG_SOURCE "${PROJECT_SOURCE_DIR}/src/gui/rt64_file_dialog_android.cpp")
++else()
++    set(RT64_FILE_DIALOG_SOURCE "${PROJECT_SOURCE_DIR}/src/gui/rt64_file_dialog.cpp")
++endif()
++
+ set (SOURCES
+     "${PROJECT_SOURCE_DIR}/src/common/rt64_common.cpp"
+     "${PROJECT_SOURCE_DIR}/src/common/rt64_dynamic_libraries.cpp"
+@@ -339,7 +345,7 @@ set (SOURCES
+ 
+     "${PROJECT_SOURCE_DIR}/src/gui/rt64_camera_controller.cpp"
+     "${PROJECT_SOURCE_DIR}/src/gui/rt64_debugger_inspector.cpp"
+-    "${PROJECT_SOURCE_DIR}/src/gui/rt64_file_dialog.cpp"
++    "${RT64_FILE_DIALOG_SOURCE}"
+     "${PROJECT_SOURCE_DIR}/src/gui/rt64_inspector.cpp"
+ 
+     "${PROJECT_SOURCE_DIR}/src/hle/rt64_application.cpp"
+diff --git a/src/gui/rt64_file_dialog_android.cpp b/src/gui/rt64_file_dialog_android.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/gui/rt64_file_dialog_android.cpp
+@@ -0,0 +1,18 @@
++//
++// RT64 - Android file dialog stub
++//
++
++#include "rt64_file_dialog.h"
++
 +namespace RT64 {
 +    std::atomic<bool> FileDialog::isOpen = false;
 +
 +    void FileDialog::initialize() {}
 +    void FileDialog::finish() {}
++
 +    std::filesystem::path FileDialog::getDirectoryPath() { return {}; }
-+    std::filesystem::path FileDialog::getOpenFilename(const std::vector<FileFilter>&) { return {}; }
-+    std::filesystem::path FileDialog::getSaveFilename(const std::vector<FileFilter>&) { return {}; }
-+};
-+#else
- #include <nfd.h>
- 
- namespace RT64 {
-@@ -77,3 +88,4 @@
-         return path;
-     }
- };
-+#endif
++    std::filesystem::path FileDialog::getOpenFilename(const std::vector<FileFilter> &) { return {}; }
++    std::filesystem::path FileDialog::getSaveFilename(const std::vector<FileFilter> &) { return {}; }
++}
