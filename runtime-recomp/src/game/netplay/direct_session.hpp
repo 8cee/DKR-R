@@ -19,6 +19,7 @@
 #include <filesystem>
 #include <functional>
 #include <future>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -1003,7 +1004,7 @@ private:
     // previous ordering as a startup race in DatagramSocket::is_open().
     std::atomic<bool> worker_stop_{false};
     bool worker_wake_ = false;
-    std::atomic<std::shared_ptr<const SessionView>> presentation_view_;
+    std::shared_ptr<const SessionView> presentation_view_;
     std::chrono::steady_clock::time_point last_view_publication_{};
     std::thread network_worker_;
 };
