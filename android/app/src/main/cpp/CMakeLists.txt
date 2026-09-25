@@ -89,6 +89,7 @@ add_library(dkr_android_compat STATIC
     "${ANDROID_COMPAT_DIR}/file_bridge.cpp"
     "${ANDROID_COMPAT_DIR}/app_restart.cpp"
 )
+set_target_properties(dkr_android_compat PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_compile_features(dkr_android_compat PRIVATE cxx_std_20)
 target_include_directories(dkr_android_compat PUBLIC "${ANDROID_COMPAT_DIR}")
 target_link_libraries(dkr_android_compat PUBLIC android log)
@@ -96,6 +97,7 @@ target_link_libraries(dkr_android_compat PUBLIC android log)
 add_library(dkr_android_input STATIC
     "${DKR_RUNTIME_GAME_DIR}/android_input_bridge.cpp"
 )
+set_target_properties(dkr_android_input PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_compile_features(dkr_android_input PRIVATE cxx_std_20)
 target_include_directories(dkr_android_input PUBLIC "${DKR_RUNTIME_GAME_DIR}")
 
@@ -178,6 +180,8 @@ if(DKR_ANDROID_FULL_RUNTIME)
     add_library(dkr_android_nfd_stub STATIC
         "${CMAKE_CURRENT_LIST_DIR}/nfd_android_stub.cpp"
     )
+    set_target_properties(dkr_android_nfd_stub PROPERTIES
+        POSITION_INDEPENDENT_CODE ON)
     target_include_directories(dkr_android_nfd_stub PRIVATE
         "${DKR_ANDROID_RT64_DIR}/src/contrib/nativefiledialog-extended/src/include"
     )

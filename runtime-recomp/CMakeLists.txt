@@ -403,6 +403,10 @@ if(DKR_RUNTIME_BUILD_GENERATED)
         endforeach()
 
         add_library(${TARGET_NAME} STATIC ${GENERATED_FILES} "${WRAPPER}")
+        if(ANDROID)
+            set_target_properties(${TARGET_NAME} PROPERTIES
+                POSITION_INDEPENDENT_CODE ON)
+        endif()
         target_include_directories(${TARGET_NAME} PRIVATE
             "${DKRPORT_ROOT}/include"
             "${CMAKE_CURRENT_LIST_DIR}/src/game"
@@ -528,6 +532,8 @@ if(DKR_RUNTIME_BUILD_GENERATED)
     endif()
     if(ANDROID)
         add_library(DKRPortGame STATIC ${DKR_GAME_SOURCES})
+        set_target_properties(DKRPortGame PROPERTIES
+            POSITION_INDEPENDENT_CODE ON)
     else()
         add_executable(DKRPortGame ${DKR_GAME_SOURCES})
     endif()
