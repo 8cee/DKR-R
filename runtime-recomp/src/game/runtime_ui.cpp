@@ -10753,7 +10753,7 @@ dkr::runtime::ui::StartupResult dkr::runtime::ui::run_startup_screen(
     SDL_SetWindowTitle(window, "DKR-R - Diddy Kong Racing Recompiled");
     const auto launcher_renderer_started_at =
         dkr::runtime::startup_performance::Clock::now();
-#if defined(__linux__)
+#if defined(__linux__) || defined(__ANDROID__)
     // The launcher and RT64 share this Vulkan-capable SDL window for the
     // complete process lifetime. An accelerated SDL renderer can replace the
     // native surface state under Gamescope, so keep the lightweight launcher
