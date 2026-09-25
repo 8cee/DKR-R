@@ -55,6 +55,7 @@ public final class MainActivity extends Activity {
             throw new IllegalStateException("Could not install DKR-R runtime assets.", error);
         }
         nativeBridgeInit();
+        int migratedCatalogMods = CatalogModMigration.migrate(getFilesDir());
         String bootstrap = nativeBootstrap(getFilesDir().getAbsolutePath());
 
         if (BuildConfig.FULL_RUNTIME && state == null) {
@@ -78,7 +79,8 @@ public final class MainActivity extends Activity {
                 + "\n\nData: " + getFilesDir().getAbsolutePath()
                 + "\nSaves: " + new File(getFilesDir(), "saves").getAbsolutePath()
                 + "\nNative mods: " + new File(getFilesDir(), "mods").getAbsolutePath()
-                + "\nCatalog library: " + new File(getFilesDir(), "catalog-mods").getAbsolutePath());
+                + "\nCatalog library: " + new File(getFilesDir(), "catalog-mods").getAbsolutePath()
+                + (migratedCatalogMods > 0 ? "\nMigrated old catalog installs: " + migratedCatalogMods : ""));
         statusView.setTextSize(15);
         statusView.setPadding(0, 24, 0, 24);
         content.addView(statusView);
