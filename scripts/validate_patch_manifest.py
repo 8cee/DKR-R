@@ -2,6 +2,7 @@
 import hashlib
 import json
 import pathlib
+import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -31,6 +32,16 @@ def main() -> int:
                     f"{name}: checksum mismatch for {rel}: "
                     f"manifest={expected.lower()} actual={actual}"
                 )
+            parsed = subprocess.run(
+                ["git", "apply", "--numstat", str(path)],
+                cwd=ROOT,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            if parsed.returncode != 0:
+                detail = (parsed.stderr or parsed.stdout or "invalid patch syntax").strip()
+                raise ValueError(f"{name}: malformed patch {rel}: {detail}")
             checked += 1
 
     print(f"Dependency patch manifest OK: {checked} patch files")
@@ -39,6 +50,6 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except (OSError, KeyError, json.JSONDecodeError, ValueError) as exc:
+    except (OSError, KeyError, json.JSONDecodeError, ValueError, subprocess.SubprocessError) as exc:
         print(f"Dependency patch manifest invalid: {exc}", file=sys.stderr)
         raise SystemExit(1)
