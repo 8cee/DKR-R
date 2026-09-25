@@ -8,6 +8,7 @@ A catalog has `schemaVersion`, `generatedAt`, and a `mods` array. Schema version
 - `name`
 - `version`
 - `category`: translations, textures, characters, tracks, gameplay, or ui
+- `installTarget`: optional activation adapter: `library` (default), `custom-track`, or `texture-pack`
 - `description`
 - `author`
 - `downloadUrl`
@@ -46,3 +47,6 @@ Removal is also dependency-aware: a mod cannot be removed while another installe
 ## Runtime activation boundary
 
 The catalog library is intentionally separate from the native runtime's `mods/` directory. DKR-R reserves `mods/` for native/librecomp-managed mod formats, and custom tracks and texture packs have their own managed stores. A catalog download is therefore treated as verified library content until an explicit installer adapter activates it into the correct native subsystem. This avoids making an arbitrary ZIP look like a valid runtime mod merely because it contains a `mod.json`.
+
+
+For `custom-track` and `texture-pack`, the verified original ZIP is retained inside the catalog library and handed to DKR-R's native installer. This activation is available only in a full-runtime APK. Generic `library` packages remain isolated and are not treated as active runtime mods.
