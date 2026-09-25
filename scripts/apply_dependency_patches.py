@@ -56,6 +56,15 @@ def main() -> int:
             args.extend(["--check", str(patch)])
             return run(*args, cwd=repo, check=False).returncode == 0
 
+        def apply_patch(entry: dict[str, str], patch: pathlib.Path) -> None:
+            result = run("git", "apply", str(patch), cwd=repo, check=False)
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout or "git apply failed").strip()
+                raise RuntimeError(
+                    f"{dependency['name']}: failed to apply {entry['path']}: {detail}"
+                )
+            print(f"[OK] {dependency['name']}: {entry['path']} (applied)")
+
         if all(check_patch(True, patch) for _, patch in patches):
             for entry, _ in patches:
                 print(f"[OK] {dependency['name']}: {entry['path']} (already-applied)")
@@ -63,8 +72,7 @@ def main() -> int:
 
         if all(check_patch(False, patch) for _, patch in patches):
             for entry, patch in patches:
-                run("git", "apply", str(patch), cwd=repo)
-                print(f"[OK] {dependency['name']}: {entry['path']} (applied)")
+                apply_patch(entry, patch)
             continue
 
         print(
@@ -73,8 +81,7 @@ def main() -> int:
         )
         run("git", "checkout", "--", ".", cwd=repo)
         for entry, patch in patches:
-            run("git", "apply", str(patch), cwd=repo)
-            print(f"[OK] {dependency['name']}: {entry['path']} (applied)")
+            apply_patch(entry, patch)
 
     return 0
 
