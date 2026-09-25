@@ -202,7 +202,7 @@
         },
         {
           "path": "patches/rt64/0017-android-cross-build-and-sdl-vulkan.patch",
-          "sha256": "ec01a676d5d918cdb0ae9e40a0a1408e04dd6b9072956efede541db836433688"
+          "sha256": "10ca983bfc8699de5dad036e9b6bb4b3a4a66362bfe517375f950eccd30261b1"
         },
         {
           "path": "patches/rt64/0018-android-sdl-window-support.patch",
