@@ -11,12 +11,15 @@ import org.libsdl.app.SDLActivity;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.io.FileInputStream;
+import java.io.OutputStream;
 
 public final class DkrSdlActivity extends SDLActivity {
     private static final String TAG = "DKR-R-SDL";
     private static final int NATIVE_PICK_BASE = 3000;
     private static volatile DkrSdlActivity activeInstance;
     private static volatile int pendingNativeKind = -1;
+    private static volatile String pendingExportSource = null;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -67,6 +70,61 @@ public final class DkrSdlActivity extends SDLActivity {
         return true;
     }
 
+    public static boolean requestNativeExport(
+            int kind, String sourcePath, String suggestedName) {
+        DkrSdlActivity activity = activeInstance;
+        if (activity == null || activity.isFinishing() ||
+                pendingNativeKind != -1 || sourcePath == null ||
+                sourcePath.isEmpty()) {
+            return false;
+        }
+        File source = new File(sourcePath);
+        if (!source.isFile()) return false;
+
+        pendingNativeKind = kind;
+        pendingExportSource = sourcePath;
+        activity.runOnUiThread(() -> {
+            try {
+                Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                intent.addCategory(Intent.CATEGORY_OPENABLE);
+                intent.setType("application/octet-stream");
+                intent.putExtra(Intent.EXTRA_TITLE,
+                        suggestedName == null || suggestedName.isEmpty()
+                                ? "dkr-r-export.bin" : suggestedName);
+                activity.startActivityForResult(intent, NATIVE_PICK_BASE + kind);
+            } catch (Throwable error) {
+                Log.e(TAG, "Could not open Android export picker", error);
+                pendingNativeKind = -1;
+                pendingExportSource = null;
+                nativeOnFilePicked(kind, false, "");
+            }
+        });
+        return true;
+    }
+
+    private void finishExport(Uri uri, int kind) throws Exception {
+        String sourcePath = pendingExportSource;
+        if (sourcePath == null || sourcePath.isEmpty()) {
+            throw new IllegalStateException("No native export source is pending.");
+        }
+        File source = new File(sourcePath);
+        if (!source.isFile()) {
+            throw new IllegalStateException("Native export staging file is missing.");
+        }
+        try (InputStream in = new FileInputStream(source);
+             OutputStream out = getContentResolver().openOutputStream(uri, "wt")) {
+            if (out == null) {
+                throw new IllegalStateException("Could not open export destination.");
+            }
+            byte[] buffer = new byte[64 * 1024];
+            int read;
+            while ((read = in.read(buffer)) > 0) {
+                out.write(buffer, 0, read);
+            }
+            out.flush();
+        }
+    }
+
     private String stageSelection(Uri uri, int kind) throws Exception {
         File inbox = new File(getCacheDir(), "saf-inbox");
         if (!inbox.exists() && !inbox.mkdirs()) {
@@ -107,7 +165,12 @@ public final class DkrSdlActivity extends SDLActivity {
             final int kind = requestCode - NATIVE_PICK_BASE;
             try {
                 if (resultCode == RESULT_OK && data != null && data.getData() != null) {
-                    nativeOnFilePicked(kind, true, stageSelection(data.getData(), kind));
+                    if (kind >= 20) {
+                        finishExport(data.getData(), kind);
+                        nativeOnFilePicked(kind, true, data.getData().toString());
+                    } else {
+                        nativeOnFilePicked(kind, true, stageSelection(data.getData(), kind));
+                    }
                 } else {
                     nativeOnFilePicked(kind, false, "");
                 }
@@ -116,6 +179,7 @@ public final class DkrSdlActivity extends SDLActivity {
                 nativeOnFilePicked(kind, false, "");
             } finally {
                 pendingNativeKind = -1;
+                pendingExportSource = null;
             }
             return;
         }
