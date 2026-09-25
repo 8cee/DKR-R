@@ -78,9 +78,9 @@ jobs:
           test -x "$FILE_TO_C"
           echo "RT64_HOST_FILE_TO_C=$FILE_TO_C" >> "$GITHUB_ENV"
 
-      - name: Build debug APK
+      - name: Test and build debug APK
         working-directory: android
-        run: gradle --no-daemon --stacktrace assembleDebug
+        run: gradle --no-daemon --stacktrace testDebugUnitTest assembleDebug
 
       - name: Verify APK
         run: |
