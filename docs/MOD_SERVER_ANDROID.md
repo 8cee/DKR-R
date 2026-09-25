@@ -57,3 +57,8 @@ For `custom-track` and `texture-pack`, the verified original ZIP is retained ins
 When a catalog package activates into a native subsystem, the assigned native ID is persisted in the catalog copy's `mod.json`. Removal first asks the native subsystem to uninstall that exact ID and only deletes the catalog copy after native removal succeeds. Custom-track removal also removes its managed track-owned HD texture pack. Texture-pack updates deactivate the previous native pack after the replacement has activated successfully, avoiding duplicate managed packs.
 
 If a download succeeded but native activation never completed, the catalog copy has no native ID and can still be removed safely without calling a native uninstaller.
+
+
+## Failed update recovery
+
+Downloaded catalog version and active native version are tracked separately. If a replacement package downloads but its native activation fails, the catalog metadata records the activation error and retains the previous native target, native ID, and active version. The launcher therefore continues to know exactly which native content is active, can remove it safely, and can retry the replacement later without orphaning the previous installation.
