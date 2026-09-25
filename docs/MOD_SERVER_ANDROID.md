@@ -28,11 +28,11 @@ Downloads are always SHA-256 verified. If `size` is supplied, the downloaded byt
 
 App-private root:
 
-`/data/user/0/com.eightcee.dkrrecomp/files/mods/`
+`/data/user/0/com.eightcee.dkrrecomp/files/catalog-mods/`
 
 Installed layout:
 
-`mods/<category>/<id>/`
+`catalog-mods/<category>/<id>/`
 
 The app must never distribute the DKR ROM or copyrighted game assets through the mod service. Catalog packages should contain only redistributable mod content and metadata.
 
@@ -41,3 +41,8 @@ The app must never distribute the DKR ROM or copyrighted game assets through the
 If `gameRevisions` is present, the launcher requires a supported selected US ROM and only enables installation when its revision is listed. US revision 0 maps to DKR-R `v77`; revision 1 maps to `v80`. `minAppVersion` is compared against the Android app version, all IDs in `dependencies` must already be installed, and any installed ID listed in `conflicts` blocks installation.
 
 Removal is also dependency-aware: a mod cannot be removed while another installed mod lists it as a dependency. Version-constrained dependencies and automatic dependency installation are intentionally not part of schema version 1.
+
+
+## Runtime activation boundary
+
+The catalog library is intentionally separate from the native runtime's `mods/` directory. DKR-R reserves `mods/` for native/librecomp-managed mod formats, and custom tracks and texture packs have their own managed stores. A catalog download is therefore treated as verified library content until an explicit installer adapter activates it into the correct native subsystem. This avoids making an arbitrary ZIP look like a valid runtime mod merely because it contains a `mod.json`.
