@@ -54,7 +54,7 @@ public final class DkrSdlActivity extends SDLActivity {
                 android.view.ViewGroup.LayoutParams.MATCH_PARENT));
 
         Button touchToggle = new Button(this);
-        touchToggle.setText("TOUCH");
+        touchToggle.setText(virtualPad.isPadVisible() ? "HIDE" : "TOUCH");
         touchToggle.setAlpha(0.72f);
         touchToggle.setOnClickListener(v -> {
             virtualPad.setPadVisible(!virtualPad.isPadVisible());
@@ -272,7 +272,7 @@ public final class DkrSdlActivity extends SDLActivity {
 
     @Override protected void onPause() {
         if (virtualPad != null) {
-            virtualPad.setPadVisible(virtualPad.isPadVisible());
+            virtualPad.releaseInput();
         }
         nativeHostResumed(false);
         super.onPause();

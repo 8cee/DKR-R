@@ -83,6 +83,10 @@ final class VirtualPadView extends View {
         return visiblePad;
     }
 
+    void releaseInput() {
+        releaseAll();
+    }
+
     @Override protected void onSizeChanged(int w, int h, int oldw, int oldh) {
         float unit = Math.min(w / 1280f, h / 720f);
         stickCx = w * 0.13f;
