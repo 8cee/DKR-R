@@ -89,7 +89,10 @@ if(DKR_ANDROID_BUILD_RT64_PROBE)
     add_subdirectory("${DKR_ANDROID_RT64_DIR}" "${CMAKE_BINARY_DIR}/rt64-android")
 
     if(TARGET rt64)
-        target_include_directories(rt64 PRIVATE "${sdl2_SOURCE_DIR}/include")
+        target_include_directories(rt64 PRIVATE
+            "${sdl2_SOURCE_DIR}/include"
+            "${ANDROID_COMPAT_DIR}"
+        )
     endif()
 endif()
 

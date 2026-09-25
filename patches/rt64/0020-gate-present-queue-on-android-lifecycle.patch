@@ -1,0 +1,51 @@
+diff --git a/src/hle/rt64_present_queue.cpp b/src/hle/rt64_present_queue.cpp
+index 3227ab1..81b84cf 100644
+--- a/src/hle/rt64_present_queue.cpp
++++ b/src/hle/rt64_present_queue.cpp
+@@ -7,6 +7,10 @@
+ #include "common/rt64_thread.h"
+ #include "rhi/rt64_render_hooks.h"
+ 
++#if defined(__ANDROID__)
++#include "app_lifecycle.hpp"
++#endif
++
+ #include "rt64_workload_queue.h"
+ 
+ namespace RT64 {
+@@ -481,6 +485,35 @@ namespace RT64 {
+             }
+ 
+             if (processCursor >= 0) {
++#if defined(__ANDROID__)
++                // DocumentsUI, Home and task switching can destroy or detach
++                // the Android surface while RT64's present thread is still
++                // alive. Acknowledge the queued VI event without touching the
++                // swapchain until the Activity is resumed again.
++                if (!dkr::android::lifecycle::presentation_allowed()) {
++                    Present &present = presents[processCursor];
++                    ext.workloadQueue->waitForWorkloadId(present.workloadId);
++                    if (!presentThreadRunning) {
++                        continue;
++                    }
++
++                    skipInterpolation();
++                    notifyPresentId(present);
++
++                    if (!present.paused) {
++                        if (!present.fbOperations.empty()) {
++                            const std::scoped_lock lock(screenFbChangePoolMutex);
++                            screenFbChangePool.release(
++                                present.fbOperations.front().writeChanges.id);
++                            present.fbOperations.clear();
++                        }
++                        threadAdvanceBarrier();
++                    }
++
++                    processCursor = -1;
++                    continue;
++                }
++#endif
+                 std::unique_lock<std::mutex> threadLock(threadMutex);
+                 const bool needsResize = ext.swapChain->needsResize() || !swapChainValid;
+                 if (needsResize) {
