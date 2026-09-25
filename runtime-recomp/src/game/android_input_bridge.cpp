@@ -54,8 +54,17 @@ struct ControllerState {
 };
 
 std::array<ControllerState, kControllerCount> g_controllers{};
+constexpr int kVirtualTouchDeviceId = 0x7F000001;
+ControllerState g_virtual_touch{};
 
 ControllerState* controller_for_device(int device_id, bool create) {
+    if (device_id == kVirtualTouchDeviceId) {
+        if (g_virtual_touch.device_id < 0 && create) {
+            g_virtual_touch = {};
+            g_virtual_touch.device_id = device_id;
+        }
+        return g_virtual_touch.device_id == device_id ? &g_virtual_touch : nullptr;
+    }
     if (device_id < 0) return nullptr;
     for (auto& controller : g_controllers) {
         if (controller.device_id == device_id) return &controller;
@@ -112,6 +121,10 @@ void set_axes(int device_id, float left_x, float left_y,
 
 void remove_device(int device_id) {
     std::scoped_lock lock(g_mutex);
+    if (device_id == kVirtualTouchDeviceId) {
+        g_virtual_touch = {};
+        return;
+    }
     for (auto& controller : g_controllers) {
         if (controller.device_id == device_id) {
             controller = {};
@@ -123,13 +136,11 @@ void remove_device(int device_id) {
 void clear() {
     std::scoped_lock lock(g_mutex);
     g_controllers = {};
+    g_virtual_touch = {};
 }
 
-Sample sample(std::size_t player) {
-    std::scoped_lock lock(g_mutex);
+Sample sample_controller(const ControllerState& controller) {
     Sample out{};
-    if (player >= g_controllers.size()) return out;
-    const ControllerState& controller = g_controllers[player];
     if (controller.device_id < 0) return out;
 
     if (key(controller, kKeyButtonA)) out.buttons |= kButtonA;
@@ -163,6 +174,24 @@ Sample sample(std::size_t player) {
 
     out.stick_x = shaped(controller.left_x);
     out.stick_y = -shaped(controller.left_y);
+    return out;
+}
+
+Sample sample(std::size_t player) {
+    std::scoped_lock lock(g_mutex);
+    Sample out{};
+    if (player >= g_controllers.size()) return out;
+
+    out = sample_controller(g_controllers[player]);
+    if (player == 0U && g_virtual_touch.device_id == kVirtualTouchDeviceId) {
+        const Sample touch = sample_controller(g_virtual_touch);
+        out.buttons = static_cast<std::uint16_t>(out.buttons | touch.buttons);
+        if (std::abs(touch.stick_x) > 0.001F ||
+            std::abs(touch.stick_y) > 0.001F) {
+            out.stick_x = touch.stick_x;
+            out.stick_y = touch.stick_y;
+        }
+    }
     return out;
 }
 
