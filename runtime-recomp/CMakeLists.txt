@@ -329,12 +329,14 @@ endif()
 if(DKR_RUNTIME_BUILD_GENERATED)
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
     include("${CMAKE_CURRENT_LIST_DIR}/cmake/LegacyMods.cmake")
-    foreach(config IN ITEMS Debug Release RelWithDebInfo MinSizeRel)
-        string(TOUPPER "${config}" config_upper)
-        set_target_properties(DKRLegacyModWorker PROPERTIES
-            RUNTIME_OUTPUT_DIRECTORY_${config_upper}
-                "${CMAKE_BINARY_DIR}/bin/${config}/libexec/dkr-r")
-    endforeach()
+    if(TARGET DKRLegacyModWorker)
+        foreach(config IN ITEMS Debug Release RelWithDebInfo MinSizeRel)
+            string(TOUPPER "${config}" config_upper)
+            set_target_properties(DKRLegacyModWorker PROPERTIES
+                RUNTIME_OUTPUT_DIRECTORY_${config_upper}
+                    "${CMAKE_BINARY_DIR}/bin/${config}/libexec/dkr-r")
+        endforeach()
+    endif()
     set(DKR_V80_SYMBOL_MAP
         "${CMAKE_BINARY_DIR}/generated/dkr_v80_symbol_map.hpp")
     execute_process(
@@ -605,6 +607,12 @@ if(DKR_RUNTIME_BUILD_GENERATED)
                     "$<TARGET_FILE_DIR:DKRPortGame>/SDL2.dll"
                 VERBATIM
             )
+        elseif(ANDROID)
+            if(NOT TARGET SDL2-static)
+                message(FATAL_ERROR
+                    "Android full runtime requires the parent APK build to provide SDL2-static.")
+            endif()
+            target_link_libraries(DKRPortGame PRIVATE SDL2-static)
         else()
             find_package(SDL2 REQUIRED)
             target_include_directories(DKRPortGame PRIVATE ${SDL2_INCLUDE_DIRS})
