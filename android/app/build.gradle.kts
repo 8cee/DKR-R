@@ -1,3 +1,7 @@
+val dkrFullRuntime = System.getenv("DKR_ANDROID_FULL_RUNTIME").let {
+    it == "1" || it.equals("true", ignoreCase = true)
+}
+
 plugins {
     id("com.android.application")
 }
@@ -26,8 +30,7 @@ android {
                     arguments += "-DRT64_HOST_FILE_TO_C=$hostFileToC"
                 }
 
-                val fullRuntime = System.getenv("DKR_ANDROID_FULL_RUNTIME")
-                if (fullRuntime == "1" || fullRuntime.equals("true", ignoreCase = true)) {
+                if (dkrFullRuntime) {
                     arguments += "-DDKR_ANDROID_FULL_RUNTIME=ON"
                     val generatedV77 = System.getenv("DKR_ANDROID_GENERATED_V77")
                     val generatedV80 = System.getenv("DKR_ANDROID_GENERATED_V80")
@@ -42,6 +45,7 @@ android {
         }
 
         buildConfigField("String", "MOD_SERVER_URL", "\"https://raw.githubusercontent.com/8cee/DKR-R/android/android/mod-server/catalog.json\"")
+        buildConfigField("boolean", "FULL_RUNTIME", dkrFullRuntime.toString())
     }
 
     buildFeatures {

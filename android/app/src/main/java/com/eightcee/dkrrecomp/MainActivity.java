@@ -32,6 +32,7 @@ public final class MainActivity extends Activity {
     private static volatile int pendingNativeKind = -1;
 
     private TextView statusView;
+    private boolean nativeRuntimeLaunched = false;
 
     static { System.loadLibrary("dkr_android"); }
     private static native String nativeBootstrap(String filesDir);
@@ -50,6 +51,11 @@ public final class MainActivity extends Activity {
         activeInstance = this;
         nativeBridgeInit();
         String bootstrap = nativeBootstrap(getFilesDir().getAbsolutePath());
+
+        if (BuildConfig.FULL_RUNTIME && state == null) {
+            nativeRuntimeLaunched = true;
+            launchNativeDkr();
+        }
 
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
@@ -163,7 +169,17 @@ public final class MainActivity extends Activity {
         return staged.getAbsolutePath();
     }
 
-    @Override protected void onResume() { super.onResume(); nativeSetResumed(true); }
+    @Override protected void onResume() {
+        super.onResume();
+        nativeSetResumed(true);
+        // If a full-runtime SDL session exited normally, stay on the bootstrap
+        // instead of immediately launching it again. A clean native restart
+        // kills the process, so the new process receives state == null and
+        // auto-enters SDL as intended.
+        if (BuildConfig.FULL_RUNTIME && nativeRuntimeLaunched) {
+            nativeRuntimeLaunched = false;
+        }
+    }
     @Override protected void onPause() { nativeSetResumed(false); super.onPause(); }
 
     private void chooseRom() { openFile(PICK_ROM); }
