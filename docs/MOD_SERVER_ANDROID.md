@@ -8,7 +8,7 @@ A catalog has `schemaVersion`, `generatedAt`, and a `mods` array. Schema version
 - `name`
 - `version`
 - `category`: translations, textures, characters, tracks, gameplay, or ui
-- `installTarget`: optional activation adapter: `library` (default), `custom-track`, or `texture-pack`
+- `installTarget`: optional activation adapter: `library` (default), `custom-track`, `texture-pack`, `legacy-track`, or `legacy-character`
 - `description`
 - `author`
 - `downloadUrl`
@@ -49,7 +49,7 @@ Removal is also dependency-aware: a mod cannot be removed while another installe
 The catalog library is intentionally separate from the native runtime's `mods/` directory. DKR-R reserves `mods/` for native/librecomp-managed mod formats, and custom tracks and texture packs have their own managed stores. A catalog download is therefore treated as verified library content until an explicit installer adapter activates it into the correct native subsystem. This avoids making an arbitrary ZIP look like a valid runtime mod merely because it contains a `mod.json`.
 
 
-For `custom-track` and `texture-pack`, the verified original ZIP is retained inside the catalog library and handed to DKR-R's native installer. This activation is available only in a full-runtime APK. Generic `library` packages remain isolated and are not treated as active runtime mods.
+For `custom-track` and `texture-pack`, the verified original ZIP is retained inside the catalog library and handed to DKR-R's native installer. `legacy-track` and `legacy-character` packages are passed through DKR-R's reviewed legacy import pipeline, which verifies the user's original ROM, extracts only supported asset content, prepares it in the native legacy library, and enables the single reviewed item represented by the catalog package. These activation modes are available only in a full-runtime APK. Generic `library` packages remain isolated and are not treated as active runtime mods.
 
 
 ## Native removal and updates
@@ -62,3 +62,19 @@ If a download succeeded but native activation never completed, the catalog copy 
 ## Failed update recovery
 
 Downloaded catalog version and active native version are tracked separately. If a replacement package downloads but its native activation fails, the catalog metadata records the activation error and retains the previous native target, native ID, and active version. The launcher therefore continues to know exactly which native content is active, can remove it safely, and can retry the replacement later without orphaning the previous installation.
+
+
+## Activation target/category rules
+
+Native activation targets are intentionally narrow:
+
+- `custom-track` and `legacy-track` require category `tracks`.
+- `legacy-character` requires category `characters`.
+- `texture-pack` requires category `textures`.
+- `translations`, `gameplay`, and `ui` packages currently use `library` unless a future DKR-R runtime adapter explicitly owns their format.
+
+The legacy importer never executes patched ROM code. It analyzes patches against the user's verified US v1.0/v1.1 ROM and only prepares the reviewed track/character asset forms supported by DKR-R.
+
+## Storage migration
+
+Early Android catalog builds used `files/mods/<category>/<id>`, which conflicts with DKR-R's native mod namespace. Startup now migrates only directories whose `mod.json` matches the catalog signature (valid id/category plus HTTPS download URL and SHA-256) into `files/catalog-mods/`. Native `mods/legacy` content and unrelated runtime-owned directories are never migrated.
