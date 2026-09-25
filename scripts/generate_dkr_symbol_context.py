@@ -94,7 +94,10 @@ def validate_policy(
         required.add(str(entry["function"]))
     for entry in policy.get("functionHooks", []):
         required.add(str(entry["function"]))
-    for key in ("stubs", "renamed", "ignored"):
+    # Stubs and renamed functions must correspond to CPU functions. Ignored
+    # entries may also name RSP microcode/data boundary symbols, which are
+    # deliberately outside this CPU-only context.
+    for key in ("stubs", "renamed"):
         for entry in policy.get(key, []):
             required.add(str(entry["name"]))
 
