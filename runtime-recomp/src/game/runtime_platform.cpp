@@ -14,7 +14,9 @@
 #include "runtime_netplay.hpp"
 #include "startup_performance.hpp"
 #include "runtime_telemetry.hpp"
+#if DKR_RUNTIME_HAS_RT64
 #include "sdl3_input_client.hpp"
+#endif
 #include "ultramodern/ultramodern.hpp"
 #include "virtual_pak_policy.hpp"
 
