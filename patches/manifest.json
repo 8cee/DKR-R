@@ -240,6 +240,17 @@
       "repositoryPath": "extern/sdl3",
       "expectedCommit": "147a8ee32dbf9ac02f3794964490687b6bbda1bc",
       "patches": []
+    },
+    {
+      "name": "Plume",
+      "repositoryPath": "extern/rt64/src/contrib/plume",
+      "expectedCommit": "d890ac899e505fb30040e037a4037cdeca68f033",
+      "patches": [
+        {
+          "path": "patches/plume/0001-enable-sdl-vulkan-on-android.patch",
+          "sha256": "088b4ca8d29b84e1a534adaadf17b7c9e32ede567b8913b5eebe02e09e1c929a"
+        }
+      ]
     }
   ]
 }

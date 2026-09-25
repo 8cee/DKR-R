@@ -1,0 +1,46 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 0789c20..c4a30de 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -15,10 +15,14 @@ if(APPLE)
+ endif()
+ 
+ string(COMPARE EQUAL ${CMAKE_SYSTEM_NAME} "Linux" IS_LINUX)
++set(IS_SDL_VULKAN_PLATFORM ${IS_LINUX})
++if(ANDROID)
++    set(IS_SDL_VULKAN_PLATFORM TRUE)
++endif()
+ 
+ # Project options
+ include(CMakeDependentOption)
+-cmake_dependent_option(PLUME_SDL_VULKAN_ENABLED "Enable SDL Vulkan integration" OFF IS_LINUX OFF)
++cmake_dependent_option(PLUME_SDL_VULKAN_ENABLED "Enable SDL Vulkan integration" OFF IS_SDL_VULKAN_PLATFORM OFF)
+ cmake_dependent_option(PLUME_D3D12_AGILITY_SDK_ENABLED "Enable D3D12 Agility SDK" OFF WIN32 OFF)
+ cmake_dependent_option(PLUME_APPLE_RETINA_ENABLED "Enable Apple Retina display support" ON APPLE ON)
+ option(PLUME_BUILD_EXAMPLES "Build example applications" OFF)
+diff --git a/plume_render_interface_types.h b/plume_render_interface_types.h
+index 9dcfedf..27dc71e 100644
+--- a/plume_render_interface_types.h
++++ b/plume_render_interface_types.h
+@@ -15,7 +15,7 @@
+ 
+ #if defined(_WIN64)
+ #include <Windows.h>
+-#elif defined(__ANDROID__)
++#elif defined(__ANDROID__) && !defined(PLUME_SDL_VULKAN_ENABLED)
+ #include "android/native_window.h"
+ #elif defined(__linux__) && !defined(PLUME_SDL_VULKAN_ENABLED)
+ #include "X11/Xlib.h"
+@@ -33,10 +33,10 @@ namespace plume {
+ #if defined(_WIN64)
+     // Native HWND handle to the target window.
+     typedef HWND RenderWindow;
+-#elif defined(__ANDROID__)
+-    typedef ANativeWindow* RenderWindow;
+ #elif defined(PLUME_SDL_VULKAN_ENABLED)
+     typedef SDL_Window *RenderWindow;
++#elif defined(__ANDROID__)
++    typedef ANativeWindow* RenderWindow;
+ #elif defined(__linux__)
+     struct RenderWindow {
+         Display* display;
