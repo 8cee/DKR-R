@@ -39,6 +39,8 @@ public final class MainActivity extends Activity {
     private static native void nativeBridgeInit();
     private static native void nativeOnFilePicked(int kind, boolean ok, String stagedPath);
     private static native String nativeSaveStatus();
+    private static native String nativeImportSaveFile(int kind, int channel, String sourcePath);
+    private static native String nativeExportSaveFile(int kind, int channel, String destinationPath);
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
@@ -223,29 +225,29 @@ public final class MainActivity extends Activity {
 
         try {
             if (requestCode == IMPORT_SAVE) {
-                statusView.setText(SaveTransfer.importAdventure(getContentResolver(), uri, getFilesDir()));
+                statusView.setText(nativeImportFromUri(uri, 0, 0, ".bin"));
                 return;
             }
             if (requestCode == EXPORT_SAVE) {
-                statusView.setText(SaveTransfer.exportAdventure(getContentResolver(), uri, getFilesDir()));
+                statusView.setText(nativeExportToUri(uri, 0, 0, ".bin"));
                 return;
             }
             if (requestCode == IMPORT_BUNDLE) {
-                statusView.setText(SaveTransfer.importBundle(getContentResolver(), uri, getFilesDir()));
+                statusView.setText(nativeImportFromUri(uri, 1, 0, ".dkrsave"));
                 return;
             }
             if (requestCode == EXPORT_BUNDLE) {
-                statusView.setText(SaveTransfer.exportBundle(getContentResolver(), uri, getFilesDir()));
+                statusView.setText(nativeExportToUri(uri, 1, 0, ".dkrsave"));
                 return;
             }
             if (requestCode >= IMPORT_PAK_BASE && requestCode < IMPORT_PAK_BASE + SaveTransfer.CONTROLLER_PAK_COUNT) {
                 int channel = requestCode - IMPORT_PAK_BASE;
-                statusView.setText(SaveTransfer.importControllerPak(getContentResolver(), uri, getFilesDir(), channel));
+                statusView.setText(nativeImportFromUri(uri, 2, channel, ".mpk"));
                 return;
             }
             if (requestCode >= EXPORT_PAK_BASE && requestCode < EXPORT_PAK_BASE + SaveTransfer.CONTROLLER_PAK_COUNT) {
                 int channel = requestCode - EXPORT_PAK_BASE;
-                statusView.setText(SaveTransfer.exportControllerPak(getContentResolver(), uri, getFilesDir(), channel));
+                statusView.setText(nativeExportToUri(uri, 2, channel, ".mpk"));
                 return;
             }
             if (requestCode == PICK_ROM) {
@@ -253,6 +255,53 @@ public final class MainActivity extends Activity {
             }
         } catch (Exception e) {
             toast("File operation failed: " + e.getMessage());
+        }
+    }
+
+    private String nativeImportFromUri(Uri uri, int kind, int channel, String extension) throws Exception {
+        File dir = new File(getCacheDir(), "save-transfer");
+        if (!dir.exists() && !dir.mkdirs()) throw new IllegalStateException("Could not create save staging directory.");
+        File staged = new File(dir, "import-" + System.currentTimeMillis() + extension);
+        try {
+            try (InputStream in = getContentResolver().openInputStream(uri);
+                 FileOutputStream out = new FileOutputStream(staged)) {
+                if (in == null) throw new IllegalStateException("Could not open selected file.");
+                byte[] buffer = new byte[64 * 1024];
+                int read;
+                long total = 0;
+                while ((read = in.read(buffer)) > 0) {
+                    total += read;
+                    if (total > 2L * 1024L * 1024L) throw new IllegalArgumentException("Save file is unexpectedly large.");
+                    out.write(buffer, 0, read);
+                }
+                out.getFD().sync();
+            }
+            String result = nativeImportSaveFile(kind, channel, staged.getAbsolutePath());
+            if (result.startsWith("ERR:")) throw new IllegalArgumentException(result.substring(4));
+            return "Native DKR-R save import completed.\n" + nativeSaveStatus();
+        } finally {
+            staged.delete();
+        }
+    }
+
+    private String nativeExportToUri(Uri uri, int kind, int channel, String extension) throws Exception {
+        File dir = new File(getCacheDir(), "save-transfer");
+        if (!dir.exists() && !dir.mkdirs()) throw new IllegalStateException("Could not create save staging directory.");
+        File staged = new File(dir, "export-" + System.currentTimeMillis() + extension);
+        try {
+            String result = nativeExportSaveFile(kind, channel, staged.getAbsolutePath());
+            if (result.startsWith("ERR:")) throw new IllegalArgumentException(result.substring(4));
+            try (InputStream in = new java.io.FileInputStream(staged);
+                 java.io.OutputStream out = getContentResolver().openOutputStream(uri, "wt")) {
+                if (out == null) throw new IllegalStateException("Could not open export destination.");
+                byte[] buffer = new byte[64 * 1024];
+                int read;
+                while ((read = in.read(buffer)) > 0) out.write(buffer, 0, read);
+                out.flush();
+            }
+            return "Native DKR-R save export completed.\n" + nativeSaveStatus();
+        } finally {
+            staged.delete();
         }
     }
 

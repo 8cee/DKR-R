@@ -75,3 +75,65 @@ Java_com_eightcee_dkrrecomp_MainActivity_nativeSaveStatus(JNIEnv* env, jclass) {
     status += "; valid Controller Paks: " + std::to_string(valid_paks);
     return env->NewStringUTF(status.c_str());
 }
+
+
+namespace {
+jstring SaveTransferResult(JNIEnv* env, bool ok, const std::string& error) {
+    const std::string text = ok ? "OK" : "ERR:" + error;
+    return env->NewStringUTF(text.c_str());
+}
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_eightcee_dkrrecomp_MainActivity_nativeImportSaveFile(
+        JNIEnv* env, jclass, jint kind, jint channel, jstring sourcePath) {
+    const char* raw = env->GetStringUTFChars(sourcePath, nullptr);
+    const std::filesystem::path source = raw ? raw : "";
+    if (raw) env->ReleaseStringUTFChars(sourcePath, raw);
+
+    std::string error;
+    bool ok = false;
+    switch (kind) {
+    case 0:
+        ok = dkr::runtime::saves::import_adventure(source, error);
+        break;
+    case 1:
+        ok = dkr::runtime::saves::import_bundle(source, error);
+        break;
+    case 2:
+        ok = dkr::runtime::saves::import_controller_pak(
+            static_cast<int>(channel), source, error);
+        break;
+    default:
+        error = "Unknown save import kind.";
+        break;
+    }
+    return SaveTransferResult(env, ok, error);
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_eightcee_dkrrecomp_MainActivity_nativeExportSaveFile(
+        JNIEnv* env, jclass, jint kind, jint channel, jstring destinationPath) {
+    const char* raw = env->GetStringUTFChars(destinationPath, nullptr);
+    const std::filesystem::path destination = raw ? raw : "";
+    if (raw) env->ReleaseStringUTFChars(destinationPath, raw);
+
+    std::string error;
+    bool ok = false;
+    switch (kind) {
+    case 0:
+        ok = dkr::runtime::saves::export_adventure(destination, error);
+        break;
+    case 1:
+        ok = dkr::runtime::saves::export_bundle(destination, error);
+        break;
+    case 2:
+        ok = dkr::runtime::saves::export_controller_pak(
+            static_cast<int>(channel), destination, error);
+        break;
+    default:
+        error = "Unknown save export kind.";
+        break;
+    }
+    return SaveTransferResult(env, ok, error);
+}
