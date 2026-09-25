@@ -19,6 +19,8 @@
 #include <Shellapi.h>
 #include <dxgi1_6.h>
 #include <winioctl.h>
+#elif defined(__ANDROID__)
+#include <sys/utsname.h>
 #else
 #include <sys/sysinfo.h>
 #include <sys/utsname.h>
@@ -157,6 +159,26 @@ std::string WindowsDriveKind(const std::filesystem::path& path) {
     if (!ok) return "Unknown storage";
     return descriptor.IncursSeekPenalty ? "HDD" : "SSD";
 }
+#elif defined(__ANDROID__)
+std::string ReadFirstMatchingLine(const std::filesystem::path& path,
+                                  const std::string& prefix) {
+    std::ifstream input(path);
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line.rfind(prefix, 0) == 0) {
+            const auto separator = line.find(':');
+            return Trim(separator == std::string::npos
+                            ? line.substr(prefix.size())
+                            : line.substr(separator + 1));
+        }
+    }
+    return {};
+}
+
+std::string AndroidMemorySummary() {
+    const std::string memory = ReadFirstMatchingLine("/proc/meminfo", "MemTotal");
+    return memory.empty() ? "Unknown memory" : memory;
+}
 #else
 std::string ReadFirstMatchingLine(const std::filesystem::path& path,
                                   const std::string& prefix) {
@@ -262,6 +284,12 @@ bool open_directory(const std::filesystem::path& directory,
         error = "Windows could not open that DKR-R support folder.";
         return false;
     }
+#elif defined(__ANDROID__)
+    (void)directory;
+    error =
+        "Android opens support files through the system document picker; "
+        "direct folder launching is not available from the native runtime yet.";
+    return false;
 #else
     const pid_t child = fork();
     if (child == 0) {
@@ -331,6 +359,19 @@ SystemSummary collect_system_summary() {
     GetModuleFileNameW(nullptr, executable,
                        static_cast<DWORD>(std::size(executable)));
     result.application_drive = WindowsDriveKind(executable);
+#elif defined(__ANDROID__)
+    struct utsname system_name{};
+    result.operating_system = uname(&system_name) == 0
+        ? std::string("Android/Linux ") + system_name.release
+        : "Android";
+    result.cpu = ReadFirstMatchingLine("/proc/cpuinfo", "Hardware");
+    if (result.cpu.empty())
+        result.cpu = ReadFirstMatchingLine("/proc/cpuinfo", "model name");
+    if (result.cpu.empty()) result.cpu = "Android ARM64 device";
+    result.memory = AndroidMemorySummary();
+    result.gpu = "Android Vulkan device";
+    result.boot_drive = "Android app sandbox";
+    result.application_drive = "Android app sandbox";
 #else
     struct utsname system_name{};
     result.operating_system = uname(&system_name) == 0
