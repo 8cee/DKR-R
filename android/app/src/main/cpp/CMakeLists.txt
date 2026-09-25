@@ -115,6 +115,7 @@ target_include_directories(dkr_runtime_platform_android PRIVATE
     "${DKR_ANDROID_NMR_DIR}/ultramodern/include"
     "${DKR_ANDROID_NMR_DIR}/thirdparty"
     "${sdl2_SOURCE_DIR}/include"
+    "${ANDROID_COMPAT_DIR}"
 )
 target_link_libraries(dkr_runtime_platform_android PRIVATE dkr_android_input SDL2-static android log)
 endif()
