@@ -33,6 +33,7 @@ final class VirtualPadView extends View {
     private final Control l = new Control("L", KEY_L);
     private final Control r = new Control("R", KEY_R);
     private final Control start = new Control("START", KEY_START);
+    private final Control menu = new Control("MENU", -2);
     private final Control cu = new Control("C↑", KEY_C_UP);
     private final Control cr = new Control("C→", KEY_C_RIGHT);
     private final Control cd = new Control("C↓", KEY_C_DOWN);
@@ -100,6 +101,7 @@ final class VirtualPadView extends View {
         layout(cl, w * 0.71f, h * 0.47f, 37f * unit);
         layout(cr, w * 0.85f, h * 0.47f, 37f * unit);
         layout(start, w * 0.50f, h * 0.86f, 42f * unit);
+        layout(menu, w * 0.64f, h * 0.87f, 38f * unit);
         layout(z, w * 0.12f, h * 0.12f, 48f * unit);
         layout(l, w * 0.42f, h * 0.10f, 44f * unit);
         layout(r, w * 0.88f, h * 0.10f, 44f * unit);
@@ -128,6 +130,7 @@ final class VirtualPadView extends View {
         drawControl(canvas, cl, 0xAADABF32);
         drawControl(canvas, cr, 0xAADABF32);
         drawControl(canvas, start, 0xAAE05A67);
+        drawControl(canvas, menu, 0xAA6F7A86);
         drawControl(canvas, z, 0xAA88929E);
         drawControl(canvas, l, 0xAA88929E);
         drawControl(canvas, r, 0xAA88929E);
@@ -199,7 +202,7 @@ final class VirtualPadView extends View {
     }
 
     private Control hitControl(float x, float y) {
-        Control[] controls = {a,b,cu,cd,cl,cr,start,z,l,r};
+        Control[] controls = {a,b,cu,cd,cl,cr,start,menu,z,l,r};
         for (Control c : controls) if (c.hit(x, y)) return c;
         return null;
     }
@@ -221,6 +224,8 @@ final class VirtualPadView extends View {
         if (c == cl) {
             cLeft = pressed;
             publishAxes();
+        } else if (c == menu) {
+            if (pressed) ControllerBridge.nativeToggleOverlay();
         } else if (c.keyCode >= 0) {
             ControllerBridge.nativeSetButton(DEVICE_ID, c.keyCode, pressed);
         }
@@ -234,7 +239,7 @@ final class VirtualPadView extends View {
     }
 
     private void releaseAll() {
-        for (Control c : new Control[]{a,b,cu,cd,cl,cr,start,z,l,r}) {
+        for (Control c : new Control[]{a,b,cu,cd,cl,cr,start,menu,z,l,r}) {
             if (c.pressed) press(c, false);
         }
         pointers.clear();

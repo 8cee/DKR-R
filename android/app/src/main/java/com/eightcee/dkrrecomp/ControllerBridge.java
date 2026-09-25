@@ -23,6 +23,7 @@ final class ControllerBridge {
     static native void nativeSetAxis(
             int deviceId, float lx, float ly, float rx, float ry, float lt, float rt);
     static native void nativeRemoveDevice(int deviceId);
+    static native void nativeToggleOverlay();
 
     static void register(Context context) {
         if (inputManager != null) return;

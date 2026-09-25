@@ -11,6 +11,9 @@
 #include "rom_revision.hpp"
 #include "game_main.hpp"
 #include "android_input_bridge.hpp"
+#if DKR_ANDROID_FULL_RUNTIME
+#include "runtime_ui.hpp"
+#endif
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_eightcee_dkrrecomp_MainActivity_nativeBootstrap(
@@ -68,6 +71,14 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_eightcee_dkrrecomp_ControllerBridge_nativeRemoveDevice(
         JNIEnv*, jclass, jint device) {
     dkr::runtime::android_input::remove_device(static_cast<int>(device));
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_eightcee_dkrrecomp_ControllerBridge_nativeToggleOverlay(
+        JNIEnv*, jclass) {
+#if DKR_ANDROID_FULL_RUNTIME
+    dkr::runtime::ui::toggle_overlay();
+#endif
 }
 
 extern "C" JNIEXPORT jstring JNICALL
