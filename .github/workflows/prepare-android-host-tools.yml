@@ -1,0 +1,54 @@
+name: Prepare Android Host Tools
+
+"on":
+  workflow_dispatch: {}
+  push:
+    branches:
+      - android
+    paths:
+      - .github/workflows/prepare-android-host-tools.yml
+
+jobs:
+  tools:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install host build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+      - name: Prepare pinned inputs
+        run: |
+          python3 scripts/bootstrap_dependencies.py --only dkr-decomp --only n64-modern-runtime --only n64recomp --force
+          python3 scripts/apply_dependency_patches.py
+      - name: Build host N64Recomp
+        run: |
+          cmake -S extern/n64-modern-runtime/N64Recomp -B build/host-n64recomp -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/host-n64recomp --target N64RecompCLI --parallel
+          N64RECOMP="$(find build/host-n64recomp -type f -name N64Recomp -perm -111 | head -1)"
+          test -x "$N64RECOMP"
+          mkdir -p build/android-host-tools/bin
+          cp "$N64RECOMP" build/android-host-tools/bin/N64Recomp
+          cp -R scripts build/android-host-tools/scripts
+          mkdir -p build/android-host-tools/runtime-recomp
+          cp runtime-recomp/dkr.us.v77.recomp-policy.json build/android-host-tools/runtime-recomp/
+          cp runtime-recomp/dkr.us.v80.recomp-policy.json build/android-host-tools/runtime-recomp/
+          cp runtime-recomp/legacy-mods.v77.recomp-fragment.json build/android-host-tools/runtime-recomp/
+          cp runtime-recomp/legacy-mods.v80.recomp-fragment.json build/android-host-tools/runtime-recomp/
+          cp runtime-recomp/legacy-track-menu.v77.recomp-fragment.json build/android-host-tools/runtime-recomp/
+          cp runtime-recomp/legacy-track-menu.v80.recomp-fragment.json build/android-host-tools/runtime-recomp/
+          cp runtime-recomp/legacy-characters.v77.recomp-fragment.json build/android-host-tools/runtime-recomp/
+          cp runtime-recomp/legacy-characters.v80.recomp-fragment.json build/android-host-tools/runtime-recomp/
+          cp runtime-recomp/legacy-character-menu.v77.recomp-fragment.json build/android-host-tools/runtime-recomp/
+          cp runtime-recomp/legacy-character-menu.v80.recomp-fragment.json build/android-host-tools/runtime-recomp/
+          mkdir -p build/android-host-tools/extern/dkr-decomp/ver/symbols
+          cp extern/dkr-decomp/ver/symbols/symbol_addrs.us.v77.txt build/android-host-tools/extern/dkr-decomp/ver/symbols/
+          cp extern/dkr-decomp/ver/symbols/symbol_addrs.us.v80.txt build/android-host-tools/extern/dkr-decomp/ver/symbols/
+      - name: Upload host tools
+        uses: actions/upload-artifact@v4
+        with:
+          name: DKR-Android-host-tools
+          path: build/android-host-tools
+          compression-level: 9
