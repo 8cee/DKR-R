@@ -77,13 +77,46 @@ def parse_functions(symbols_path: pathlib.Path) -> tuple[list[tuple[str, int]], 
     return functions, ucode_start
 
 
-def validate_policy(
+def merge_policy_functions(
     policy_path: pathlib.Path, functions: list[tuple[str, int]]
-) -> None:
+) -> tuple[list[tuple[str, int]], dict[str, int]]:
     policy = json.loads(policy_path.read_text(encoding="utf-8"))
     if policy.get("schemaVersion") != 1:
         raise ValueError("Unsupported DKR Patch Pipeline policy schema")
 
+    by_name = {name: address for name, address in functions}
+    by_address = {address: name for name, address in functions}
+    explicit_sizes: dict[str, int] = {}
+
+    for entry in policy.get("manualFunctions", []):
+        name = str(entry["name"])
+        address = int(str(entry["vram"]), 0)
+        size = int(str(entry["size"]), 0)
+        explicit_sizes[name] = size
+
+        existing = by_name.get(name)
+        if existing is not None:
+            if existing != address:
+                raise ValueError(
+                    f"Manual function {name} address mismatch: "
+                    f"symbols=0x{existing:08X}, policy=0x{address:08X}"
+                )
+            continue
+
+        collision = by_address.get(address)
+        if collision is not None:
+            raise ValueError(
+                f"Manual function {name} collides with {collision} "
+                f"at 0x{address:08X}"
+            )
+        functions.append((name, address))
+        by_name[name] = address
+        by_address[address] = name
+
+    for entry in policy.get("functionSizes", []):
+        explicit_sizes[str(entry["name"])] = int(str(entry["size"]), 0)
+
+    functions.sort(key=lambda item: item[1])
     names = {name for name, _ in functions}
     required: set[str] = set()
     for entry in policy.get("manualFunctions", []):
@@ -107,12 +140,14 @@ def validate_policy(
             "Pinned symbol metadata is missing policy function(s): "
             + ", ".join(missing)
         )
+    return functions, explicit_sizes
 
 
 def write_context(
     output: pathlib.Path,
     functions: list[tuple[str, int]],
     text_end: int,
+    explicit_sizes: dict[str, int],
 ) -> None:
     section_size = text_end - VRAM_BASE
     rom_end = ROM_BASE + section_size
@@ -124,10 +159,21 @@ def write_context(
             if index + 1 < len(functions)
             else text_end
         )
-        size = next_address - address
+        derived_size = next_address - address
+        size = explicit_sizes.get(name, derived_size)
         if size <= 0 or size % 4:
+            raise ValueError(f"Invalid size for {name}: 0x{size:X}")
+        if address + size > text_end:
             raise ValueError(
-                f"Invalid derived size for {name}: 0x{size:X}"
+                f"Function {name} extends beyond CPU text: "
+                f"0x{address + size:08X} > 0x{text_end:08X}"
+            )
+        # Exact policy sizes may intentionally be smaller than the distance to
+        # the next symbol, but they may never overlap a distinct next function.
+        if size > derived_size:
+            raise ValueError(
+                f"Explicit size for {name} overlaps the next function: "
+                f"0x{size:X} > 0x{derived_size:X}"
             )
         entries.append(
             "    { name = %s, vram = 0x%08X, size = 0x%X },"
@@ -164,8 +210,8 @@ def main() -> int:
     args = parser.parse_args()
 
     functions, text_end = parse_functions(args.symbols)
-    validate_policy(args.policy, functions)
-    write_context(args.output, functions, text_end)
+    functions, explicit_sizes = merge_policy_functions(args.policy, functions)
+    write_context(args.output, functions, text_end, explicit_sizes)
     return 0
 
 
