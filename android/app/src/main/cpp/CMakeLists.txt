@@ -114,6 +114,7 @@ target_include_directories(dkr_runtime_platform_android PRIVATE
     "${DKR_RUNTIME_GAME_DIR}"
     "${DKR_ANDROID_NMR_DIR}/ultramodern/include"
     "${DKR_ANDROID_NMR_DIR}/thirdparty"
+    "${DKR_ANDROID_NMR_DIR}/N64Recomp/include"
     "${sdl2_SOURCE_DIR}/include"
     "${ANDROID_COMPAT_DIR}"
 )
