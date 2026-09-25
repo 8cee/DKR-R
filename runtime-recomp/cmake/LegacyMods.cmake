@@ -142,13 +142,15 @@ add_library(DKRLegacyModProcess STATIC "${_dkr_mod_src}/legacy_mod_process.cpp")
 target_include_directories(DKRLegacyModProcess PUBLIC "${_dkr_mod_src}")
 target_compile_features(DKRLegacyModProcess PUBLIC cxx_std_20)
 target_compile_definitions(DKRLegacyModProcess PRIVATE NOMINMAX)
-add_executable(DKRLegacyModWorker "${_dkr_mod_src}/legacy_mod_worker.cpp")
-set_target_properties(DKRLegacyModWorker PROPERTIES OUTPUT_NAME "DKR-R-ModWorker")
-add_library(DKRLegacyWorkerCore STATIC $<TARGET_OBJECTS:DKRLegacyModCore>)
-target_include_directories(DKRLegacyWorkerCore PUBLIC
-    "$<TARGET_PROPERTY:DKRLegacyModCore,INTERFACE_INCLUDE_DIRECTORIES>")
-target_link_libraries(DKRLegacyWorkerCore PRIVATE DKRLegacyDelta DKRLegacyModMiniz ${_dkr_mod_hash})
-target_link_libraries(DKRLegacyModWorker PRIVATE DKRLegacyWorkerCore DKRLegacyModProcess)
+if(NOT ANDROID)
+    add_executable(DKRLegacyModWorker "${_dkr_mod_src}/legacy_mod_worker.cpp")
+    set_target_properties(DKRLegacyModWorker PROPERTIES OUTPUT_NAME "DKR-R-ModWorker")
+    add_library(DKRLegacyWorkerCore STATIC $<TARGET_OBJECTS:DKRLegacyModCore>)
+    target_include_directories(DKRLegacyWorkerCore PUBLIC
+        "$<TARGET_PROPERTY:DKRLegacyModCore,INTERFACE_INCLUDE_DIRECTORIES>")
+    target_link_libraries(DKRLegacyWorkerCore PRIVATE DKRLegacyDelta DKRLegacyModMiniz ${_dkr_mod_hash})
+    target_link_libraries(DKRLegacyModWorker PRIVATE DKRLegacyWorkerCore DKRLegacyModProcess)
+endif()
 
 add_library(DKRLegacyImportLibrary STATIC "${_dkr_mod_src}/legacy_import_library.cpp"
     "${_dkr_mod_src}/legacy_mod_library.cpp"

@@ -515,7 +515,11 @@ if(DKR_RUNTIME_BUILD_GENERATED)
         set_property(SOURCE resources/dkr-r.rc APPEND PROPERTY COMPILE_DEFINITIONS
             "DKR_RELEASE_RESOURCE_VERSION=${DKR_RELEASE_RESOURCE_VERSION},${DKR_RELEASE_BUILD_NUMBER}")
     endif()
-    add_executable(DKRPortGame ${DKR_GAME_SOURCES})
+    if(ANDROID)
+        add_library(DKRPortGame STATIC ${DKR_GAME_SOURCES})
+    else()
+        add_executable(DKRPortGame ${DKR_GAME_SOURCES})
+    endif()
     if(MSVC)
         # These new bridge callbacks hold leases across guest scheduler calls.
         # Scheduler termination must unwind them even through C-linkage entrypoints.
@@ -559,7 +563,9 @@ if(DKR_RUNTIME_BUILD_GENERATED)
         librecomp)
     target_link_libraries(DKRPortGame PRIVATE DKRNetplayCore)
     target_link_libraries(DKRPortGame PRIVATE DKRLegacyModLaunch DKRLegacyGuestIO)
-    add_dependencies(DKRPortGame DKRLegacyModWorker)
+    if(NOT ANDROID)
+        add_dependencies(DKRPortGame DKRLegacyModWorker)
+    endif()
     if(MSVC)
         target_compile_options(DKRPortGame PRIVATE /FS)
     endif()
@@ -615,6 +621,7 @@ if(DKR_RUNTIME_BUILD_GENERATED)
                 VERBATIM
             )
         endif()
+        if(NOT ANDROID)
         add_custom_command(TARGET DKRPortGame POST_BUILD
             COMMAND "${CMAKE_COMMAND}" -E make_directory
                 "$<TARGET_FILE_DIR:DKRPortGame>/assets/ui/Icons"
@@ -645,6 +652,7 @@ if(DKR_RUNTIME_BUILD_GENERATED)
             COMMENT "Staging the DKR-R launcher, graphics and controller assets"
             VERBATIM
         )
+        endif()
     endif()
     if(WIN32)
         target_link_libraries(DKRPortGame PRIVATE user32 shell32 dbghelp bcrypt dxgi)
@@ -680,6 +688,7 @@ if(DKR_RUNTIME_BUILD_GENERATED)
     endforeach()
 endif()
 
+if(NOT ANDROID)
 add_executable(DKRRuntimeProbe src/runtime_probe.cpp)
 target_include_directories(DKRRuntimeProbe PRIVATE
     "${DKR_RECOMP_SOURCE}/include"
@@ -714,7 +723,9 @@ foreach(config Debug Release RelWithDebInfo MinSizeRel)
         RUNTIME_OUTPUT_DIRECTORY_${config_upper} "${CMAKE_BINARY_DIR}/bin/${config}"
     )
 endforeach()
+endif()
 
+if(NOT ANDROID)
 add_executable(DKRRomHash src/rom_hash.cpp)
 target_include_directories(DKRRomHash PRIVATE
     "${DKR_MODERN_RUNTIME_SOURCE}/thirdparty"
@@ -728,6 +739,7 @@ foreach(config Debug Release RelWithDebInfo MinSizeRel)
         RUNTIME_OUTPUT_DIRECTORY_${config_upper} "${CMAKE_BINARY_DIR}/bin/${config}"
     )
 endforeach()
+endif()
 
 if(BUILD_TESTING)
     if(DKR_RUNTIME_BUILD_RT64 AND DKR_RUNTIME_BUILD_SDL3_INPUT_HOST)
