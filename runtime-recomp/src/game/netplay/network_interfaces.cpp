@@ -151,6 +151,13 @@ std::string tailscale_status_json() {
     CloseHandle(output_read);
     return timed_out ? std::string{} : output;
 }
+#elif defined(__ANDROID__)
+// Android applications do not execute desktop helper CLIs. Normal Android
+// network-interface enumeration remains available below; virtual-LAN apps can
+// still be reached when the user supplies an address through DKR-R.
+std::string tailscale_status_json() {
+    return {};
+}
 #else
 // Match the Windows helper's bounded, shell-free behaviour. Discovery is an
 // optional convenience and must not leave an AppImage worker blocked forever
