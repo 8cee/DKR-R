@@ -50,3 +50,10 @@ The catalog library is intentionally separate from the native runtime's `mods/` 
 
 
 For `custom-track` and `texture-pack`, the verified original ZIP is retained inside the catalog library and handed to DKR-R's native installer. This activation is available only in a full-runtime APK. Generic `library` packages remain isolated and are not treated as active runtime mods.
+
+
+## Native removal and updates
+
+When a catalog package activates into a native subsystem, the assigned native ID is persisted in the catalog copy's `mod.json`. Removal first asks the native subsystem to uninstall that exact ID and only deletes the catalog copy after native removal succeeds. Custom-track removal also removes its managed track-owned HD texture pack. Texture-pack updates deactivate the previous native pack after the replacement has activated successfully, avoiding duplicate managed packs.
+
+If a download succeeded but native activation never completed, the catalog copy has no native ID and can still be removed safely without calling a native uninstaller.
