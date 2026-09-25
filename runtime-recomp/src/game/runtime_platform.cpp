@@ -1473,7 +1473,7 @@ void dkr::runtime::platform::shutdown() {
 ultramodern::renderer::WindowHandle dkr::runtime::platform::create_window() {
     if (g_window == nullptr) {
         Uint32 flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
-#if defined(__linux__)
+#if defined(__linux__) || defined(__ANDROID__)
         flags |= SDL_WINDOW_VULKAN;
 #endif
         g_window = SDL_CreateWindow("DKR-R - Diddy Kong Racing Recompiled",
@@ -1503,7 +1503,7 @@ ultramodern::renderer::WindowHandle dkr::runtime::platform::create_window() {
 }
 
 ultramodern::renderer::WindowHandle dkr::runtime::platform::prepare_window_for_game() {
-#if defined(__linux__)
+#if defined(__linux__) && !defined(__ANDROID__)
     if (g_window != nullptr) {
         const Uint32 existing_flags = SDL_GetWindowFlags(g_window);
         std::fprintf(stderr,
