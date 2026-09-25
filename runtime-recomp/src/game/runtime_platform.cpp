@@ -2188,21 +2188,42 @@ void dkr::runtime::platform::poll_input() {
     // same N64 button/stick representation consumed by the rest of DKR-R.
     const bool online_routing =
         g_online_input_routing.load(std::memory_order_acquire);
+#if DKR_RUNTIME_HAS_RT64
+    const bool blocked = dkr::runtime::ui::overlay_visible();
+#else
+    const bool blocked = false;
+#endif
+    const std::size_t online_profile = std::min(
+        g_online_input_profile.load(std::memory_order_acquire),
+        kControllerCount - 1U);
     for (std::size_t player = 0; player < kControllerCount; ++player) {
-        const auto state = dkr::runtime::android_input::sample(player);
+        const auto raw = dkr::runtime::android_input::sample(player);
+        const std::uint16_t buttons = blocked ? 0U : raw.buttons;
+        const float stick_x = blocked ? 0.0F : raw.stick_x;
+        const float stick_y = blocked ? 0.0F : raw.stick_y;
+
         g_physical_buttons[player].store(
-            state.buttons, std::memory_order_release);
+            buttons, std::memory_order_release);
         g_physical_stick_x[player].store(
-            state.stick_x, std::memory_order_release);
+            stick_x, std::memory_order_release);
         g_physical_stick_y[player].store(
-            state.stick_y, std::memory_order_release);
-        if (!online_routing) {
+            stick_y, std::memory_order_release);
+
+        if (online_routing && player == online_profile) {
+            dkr::runtime::netplay::online_input_broker().capture_local(
+                player, buttons, stick_x, stick_y, blocked);
+        }
+
+        const bool publish_physical =
+            dkr::runtime::netplay::publish_physical_input_to_virtual_port(
+                online_routing);
+        if (publish_physical) {
             g_buttons[player].store(
-                state.buttons, std::memory_order_release);
+                buttons, std::memory_order_release);
             g_stick_x[player].store(
-                state.stick_x, std::memory_order_release);
+                stick_x, std::memory_order_release);
             g_stick_y[player].store(
-                state.stick_y, std::memory_order_release);
+                stick_y, std::memory_order_release);
         }
     }
     return;
