@@ -1,0 +1,28 @@
+diff --git a/src/main.cpp b/src/main.cpp
+index 5f3ffb1..d6a8a2c 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -342,13 +342,18 @@ int main(int argc, char** argv) {
+         if (config.has_entrypoint) {
+             bool found_entrypoint = false;
+ 
+-            for (uint32_t func_index : context.functions_by_vram[config.entrypoint]) {
++            const auto entrypoint_it =
++                context.functions_by_vram.find(config.entrypoint);
++            if (entrypoint_it != context.functions_by_vram.end() &&
++                entrypoint_it->second.size() == 1) {
++                const uint32_t func_index = entrypoint_it->second.front();
+                 auto& func = context.functions[func_index];
+-                if (func.rom == 0x1000) {
+-                    rename_function(func_index, "recomp_entrypoint");
+-                    found_entrypoint = true;
+-                    break;
+-                }
++                // Symbol-file projects may deliberately bypass IPL3/bootstrap
++                // code and begin at a later game function. The configured VRAM
++                // is authoritative when it resolves to exactly one function.
++                rename_function(func_index, "recomp_entrypoint");
++                found_entrypoint = true;
+             }
+ 
+             if (!found_entrypoint) {

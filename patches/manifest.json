@@ -128,6 +128,10 @@
         {
           "path": "patches/n64recomp/0003-skip-host-tools-on-android.patch",
           "sha256": "585053bf1bb6917f9700f867db2fbc96adc1be2c826668e22cfb83ee5559bdfc"
+        },
+        {
+          "path": "patches/n64recomp/0004-allow-symbol-context-entrypoint-by-vram.patch",
+          "sha256": "48b359748887228f3c9980879413583a3255c967c680a3085f9af6f4db731ea3"
         }
       ]
     },
