@@ -12,7 +12,10 @@ namespace dkr::android::filedialog {
 namespace {
 
 constexpr const char* kTag = "DKR-R";
-constexpr const char* kMainActivity = "com/eightcee/dkrrecomp/MainActivity";
+constexpr const char* kActivityClasses[] = {
+    "com/eightcee/dkrrecomp/DkrSdlActivity",
+    "com/eightcee/dkrrecomp/MainActivity",
+};
 
 enum class State { Idle, Waiting, Result };
 
@@ -33,35 +36,38 @@ bool ensure_cache(JNIEnv* env) {
         if (g_main_class != nullptr && g_request_method != nullptr) return true;
     }
 
-    jclass local = env->FindClass(kMainActivity);
-    if (local == nullptr) {
-        if (env->ExceptionCheck()) env->ExceptionClear();
-        __android_log_print(ANDROID_LOG_ERROR, kTag,
-                            "SAF bridge: MainActivity class lookup failed");
-        return false;
+    for (const char* class_name : kActivityClasses) {
+        jclass local = env->FindClass(class_name);
+        if (local == nullptr) {
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            continue;
+        }
+
+        jclass global = static_cast<jclass>(env->NewGlobalRef(local));
+        env->DeleteLocalRef(local);
+        if (global == nullptr) continue;
+
+        jmethodID method =
+            env->GetStaticMethodID(global, "requestNativeFilePicker", "(I)Z");
+        if (method == nullptr) {
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            env->DeleteGlobalRef(global);
+            continue;
+        }
+
+        std::scoped_lock lock(g_mutex);
+        if (g_main_class == nullptr) {
+            g_main_class = global;
+            g_request_method = method;
+        } else {
+            env->DeleteGlobalRef(global);
+        }
+        return true;
     }
 
-    jclass global = static_cast<jclass>(env->NewGlobalRef(local));
-    env->DeleteLocalRef(local);
-    if (global == nullptr) return false;
-
-    jmethodID method = env->GetStaticMethodID(global, "requestNativeFilePicker", "(I)Z");
-    if (method == nullptr) {
-        if (env->ExceptionCheck()) env->ExceptionClear();
-        env->DeleteGlobalRef(global);
-        __android_log_print(ANDROID_LOG_ERROR, kTag,
-                            "SAF bridge: requestNativeFilePicker(I)Z missing");
-        return false;
-    }
-
-    std::scoped_lock lock(g_mutex);
-    if (g_main_class == nullptr) {
-        g_main_class = global;
-        g_request_method = method;
-    } else {
-        env->DeleteGlobalRef(global);
-    }
-    return true;
+    __android_log_print(ANDROID_LOG_ERROR, kTag,
+                        "SAF bridge: no compatible Activity file picker found");
+    return false;
 }
 
 bool call_java(Kind kind) {
@@ -153,8 +159,8 @@ void process_pending() {
     if (callback) callback(ok, payload);
 }
 
-extern "C" JNIEXPORT void JNICALL
-Java_com_eightcee_dkrrecomp_MainActivity_nativeBridgeInit(JNIEnv* env, jclass) {
+namespace {
+void BridgeInit(JNIEnv* env) {
     JavaVM* vm = nullptr;
     if (env->GetJavaVM(&vm) == JNI_OK && vm != nullptr) {
         set_java_vm(vm);
@@ -162,9 +168,7 @@ Java_com_eightcee_dkrrecomp_MainActivity_nativeBridgeInit(JNIEnv* env, jclass) {
     }
 }
 
-extern "C" JNIEXPORT void JNICALL
-Java_com_eightcee_dkrrecomp_MainActivity_nativeOnFilePicked(
-        JNIEnv* env, jclass, jint kind, jboolean ok, jstring payload) {
+void PublishPickedFile(JNIEnv* env, jint kind, jboolean ok, jstring payload) {
     const char* raw = payload ? env->GetStringUTFChars(payload, nullptr) : nullptr;
     {
         std::scoped_lock lock(g_mutex);
@@ -175,6 +179,30 @@ Java_com_eightcee_dkrrecomp_MainActivity_nativeOnFilePicked(
         }
     }
     if (raw) env->ReleaseStringUTFChars(payload, raw);
+}
+} // namespace
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_eightcee_dkrrecomp_MainActivity_nativeBridgeInit(JNIEnv* env, jclass) {
+    BridgeInit(env);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_eightcee_dkrrecomp_MainActivity_nativeOnFilePicked(
+        JNIEnv* env, jclass, jint kind, jboolean ok, jstring payload) {
+    PublishPickedFile(env, kind, ok, payload);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_eightcee_dkrrecomp_DkrSdlActivity_nativeBridgeInit(
+        JNIEnv* env, jclass) {
+    BridgeInit(env);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_eightcee_dkrrecomp_DkrSdlActivity_nativeOnFilePicked(
+        JNIEnv* env, jclass, jint kind, jboolean ok, jstring payload) {
+    PublishPickedFile(env, kind, ok, payload);
 }
 
 } // namespace dkr::android::filedialog
