@@ -219,6 +219,10 @@
         {
           "path": "patches/rt64/0022-skip-developer-tools-on-android.patch",
           "sha256": "bf5dc13eebce80185cc965172975b28236933d1a5d511097b999ede509cbbab8"
+        },
+        {
+          "path": "patches/rt64/0023-use-host-shader-tools-for-android-cross-build.patch",
+          "sha256": "2c4f297943f6d6958093452b68fe3363895f3ab09dbeef534982393746c41fc1"
         }
       ]
     },
