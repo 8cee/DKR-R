@@ -846,7 +846,14 @@ int DkrMain(int argc, char** argv) {
                 authored_simulation_pacing_scale_milli();
         },
         .presentation_allowed_callback = []() {
-            return dkr::runtime::netplay::external_side_effects_allowed();
+            const bool netplay_allowed =
+                dkr::runtime::netplay::external_side_effects_allowed();
+#if defined(__ANDROID__)
+            return netplay_allowed &&
+                   dkr::android::lifecycle::presentation_allowed();
+#else
+            return netplay_allowed;
+#endif
         }};
     const ultramodern::error_handling::callbacks_t error_callbacks{.message_box = MessageBox};
     const ultramodern::threads::callbacks_t thread_callbacks{.get_game_thread_name = GetThreadName};
