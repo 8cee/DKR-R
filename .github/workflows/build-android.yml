@@ -10,15 +10,16 @@ on:
       - "scripts/**"
       - "patches/**"
       - "dependencies.lock.json"
-      - "runtime-recomp/**"
-      - "scripts/**"
-      - "patches/**"
-      - "dependencies.lock.json"
       - ".github/workflows/build-android.yml"
   pull_request:
     branches: [android]
     paths:
       - "android/**"
+      - "runtime-recomp/**"
+      - "scripts/**"
+      - "patches/**"
+      - "dependencies.lock.json"
+      - ".github/workflows/build-android.yml"
 
 jobs:
   build:
