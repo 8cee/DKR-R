@@ -45,7 +45,7 @@
 #ifndef _WIN32
 #include <csignal>
 #include <cerrno>
-#if defined(__linux__)
+#if defined(__linux__) && !defined(__ANDROID__)
 #include <execinfo.h>
 #endif
 #include <unistd.h>
@@ -298,7 +298,7 @@ LONG WINAPI RuntimeCrashFilter(EXCEPTION_POINTERS* exception) {
 
 void RuntimeSignalHandler(int signal_number) {
     std::fprintf(stderr, "[boot][crash] signal=%d\n", signal_number);
-#if defined(__linux__)
+#if defined(__linux__) && !defined(__ANDROID__)
     void* frames[48]{};
     const int count = backtrace(frames, 48);
     backtrace_symbols_fd(frames, count, STDERR_FILENO);
@@ -445,6 +445,14 @@ bool RelaunchApplication(int argc, char** argv) {
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
     return true;
+#elif defined(__ANDROID__)
+    // Android application relaunch must go through the Activity/process host.
+    // execv(argv[0]) is not a valid APK relaunch mechanism.
+    (void)argc;
+    (void)argv;
+    std::fprintf(stderr,
+                 "[boot][restart] Android restart requested; host restart bridge not active yet\n");
+    return false;
 #else
     if (argc <= 0 || argv == nullptr || argv[0] == nullptr) {
         return false;
