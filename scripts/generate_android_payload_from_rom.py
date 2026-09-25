@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import pathlib
 import re
 import shutil
@@ -92,6 +93,27 @@ def main() -> int:
         "--character-menu", str(character_menu_fragment),
         "--output", str(composed_policy),
     ])
+
+    composed = json.loads(composed_policy.read_text(encoding="utf-8"))
+    hook_text = "\n".join(
+        str(entry.get("text", "")) for entry in composed.get("functionHooks", [])
+    )
+    required_hooks = (
+        "dkr_netplay_prepare_controller_init",
+        "dkr_netplay_resolve_authored_input_frame",
+        "dkr_legacy_scene_begin",
+        "dkr_legacy_asset_api",
+        "dkr_legacy_pi_start_dma",
+        "dkr_legacy_track_menu",
+        "dkr_legacy_character_event",
+        "dkr_legacy_character_menu",
+    )
+    missing_hooks = [name for name in required_hooks if name not in hook_text]
+    if missing_hooks:
+        raise RuntimeError(
+            "Composed DKR Patch Pipeline is incomplete; missing hook(s): "
+            + ", ".join(missing_hooks)
+        )
 
     run([
         sys.executable,
