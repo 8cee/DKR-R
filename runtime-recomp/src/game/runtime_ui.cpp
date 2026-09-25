@@ -91,6 +91,12 @@
 #include <thread>
 #include <vector>
 
+#if defined(__ANDROID__)
+namespace dkr::android::filedialog {
+void process_pending();
+}
+#endif
+
 namespace {
 
 // A single bounded checker texture replaces the old per-frame, per-strip
@@ -10850,6 +10856,12 @@ dkr::runtime::ui::StartupResult dkr::runtime::ui::run_startup_screen(
     bool request_quit_popup = false;
     bool request_restart_popup = false;
     while (running) {
+#if defined(__ANDROID__)
+        // SAF results are published by Java/JNI, but callbacks must execute
+        // from DKR-R's own launcher/UI context rather than the Android UI
+        // thread or an arbitrary native renderer thread.
+        dkr::android::filedialog::process_pending();
+#endif
         g_legacy_imports.tick();
         const auto launcher_services_started = std::chrono::steady_clock::now();
         // Hash only the already-imported catalog on a worker. Applying the
@@ -11604,6 +11616,11 @@ void dkr::runtime::ui::detach(RT64::Application& application) {
 }
 
 void dkr::runtime::ui::draw(RT64::Application& application) {
+#if defined(__ANDROID__)
+    // Same dispatch rule while the game is running: consume one completed
+    // DocumentsUI request from DKR-R's frame/update context.
+    dkr::android::filedialog::process_pending();
+#endif
     // Publish only an atomic value; the raster worker snapshots it into the
     // next pass's push constants. No GPU resources or samplers are rebuilt.
     // Keep this before visibility checks so closing the overlay or changing
