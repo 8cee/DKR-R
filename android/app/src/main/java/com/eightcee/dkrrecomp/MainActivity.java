@@ -40,6 +40,7 @@ public final class MainActivity extends Activity {
     private static native void nativeOnFilePicked(int kind, boolean ok, String stagedPath);
     private static native String nativeSaveStatus();
     private static native String nativeInputStatus();
+    private static native String nativeInspectRom(String path);
     private static native String nativeImportSaveFile(int kind, int channel, String sourcePath);
     private static native String nativeExportSaveFile(int kind, int channel, String destinationPath);
 
@@ -317,9 +318,15 @@ public final class MainActivity extends Activity {
             int read;
             while ((read = in.read(buffer)) > 0) out.write(buffer, 0, read);
         }
-        RomInspector.Result inspection = RomInspector.inspect(dst);
-        statusView.setText(inspection.describe() + "\n\nStored privately at:\n" + dst.getAbsolutePath());
-        if (!inspection.candidate) dst.delete();
+        String inspection = nativeInspectRom(dst.getAbsolutePath());
+        boolean supported = inspection.startsWith("OK\n");
+        String detail = inspection.length() > 3 ? inspection.substring(3) : inspection;
+        statusView.setText(detail + "\n\nStored privately at:\n" + dst.getAbsolutePath());
+        if (!supported) {
+            dst.delete();
+            throw new IllegalArgumentException(
+                    "Unsupported Diddy Kong Racing ROM. Use a legally obtained US v1.0 or Rev A ROM.");
+        }
     }
 
     @Override protected void onDestroy() {

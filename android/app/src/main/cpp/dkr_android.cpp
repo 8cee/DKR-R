@@ -8,6 +8,7 @@
 #include "crash_handler.hpp"
 #include "save_manager.hpp"
 #include "runtime_support.hpp"
+#include "rom_revision.hpp"
 #include "android_input_bridge.hpp"
 
 extern "C" JNIEXPORT jstring JNICALL
@@ -188,4 +189,19 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_eightcee_dkrrecomp_DkrSdlActivity_nativeSurfaceState(
         JNIEnv*, jclass, jboolean available) {
     dkr::android::lifecycle::set_surface_available(available == JNI_TRUE);
+}
+
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_eightcee_dkrrecomp_MainActivity_nativeInspectRom(
+        JNIEnv* env, jclass, jstring path) {
+    const char* raw = env->GetStringUTFChars(path, nullptr);
+    const std::filesystem::path rom_path = raw ? raw : "";
+    if (raw) env->ReleaseStringUTFChars(path, raw);
+
+    const auto identity = dkr::runtime::rom::inspect(rom_path);
+    const std::string description = dkr::runtime::rom::describe(identity);
+    const std::string result =
+        std::string(identity.supported() ? "OK\n" : "ERR\n") + description;
+    return env->NewStringUTF(result.c_str());
 }

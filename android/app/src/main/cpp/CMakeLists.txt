@@ -171,9 +171,14 @@ add_library(dkr_runtime_portability_probe STATIC
     "${DKR_RUNTIME_GAME_DIR}/runtime_support.cpp"
     "${DKR_RUNTIME_GAME_DIR}/dkr_save_codec.cpp"
     "${DKR_RUNTIME_GAME_DIR}/save_manager.cpp"
+    "${DKR_RUNTIME_GAME_DIR}/startup_performance.cpp"
+    "${DKR_RUNTIME_GAME_DIR}/rom_revision.cpp"
 )
 target_compile_features(dkr_runtime_portability_probe PRIVATE cxx_std_20)
-target_include_directories(dkr_runtime_portability_probe PRIVATE "${DKR_RUNTIME_GAME_DIR}")
+target_include_directories(dkr_runtime_portability_probe PRIVATE
+    "${DKR_RUNTIME_GAME_DIR}"
+    "${DKR_ANDROID_RT64_DIR}/src/contrib"
+)
 target_link_libraries(dkr_runtime_portability_probe PRIVATE android log)
 
 add_library(dkr_android SHARED dkr_android.cpp)
