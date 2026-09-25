@@ -162,9 +162,11 @@ Java_com_eightcee_dkrrecomp_MainActivity_nativeInputStatus(JNIEnv* env, jclass) 
 extern "C" int DKRAndroidHostMain(int argc, char** argv) {
     const char* files_dir =
         argc > 1 && argv != nullptr && argv[1] != nullptr ? argv[1] : "";
+    const char* external_files_dir =
+        argc > 2 && argv != nullptr && argv[2] != nullptr ? argv[2] : "";
 
     try {
-        dkr::android::configure_paths(files_dir);
+        dkr::android::configure_paths(files_dir, external_files_dir);
         dkr::runtime::saves::configure(files_dir);
         dkr::runtime::support::configure(files_dir);
         dkr::android::install_crash_handler();
