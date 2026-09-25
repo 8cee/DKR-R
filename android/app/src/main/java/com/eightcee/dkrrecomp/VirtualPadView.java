@@ -259,8 +259,10 @@ final class VirtualPadView extends View {
     }
 
     private void syncMenuMode() {
-        if (menuMode && !ControllerBridge.nativeOverlayVisible()) {
-            menuMode = false;
+        final boolean nativeVisible = ControllerBridge.nativeOverlayVisible();
+        if (menuMode != nativeVisible) {
+            if (nativeVisible) releaseGameplayControls();
+            menuMode = nativeVisible;
         }
     }
 
