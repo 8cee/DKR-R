@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <string>
+#include <set>
 
 #include "android_paths.hpp"
 #include "app_lifecycle.hpp"
@@ -296,19 +297,47 @@ Java_com_eightcee_dkrrecomp_CatalogModNative_nativeActivate(
                 }
             }
             dkr::runtime::custom_tracks::discard_install_temp(outcome.temp_root);
-            const std::string result = "OK\n" + detail;
+            const std::string result = "OK\n" + outcome.track_id + "\n" + detail;
             return env->NewStringUTF(result.c_str());
         }
 
         if (target == "texture-pack") {
             dkr::runtime::texture_packs::configure(files);
+            std::set<std::string> before;
+            for (const auto& pack : dkr::runtime::texture_packs::snapshot(true)) {
+                before.insert(pack.id);
+            }
+
             std::string status;
             if (!dkr::runtime::texture_packs::import_archive(archive, status)) {
-                const std::string result = "ERR\n" + status;
+                const std::string result = "ERR\n\n" + status;
                 return env->NewStringUTF(result.c_str());
             }
-            const std::string result =
-                "OK\n" + (status.empty() ? std::string("Texture pack activated.") : status);
+
+            std::string imported_id;
+            std::int64_t newest = -1;
+            for (const auto& pack : dkr::runtime::texture_packs::snapshot(true)) {
+                if (!before.contains(pack.id) && pack.imported_at_unix_seconds >= newest) {
+                    imported_id = pack.id;
+                    newest = pack.imported_at_unix_seconds;
+                }
+            }
+            if (imported_id.empty()) {
+                const auto packs = dkr::runtime::texture_packs::snapshot(true);
+                for (const auto& pack : packs) {
+                    if (pack.imported_at_unix_seconds >= newest) {
+                        imported_id = pack.id;
+                        newest = pack.imported_at_unix_seconds;
+                    }
+                }
+            }
+            if (imported_id.empty()) {
+                return env->NewStringUTF("ERR\n\nTexture pack imported but its managed ID could not be resolved.");
+            }
+
+            const std::string detail =
+                status.empty() ? std::string("Texture pack activated.") : status;
+            const std::string result = "OK\n" + imported_id + "\n" + detail;
             return env->NewStringUTF(result.c_str());
         }
 
@@ -322,5 +351,62 @@ Java_com_eightcee_dkrrecomp_CatalogModNative_nativeActivate(
     (void)archive;
     (void)files;
     return env->NewStringUTF("ERR\nCatalog activation requires a full-runtime APK.");
+#endif
+}
+
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_eightcee_dkrrecomp_CatalogModNative_nativeDeactivate(
+        JNIEnv* env, jclass, jstring targetValue, jstring nativeIdValue,
+        jstring filesDirValue) {
+    const char* targetRaw = env->GetStringUTFChars(targetValue, nullptr);
+    const char* idRaw = env->GetStringUTFChars(nativeIdValue, nullptr);
+    const char* filesRaw = env->GetStringUTFChars(filesDirValue, nullptr);
+    const std::string target = targetRaw ? targetRaw : "";
+    const std::string native_id = idRaw ? idRaw : "";
+    const std::filesystem::path files = filesRaw ? filesRaw : "";
+    if (targetRaw) env->ReleaseStringUTFChars(targetValue, targetRaw);
+    if (idRaw) env->ReleaseStringUTFChars(nativeIdValue, idRaw);
+    if (filesRaw) env->ReleaseStringUTFChars(filesDirValue, filesRaw);
+
+#if DKR_ANDROID_FULL_RUNTIME
+    try {
+        if (target == "custom-track") {
+            dkr::runtime::custom_tracks::scan(files / "custom-tracks");
+            std::string error;
+            if (!dkr::runtime::custom_tracks::uninstall(native_id, error)) {
+                const std::string result = "ERR\n" + native_id + "\n" + error;
+                return env->NewStringUTF(result.c_str());
+            }
+            dkr::runtime::texture_packs::configure(files);
+            std::string pack_status;
+            dkr::runtime::texture_packs::forget_track_pack(native_id, pack_status);
+            const std::string result = "OK\n" + native_id +
+                "\nCustom track removed from DKR-R's managed library.";
+            return env->NewStringUTF(result.c_str());
+        }
+
+        if (target == "texture-pack") {
+            dkr::runtime::texture_packs::configure(files);
+            std::string status;
+            if (!dkr::runtime::texture_packs::delete_managed(native_id, status)) {
+                const std::string result = "ERR\n" + native_id + "\n" + status;
+                return env->NewStringUTF(result.c_str());
+            }
+            const std::string result = "OK\n" + native_id + "\n" +
+                (status.empty() ? std::string("Texture pack removed.") : status);
+            return env->NewStringUTF(result.c_str());
+        }
+
+        return env->NewStringUTF("ERR\n\nUnsupported catalog deactivation target.");
+    } catch (const std::exception& e) {
+        const std::string result = std::string("ERR\n") + native_id + "\n" + e.what();
+        return env->NewStringUTF(result.c_str());
+    }
+#else
+    (void)target;
+    (void)native_id;
+    (void)files;
+    return env->NewStringUTF("ERR\n\nCatalog deactivation requires a full-runtime APK.");
 #endif
 }
