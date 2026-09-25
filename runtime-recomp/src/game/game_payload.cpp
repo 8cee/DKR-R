@@ -4,7 +4,9 @@
 
 namespace dkr::runtime {
 
+#if DKR_RUNTIME_HAS_V77_PAYLOAD
 const GamePayload& payload_v77();
+#endif
 #if DKR_RUNTIME_HAS_V80_PAYLOAD
 const GamePayload& payload_v80();
 #endif
@@ -18,7 +20,11 @@ std::atomic<const GamePayload*> g_active_payload{nullptr};
 const GamePayload* payload_for(rom::Revision revision) {
     switch (revision) {
     case rom::Revision::UsV77:
+#if DKR_RUNTIME_HAS_V77_PAYLOAD
         return &payload_v77();
+#else
+        return nullptr;
+#endif
     case rom::Revision::UsV80:
 #if DKR_RUNTIME_HAS_V80_PAYLOAD
         return &payload_v80();
