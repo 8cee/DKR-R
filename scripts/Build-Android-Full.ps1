@@ -57,21 +57,9 @@ Invoke-Checked 'Preparing all pinned DKR-R dependencies' {
     & $Python @bootstrapArgs
 }
 
-$patchScript = Join-Path $Root 'scripts\apply-dependency-patches.sh'
-if (Get-Command bash -ErrorAction SilentlyContinue) {
-    Invoke-Checked 'Applying pinned dependency patches' {
-        & bash $patchScript
-    }
-} elseif (Get-Command wsl.exe -ErrorAction SilentlyContinue) {
-    $wslRoot = (& wsl.exe --exec wslpath -a -u $Root).Trim()
-    if ($LASTEXITCODE -ne 0 -or -not $wslRoot) {
-        throw 'Could not translate the repository path for WSL.'
-    }
-    Invoke-Checked 'Applying pinned dependency patches through WSL' {
-        & wsl.exe --exec bash "$wslRoot/scripts/apply-dependency-patches.sh"
-    }
-} else {
-    throw 'bash or WSL is required to apply the pinned dependency patch manifest.'
+$patchScript = Join-Path $Root 'scripts\apply_dependency_patches.py'
+Invoke-Checked 'Applying pinned dependency patches' {
+    & $Python $patchScript
 }
 
 $HostBuild = Join-Path $Root 'build\android-host-file-to-c'

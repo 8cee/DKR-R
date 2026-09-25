@@ -46,7 +46,7 @@ jobs:
       - name: Prepare pinned runtime dependencies
         run: |
           python3 scripts/bootstrap_dependencies.py --only n64-modern-runtime --only rt64
-          bash scripts/apply-dependency-patches.sh
+          python3 scripts/apply_dependency_patches.py
 
       - name: Build RT64 host file_to_c
         run: |
