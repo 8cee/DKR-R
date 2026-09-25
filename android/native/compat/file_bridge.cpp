@@ -18,6 +18,7 @@ std::mutex g_mutex;
 JavaVM* g_vm = nullptr;
 jclass g_main_class = nullptr;
 jmethodID g_request_method = nullptr;
+jmethodID g_export_method = nullptr;
 State g_state = State::Idle;
 Kind g_kind = Kind::Rom;
 bool g_ok = false;
@@ -41,12 +42,24 @@ bool cache_activity(JNIEnv* env, jclass activity_class) {
         return false;
     }
 
+    jmethodID export_method = env->GetStaticMethodID(
+        global, "requestNativeExport",
+        "(ILjava/lang/String;Ljava/lang/String;)Z");
+    if (export_method == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        env->DeleteGlobalRef(global);
+        __android_log_print(ANDROID_LOG_ERROR, kTag,
+                            "SAF bridge: active Activity lacks requestNativeExport");
+        return false;
+    }
+
     std::scoped_lock lock(g_mutex);
     if (g_main_class != nullptr) {
         env->DeleteGlobalRef(g_main_class);
     }
     g_main_class = global;
     g_request_method = method;
+    g_export_method = export_method;
     return true;
 }
 
@@ -89,6 +102,51 @@ bool call_java(Kind kind) {
     return accepted == JNI_TRUE;
 }
 
+
+bool call_java_export(Kind kind, const std::string& source_path,
+                      const std::string& suggested_name) {
+    JavaVM* vm = nullptr;
+    {
+        std::scoped_lock lock(g_mutex);
+        vm = g_vm;
+    }
+    if (vm == nullptr) return false;
+
+    JNIEnv* env = nullptr;
+    bool attached = false;
+    if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
+        if (vm->AttachCurrentThread(&env, nullptr) != JNI_OK) return false;
+        attached = true;
+    }
+
+    jclass cls = nullptr;
+    jmethodID method = nullptr;
+    {
+        std::scoped_lock lock(g_mutex);
+        cls = g_main_class;
+        method = g_export_method;
+    }
+    if (cls == nullptr || method == nullptr) {
+        if (attached) vm->DetachCurrentThread();
+        return false;
+    }
+
+    jstring source = env->NewStringUTF(source_path.c_str());
+    jstring name = env->NewStringUTF(suggested_name.c_str());
+    const jboolean accepted = env->CallStaticBooleanMethod(
+        cls, method, static_cast<jint>(kind), source, name);
+    env->DeleteLocalRef(source);
+    env->DeleteLocalRef(name);
+    if (env->ExceptionCheck()) {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+        if (attached) vm->DetachCurrentThread();
+        return false;
+    }
+    if (attached) vm->DetachCurrentThread();
+    return accepted == JNI_TRUE;
+}
+
 } // namespace
 
 void set_java_vm(void* vm) {
@@ -117,6 +175,39 @@ bool request(Kind kind, Callback callback) {
     }
 
     if (call_java(kind)) return true;
+
+    Callback failed;
+    {
+        std::scoped_lock lock(g_mutex);
+        g_state = State::Idle;
+        failed = std::move(g_callback);
+        g_callback = nullptr;
+    }
+    if (failed) failed(false, {});
+    return false;
+}
+
+
+bool request_export(Kind kind, const std::string& source_path,
+                    const std::string& suggested_name, Callback callback) {
+    Callback rejected;
+    {
+        std::scoped_lock lock(g_mutex);
+        if (g_state != State::Idle) {
+            rejected = std::move(callback);
+        } else {
+            g_state = State::Waiting;
+            g_kind = kind;
+            g_ok = false;
+            g_payload.clear();
+            g_callback = std::move(callback);
+        }
+    }
+    if (rejected) {
+        rejected(false, {});
+        return false;
+    }
+    if (call_java_export(kind, source_path, suggested_name)) return true;
 
     Callback failed;
     {
@@ -200,6 +291,10 @@ Java_com_eightcee_dkrrecomp_DkrSdlActivity_nativeOnFilePicked(
 namespace dkr::android::filedialog {
 void set_java_vm(void*) {}
 bool request(Kind, Callback callback) {
+    if (callback) callback(false, {});
+    return false;
+}
+bool request_export(Kind, const std::string&, const std::string&, Callback callback) {
     if (callback) callback(false, {});
     return false;
 }
