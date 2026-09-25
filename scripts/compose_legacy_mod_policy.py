@@ -11,6 +11,7 @@ import argparse
 import copy
 import hashlib
 import json
+import re
 from pathlib import Path
 import struct
 
@@ -83,6 +84,65 @@ def elf_functions(path: Path, symbol_types=(2,)) -> dict:
             label = strings[name:end].decode("ascii")
             result.setdefault(label, set()).add((address, length))
     return result
+
+
+SYMBOL_LINE = re.compile(r"^([A-Za-z_.$][\\w.$]*)\\s*=\\s*(0x[0-9A-Fa-f]+);")
+CPU_VRAM_BASE = 0x80000400
+CPU_ROM_BASE = 0x1000
+
+def metadata_context(symbols_path: Path, rom_path: Path):
+    """Reconstruct ELF-equivalent text words and symbol bounds from pinned metadata."""
+    rom = rom_path.read_bytes()
+    if len(rom) != 12 * 1024 * 1024:
+        raise ValueError("Expected a canonical 12 MiB DKR retail ROM")
+
+    ordered = []
+    text_end = None
+    for raw in symbols_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        match = SYMBOL_LINE.match(raw.strip())
+        if not match:
+            continue
+        name = match.group(1)
+        address = int(match.group(2), 16)
+        if name == "aspMainTextStart":
+            text_end = address
+        ordered.append((name, address))
+
+    if text_end is None or text_end <= CPU_VRAM_BASE:
+        raise ValueError("Could not locate DKR CPU text end in symbol metadata")
+
+    text_size = text_end - CPU_VRAM_BASE
+    rom_end = CPU_ROM_BASE + text_size
+    if rom_end > len(rom):
+        raise ValueError("DKR CPU text mapping exceeds the ROM image")
+    sections = [(CPU_VRAM_BASE, rom[CPU_ROM_BASE:rom_end])]
+
+    # Build a conservative symbol-bound map. Adjacent labels may be aliases or
+    # interior labels; fragment-specific manual functions override these bounds
+    # in verify_function_bounds just like the ELF pipeline.
+    unique = []
+    seen = set()
+    for name, address in ordered:
+        if name in seen:
+            continue
+        seen.add(name)
+        unique.append((name, address))
+    unique.sort(key=lambda item: (item[1], item[0]))
+
+    bounds = {}
+    for index, (name, address) in enumerate(unique):
+        next_address = None
+        for _, candidate in unique[index + 1:]:
+            if candidate > address:
+                next_address = candidate
+                break
+        if next_address is None:
+            continue
+        size = next_address - address
+        if size > 0:
+            bounds.setdefault(name, set()).add((address, size))
+
+    return sections, bounds
 
 
 def verify_function_bounds(policy: dict, fragment: dict, functions: dict) -> None:
@@ -413,7 +473,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--policy", required=True, type=Path)
     parser.add_argument("--fragment", required=True, type=Path)
-    parser.add_argument("--elf", required=True, type=Path)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--elf", type=Path)
+    source.add_argument("--symbols", type=Path,
+                        help="Pinned DKR symbol_addrs file for ROM-direct verification")
+    parser.add_argument("--rom", type=Path,
+                        help="Canonical DKR ROM used with --symbols")
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--scene-runtime", action="store_true")
     parser.add_argument("--qualification", action="store_true",
@@ -422,36 +487,55 @@ def main() -> None:
     parser.add_argument("--characters",type=Path,help="Verified additive character resource fragment")
     parser.add_argument("--character-menu",type=Path,help="Verified additive character selection fragment")
     args = parser.parse_args()
-    if args.output.resolve() in (args.policy.resolve(), args.fragment.resolve(), args.elf.resolve()):
+    protected = [args.policy.resolve(), args.fragment.resolve()]
+    if args.elf is not None:
+        protected.append(args.elf.resolve())
+    if args.symbols is not None:
+        protected.append(args.symbols.resolve())
+    if args.rom is not None:
+        protected.append(args.rom.resolve())
+    if args.output.resolve() in protected:
         raise ValueError("Output must not overwrite an input")
+    if args.symbols is not None and args.rom is None:
+        raise ValueError("--symbols requires --rom")
+    if args.elf is not None:
+        sections = elf_sections(args.elf)
+        functions = elf_functions(args.elf)
+        symbols = elf_functions(args.elf, (1, 2))
+    else:
+        sections, symbols = metadata_context(args.symbols, args.rom)
+        functions = copy.deepcopy(symbols)
+
     policy, fragment = json.loads(args.policy.read_text()), json.loads(args.fragment.read_text())
-    verify_function_bounds(policy, fragment, elf_functions(args.elf))
-    result = compose(policy, fragment, elf_sections(args.elf))
+    verify_function_bounds(policy, fragment, functions)
+    result = compose(policy, fragment, sections)
     if args.qualification and not args.scene_runtime:
         raise ValueError("Qualification requires the scene runtime bridge")
     if args.scene_runtime:
-        result = compose_scene_runtime(result, fragment, elf_sections(args.elf),
-                                       elf_functions(args.elf), args.qualification)
+        result = compose_scene_runtime(result, fragment, sections,
+                                       functions, args.qualification)
     if args.track_menu:
         if not args.scene_runtime or args.qualification:
             raise ValueError("Track Select requires scene ownership and cannot use the cyclic menu-load probe")
         menu = json.loads(args.track_menu.read_text())
         if menu.get("revision") != fragment.get("revision"):
             raise ValueError("Track-menu and asset revisions differ")
-        result = compose_track_menu(result, menu, elf_sections(args.elf), elf_functions(args.elf, (1, 2)))
+        result = compose_track_menu(result, menu, sections, symbols)
     if args.characters:
         if not args.scene_runtime:raise ValueError('Character adapter requires boot/scene asset ownership')
         character=json.loads(args.characters.read_text())
         if character.get('revision')!=fragment.get('revision'):raise ValueError('Character and asset revisions differ')
-        result=compose_characters(result,character,elf_sections(args.elf),elf_functions(args.elf,(1,2)))
+        result=compose_characters(result,character,sections,symbols)
     if args.character_menu:
         menu=json.loads(args.character_menu.read_text())
         if not args.characters or menu.get('revision')!=fragment.get('revision'):raise ValueError('Character menu requires matching resource ownership')
-        result=compose_character_menu(result,menu,elf_sections(args.elf),elf_functions(args.elf,(1,2)))
+        result=compose_character_menu(result,menu,sections,symbols)
         from legacy_character_presentation_policy import compose_presentation
-        result=compose_presentation(result,args.elf,fragment['revision'],elf_sections(args.elf),elf_functions(args.elf,(1,2)))
+        result=compose_presentation(result,args.elf if args.elf is not None else args.rom,
+                                    fragment['revision'],sections,symbols)
     from legacy_model_cache_policy import compose_model_cache
-    result=compose_model_cache(result,args.elf,fragment['revision'],elf_sections(args.elf),elf_functions(args.elf,(1,2)))
+    result=compose_model_cache(result,args.elf if args.elf is not None else args.rom,
+                               fragment['revision'],sections,symbols)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     # A build artifact, never a mutation of a versioned policy or protected C.
     args.output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
