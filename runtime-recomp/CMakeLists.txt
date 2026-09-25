@@ -77,6 +77,8 @@ set(DKR_GENERATED_SOURCE_V77 "${CMAKE_CURRENT_LIST_DIR}/RecompiledFuncs" CACHE P
     "N64Recomp-generated CPU source for DKR US v1.0")
 set(DKR_GENERATED_SOURCE_V80 "" CACHE PATH
     "N64Recomp-generated CPU source for DKR US Rev A/v1.1")
+option(DKR_RUNTIME_BUILD_V77_PAYLOAD
+    "Compile the DKR US v1.0 CPU payload" ON)
 option(DKR_RUNTIME_BUILD_V80_PAYLOAD
     "Compile the optional DKR US Rev A/v1.1 CPU payload" ON)
 set(DKR_GENERATED_RSP_SOURCE "${CMAKE_CURRENT_LIST_DIR}/RecompiledRSP" CACHE PATH
@@ -84,8 +86,17 @@ set(DKR_GENERATED_RSP_SOURCE "${CMAKE_CURRENT_LIST_DIR}/RecompiledRSP" CACHE PAT
 set(DKR_GENERATED_FILE_COUNT 0)
 
 if(DKR_RUNTIME_BUILD_GENERATED)
-    get_filename_component(DKR_GENERATED_SOURCE_V77_ABSOLUTE
-        "${DKR_GENERATED_SOURCE_V77}" ABSOLUTE)
+    if(NOT DKR_RUNTIME_BUILD_V77_PAYLOAD AND NOT DKR_RUNTIME_BUILD_V80_PAYLOAD)
+        message(FATAL_ERROR "At least one DKR CPU payload revision must be enabled.")
+    endif()
+    if(DKR_RUNTIME_BUILD_V77_PAYLOAD)
+        if(DKR_GENERATED_SOURCE_V77 STREQUAL "")
+            message(FATAL_ERROR
+                "DKR_GENERATED_SOURCE_V77 must name the generated US v1.0 CPU source directory when DKR_RUNTIME_BUILD_V77_PAYLOAD is ON.")
+        endif()
+        get_filename_component(DKR_GENERATED_SOURCE_V77_ABSOLUTE
+            "${DKR_GENERATED_SOURCE_V77}" ABSOLUTE)
+    endif()
     if(DKR_RUNTIME_BUILD_V80_PAYLOAD)
         if(DKR_GENERATED_SOURCE_V80 STREQUAL "")
             message(FATAL_ERROR
@@ -94,7 +105,8 @@ if(DKR_RUNTIME_BUILD_GENERATED)
         endif()
         get_filename_component(DKR_GENERATED_SOURCE_V80_ABSOLUTE
             "${DKR_GENERATED_SOURCE_V80}" ABSOLUTE)
-        if(DKR_GENERATED_SOURCE_V77_ABSOLUTE STREQUAL
+        if(DKR_RUNTIME_BUILD_V77_PAYLOAD AND
+           DKR_GENERATED_SOURCE_V77_ABSOLUTE STREQUAL
            DKR_GENERATED_SOURCE_V80_ABSOLUTE)
             message(FATAL_ERROR
                 "The v1.0 and Rev A CPU payloads must come from different generated "
@@ -448,10 +460,13 @@ if(DKR_RUNTIME_BUILD_GENERATED)
         set(DKR_GENERATED_FILE_COUNT "${TOTAL_GENERATED_COUNT}" PARENT_SCOPE)
     endfunction()
 
-    dkr_add_recompiled_payload(
-        DKRRecompiledFuncsV77 77 "${DKR_GENERATED_SOURCE_V77}"
-        "${CMAKE_CURRENT_LIST_DIR}/src/game/game_payload_v77.cpp")
-    set(DKR_RECOMPILED_PAYLOAD_TARGETS DKRRecompiledFuncsV77)
+    set(DKR_RECOMPILED_PAYLOAD_TARGETS)
+    if(DKR_RUNTIME_BUILD_V77_PAYLOAD)
+        dkr_add_recompiled_payload(
+            DKRRecompiledFuncsV77 77 "${DKR_GENERATED_SOURCE_V77}"
+            "${CMAKE_CURRENT_LIST_DIR}/src/game/game_payload_v77.cpp")
+        list(APPEND DKR_RECOMPILED_PAYLOAD_TARGETS DKRRecompiledFuncsV77)
+    endif()
     if(DKR_RUNTIME_BUILD_V80_PAYLOAD)
         dkr_add_recompiled_payload(
             DKRRecompiledFuncsV80 80 "${DKR_GENERATED_SOURCE_V80}"
@@ -557,6 +572,7 @@ if(DKR_RUNTIME_BUILD_GENERATED)
         DKR_RUNTIME_HAS_RT64=$<BOOL:${DKR_RUNTIME_BUILD_RT64}>
         DKR_LEGACY_QUALIFICATION=$<BOOL:${DKR_LEGACY_QUALIFICATION}>
         DKR_RUNTIME_HAS_SDL3_INPUT_HOST=$<BOOL:${DKR_RUNTIME_BUILD_SDL3_INPUT_HOST}>
+        DKR_RUNTIME_HAS_V77_PAYLOAD=$<BOOL:${DKR_RUNTIME_BUILD_V77_PAYLOAD}>
         DKR_RUNTIME_HAS_V80_PAYLOAD=$<BOOL:${DKR_RUNTIME_BUILD_V80_PAYLOAD}>
         DKR_RELEASE_VERSION="${DKR_RELEASE_VERSION}"
         DKR_NETWORK_RELEASE_VERSION="${DKR_NETWORK_RELEASE_VERSION}"
