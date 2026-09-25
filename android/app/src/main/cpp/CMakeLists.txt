@@ -74,6 +74,13 @@ option(DKR_ANDROID_BUILD_RT64_PROBE
 option(DKR_ANDROID_BUILD_NMR_PROBE
        "Configure and compile pinned N64ModernRuntime targets in the Android APK build"
        ON)
+option(DKR_ANDROID_FULL_RUNTIME
+       "Link the complete generated DKR-R runtime into libdkr_android.so"
+       OFF)
+set(DKR_ANDROID_GENERATED_V77 "" CACHE PATH
+    "User-generated N64Recomp CPU source directory for DKR US v1.0")
+set(DKR_ANDROID_GENERATED_V80 "" CACHE PATH
+    "User-generated N64Recomp CPU source directory for DKR US Rev A/v1.1")
 
 add_library(dkr_android_compat STATIC
     "${ANDROID_COMPAT_DIR}/android_paths.cpp"
@@ -105,7 +112,7 @@ target_include_directories(dkr_runtime_platform_android PRIVATE
 )
 target_link_libraries(dkr_runtime_platform_android PRIVATE dkr_android_input SDL2-static android log)
 
-if(DKR_ANDROID_BUILD_NMR_PROBE)
+if(DKR_ANDROID_BUILD_NMR_PROBE AND NOT DKR_ANDROID_FULL_RUNTIME)
     if(NOT EXISTS "${DKR_ANDROID_NMR_DIR}/CMakeLists.txt")
         message(FATAL_ERROR
             "Pinned N64ModernRuntime checkout is missing. Run "
@@ -115,7 +122,7 @@ if(DKR_ANDROID_BUILD_NMR_PROBE)
     add_subdirectory("${DKR_ANDROID_NMR_DIR}" "${CMAKE_BINARY_DIR}/n64-modern-runtime-android")
 endif()
 
-if(DKR_ANDROID_BUILD_RT64_PROBE)
+if(DKR_ANDROID_BUILD_RT64_PROBE AND NOT DKR_ANDROID_FULL_RUNTIME)
     if(NOT EXISTS "${DKR_ANDROID_RT64_DIR}/CMakeLists.txt")
         message(FATAL_ERROR
             "Pinned RT64 checkout is missing. Run scripts/bootstrap_dependencies.py "
@@ -164,6 +171,38 @@ if(DKR_ANDROID_BUILD_RT64_PROBE)
     )
 endif()
 
+if(DKR_ANDROID_FULL_RUNTIME)
+    if(DKR_ANDROID_GENERATED_V77 STREQUAL "" OR
+       DKR_ANDROID_GENERATED_V80 STREQUAL "")
+        message(FATAL_ERROR
+            "DKR_ANDROID_FULL_RUNTIME requires DKR_ANDROID_GENERATED_V77 and "
+            "DKR_ANDROID_GENERATED_V80. Generate both payloads from your own "
+            "legally obtained ROMs outside the repository.")
+    endif()
+    if(NOT EXISTS "${DKR_ANDROID_GENERATED_V77}" OR
+       NOT EXISTS "${DKR_ANDROID_GENERATED_V80}")
+        message(FATAL_ERROR "One or both generated DKR CPU source directories do not exist.")
+    endif()
+
+    # The production runtime owns N64ModernRuntime, RT64, netplay and all DKR
+    # source lists in this mode. Disable desktop-only helpers/tests and use the
+    # Android-safe static DKRPortGame target provided by runtime-recomp.
+    set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    set(DKR_RUNTIME_BUILD_GENERATED ON CACHE BOOL "" FORCE)
+    set(DKR_RUNTIME_BUILD_RT64 ON CACHE BOOL "" FORCE)
+    set(DKR_RUNTIME_BUILD_SDL3_INPUT_HOST OFF CACHE BOOL "" FORCE)
+    set(DKR_GENERATED_SOURCE_V77 "${DKR_ANDROID_GENERATED_V77}" CACHE PATH "" FORCE)
+    set(DKR_GENERATED_SOURCE_V80 "${DKR_ANDROID_GENERATED_V80}" CACHE PATH "" FORCE)
+    set(DKR_GENERATED_RSP_SOURCE
+        "${DKR_REPO_ROOT}/runtime-recomp/RecompiledRSP" CACHE PATH "" FORCE)
+    set(DKRPORT_ROOT "${DKR_REPO_ROOT}" CACHE PATH "" FORCE)
+
+    add_subdirectory(
+        "${DKR_REPO_ROOT}/runtime-recomp"
+        "${CMAKE_BINARY_DIR}/dkr-full-runtime"
+    )
+endif()
+
 # Compile a dependency-light slice of the real DKR-R runtime with the NDK on
 # every APK build. This catches Android portability regressions before RT64 and
 # the generated recomp payload are brought into the Android link.
@@ -190,10 +229,12 @@ target_link_libraries(dkr_android PRIVATE
     dkr_runtime_platform_android
     dkr_android_input
 )
-if(DKR_ANDROID_BUILD_NMR_PROBE)
+if(DKR_ANDROID_FULL_RUNTIME)
+    target_link_libraries(dkr_android PRIVATE DKRPortGame)
+elseif(DKR_ANDROID_BUILD_NMR_PROBE)
     target_link_libraries(dkr_android PRIVATE ultramodern librecomp)
 endif()
-if(DKR_ANDROID_BUILD_RT64_PROBE)
+if(DKR_ANDROID_BUILD_RT64_PROBE AND NOT DKR_ANDROID_FULL_RUNTIME)
     target_link_libraries(dkr_android PRIVATE rt64)
     add_dependencies(dkr_android dkr_runtime_platform_rt64_probe)
 endif()

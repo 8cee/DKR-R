@@ -25,6 +25,19 @@ android {
                 if (!hostFileToC.isNullOrBlank()) {
                     arguments += "-DRT64_HOST_FILE_TO_C=$hostFileToC"
                 }
+
+                val fullRuntime = System.getenv("DKR_ANDROID_FULL_RUNTIME")
+                if (fullRuntime == "1" || fullRuntime.equals("true", ignoreCase = true)) {
+                    arguments += "-DDKR_ANDROID_FULL_RUNTIME=ON"
+                    val generatedV77 = System.getenv("DKR_ANDROID_GENERATED_V77")
+                    val generatedV80 = System.getenv("DKR_ANDROID_GENERATED_V80")
+                    if (!generatedV77.isNullOrBlank()) {
+                        arguments += "-DDKR_ANDROID_GENERATED_V77=$generatedV77"
+                    }
+                    if (!generatedV80.isNullOrBlank()) {
+                        arguments += "-DDKR_ANDROID_GENERATED_V80=$generatedV80"
+                    }
+                }
             }
         }
 
