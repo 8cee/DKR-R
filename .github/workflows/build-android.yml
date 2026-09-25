@@ -6,6 +6,14 @@ on:
     branches: [android]
     paths:
       - "android/**"
+      - "runtime-recomp/**"
+      - "scripts/**"
+      - "patches/**"
+      - "dependencies.lock.json"
+      - "runtime-recomp/**"
+      - "scripts/**"
+      - "patches/**"
+      - "dependencies.lock.json"
       - ".github/workflows/build-android.yml"
   pull_request:
     branches: [android]
@@ -45,8 +53,21 @@ jobs:
 
       - name: Prepare pinned runtime dependencies
         run: |
-          python3 scripts/bootstrap_dependencies.py --only n64-modern-runtime --only rt64
+          python3 scripts/bootstrap_dependencies.py --only dkr-decomp --only n64-modern-runtime --only rt64
           python3 scripts/apply_dependency_patches.py
+
+      - name: Verify ROM-free DKR symbol contexts
+        run: |
+          python3 scripts/generate_dkr_symbol_context.py \
+            --symbols extern/dkr-decomp/ver/symbols/symbol_addrs.us.v77.txt \
+            --policy runtime-recomp/dkr.us.v77.recomp-policy.json \
+            --output build/android-context/v77.toml
+          python3 scripts/generate_dkr_symbol_context.py \
+            --symbols extern/dkr-decomp/ver/symbols/symbol_addrs.us.v80.txt \
+            --policy runtime-recomp/dkr.us.v80.recomp-policy.json \
+            --output build/android-context/v80.toml
+          grep -q 'name = "mainproc"' build/android-context/v77.toml
+          grep -q 'name = "__scMain"' build/android-context/v77.toml
 
       - name: Build RT64 host file_to_c
         run: |
