@@ -3360,6 +3360,26 @@ bool ExportSaveBundleWithDialog() {
 }
 
 bool ImportControllerMappingsWithDialog() {
+#if defined(__ANDROID__)
+    g_controller_mapping_status = "Opening Android file picker...";
+    const bool requested = dkr::android::filedialog::request(
+        dkr::android::filedialog::Kind::ControllerMappings,
+        [](bool ok, const std::string& staged) {
+            if (!ok || staged.empty()) {
+                g_controller_mapping_status = "Controller mapping import cancelled.";
+                return;
+            }
+            dkr::runtime::platform::import_controller_mappings(
+                std::filesystem::u8path(staged), g_controller_mapping_status);
+            std::error_code cleanup;
+            std::filesystem::remove(std::filesystem::u8path(staged), cleanup);
+        });
+    if (!requested) {
+        g_controller_mapping_status =
+            "The Android file picker is busy or unavailable.";
+    }
+    return requested;
+#else
     if (NFD_Init() != NFD_OKAY) {
         g_controller_mapping_status =
             "The system file picker could not be initialized.";
@@ -3381,9 +3401,44 @@ bool ImportControllerMappingsWithDialog() {
     }
     NFD_Quit();
     return imported;
+
+#endif
 }
 
 bool ExportControllerMappingsWithDialog() {
+#if defined(__ANDROID__)
+    std::error_code fs_error;
+    const auto staging_dir = g_config_directory / "export-staging";
+    std::filesystem::create_directories(staging_dir, fs_error);
+    if (fs_error) {
+        g_controller_mapping_status =
+            "Could not create Android export staging directory.";
+        return false;
+    }
+    const auto staging = staging_dir / "dkr-r-controller-mappings.txt";
+    if (!dkr::runtime::platform::export_controller_mappings(
+            staging, g_controller_mapping_status)) {
+        return false;
+    }
+    g_controller_mapping_status =
+        "Choose where to export controller mappings...";
+    const bool requested = dkr::android::filedialog::request_export(
+        dkr::android::filedialog::Kind::ControllerMappingsExport,
+        PathUtf8(staging), "dkr-r-controller-mappings.txt",
+        [staging](bool ok, const std::string&) {
+            g_controller_mapping_status = ok
+                ? "Controller mappings exported successfully."
+                : "Controller mapping export cancelled.";
+            std::error_code cleanup;
+            std::filesystem::remove(staging, cleanup);
+        });
+    if (!requested) {
+        g_controller_mapping_status =
+            "The Android export picker is busy or unavailable.";
+        std::filesystem::remove(staging, fs_error);
+    }
+    return requested;
+#else
     if (NFD_Init() != NFD_OKAY) {
         g_controller_mapping_status =
             "The system file picker could not be initialized.";
@@ -3409,6 +3464,8 @@ bool ExportControllerMappingsWithDialog() {
     }
     NFD_Quit();
     return exported;
+
+#endif
 }
 
 void DrawRaceBadge(const char* label, const ImVec4& color, float width = 0.0F);
