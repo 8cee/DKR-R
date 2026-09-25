@@ -95,16 +95,11 @@ public final class MainActivity extends Activity {
             addButton(content, "Export Controller Pak " + (pak + 1), () -> exportPak(pak));
         }
 
-        Button mods = new Button(this);
-        mods.setText("Check Mod Server");
-        mods.setOnClickListener(v -> ModCatalogClient.fetch(BuildConfig.MOD_SERVER_URL,
-                text -> runOnUiThread(() -> statusView.setText(text)),
-                error -> runOnUiThread(() -> Toast.makeText(this, error, Toast.LENGTH_LONG).show())));
-        content.addView(mods);
+        content.addView(new ModManagerView(this).view());
 
         TextView note = new TextView(this);
         note.setPadding(0, 24, 0, 0);
-        note.setText("The temporary Android host now understands DKR-R Adventure saves, four Controller Paks and DKR-R save bundles. Final checksum-aware Adventure validation will be delegated to the native DKR-R save manager when the full runtime is linked.");
+        note.setText("The Android host supports DKR-R Adventure saves, four Controller Paks, full save bundles, and a catalog-backed mod manager with verified installs. Native DKR-R owns runtime save validation when the full runtime is linked.");
         content.addView(note);
 
         ScrollView scroll = new ScrollView(this);
