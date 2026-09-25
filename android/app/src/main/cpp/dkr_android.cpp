@@ -25,7 +25,6 @@ Java_com_eightcee_dkrrecomp_MainActivity_nativeBootstrap(
         dkr::runtime::saves::configure(files);
         dkr::runtime::support::configure(files);
         dkr::android::lifecycle::set_resumed(true);
-        dkr::android::lifecycle::set_surface_available(true);
         return env->NewStringUTF("ready");
     } catch (const std::exception& e) {
         return env->NewStringUTF(e.what());
@@ -171,7 +170,6 @@ extern "C" int DKRAndroidHostMain(int argc, char** argv) {
         dkr::runtime::support::configure(files_dir);
         dkr::android::install_crash_handler();
         dkr::android::lifecycle::set_resumed(true);
-        dkr::android::lifecycle::set_surface_available(true);
 
 #if DKR_ANDROID_FULL_RUNTIME
         // SDLActivity's argv[1]/argv[2] are Android storage paths, not DKR-R

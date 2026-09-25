@@ -4,8 +4,8 @@
 
 namespace dkr::android::lifecycle {
 namespace {
-std::atomic<bool> g_resumed{true};
-std::atomic<bool> g_surface_available{true};
+std::atomic<bool> g_resumed{false};
+std::atomic<bool> g_surface_available{false};
 }
 
 void set_resumed(bool value) {

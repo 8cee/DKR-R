@@ -56,6 +56,9 @@ public final class DkrSdlActivity extends SDLActivity {
                     nativeSurfaceState(false);
                 }
             });
+            SurfaceHolder holder = mSurface.getHolder();
+            nativeSurfaceState(holder.getSurface() != null
+                    && holder.getSurface().isValid());
         }
     }
 
