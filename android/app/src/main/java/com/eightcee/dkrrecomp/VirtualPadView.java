@@ -44,6 +44,7 @@ final class VirtualPadView extends View {
     private float stickX, stickY;
     private boolean cLeft;
     private boolean visiblePad;
+    private boolean menuMode;
 
     private static final class Control {
         final String label;
@@ -115,6 +116,11 @@ final class VirtualPadView extends View {
         super.onDraw(canvas);
         if (!visiblePad) return;
 
+        if (menuMode) {
+            drawControl(canvas, menu, 0xCC6F7A86);
+            return;
+        }
+
         paint.setStyle(Paint.Style.FILL);
         paint.setColor(0x55101620);
         canvas.drawCircle(stickCx, stickCy, stickRadius, paint);
@@ -152,6 +158,14 @@ final class VirtualPadView extends View {
 
         if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) {
             float x = event.getX(index), y = event.getY(index);
+            if (menuMode) {
+                if (menu.hit(x, y)) {
+                    pointers.put(pointerId, menu);
+                    press(menu, true);
+                    return true;
+                }
+                return false;
+            }
             if (hitStick(x, y) && stickPointer < 0) {
                 stickPointer = pointerId;
                 updateStick(x, y);
@@ -225,7 +239,11 @@ final class VirtualPadView extends View {
             cLeft = pressed;
             publishAxes();
         } else if (c == menu) {
-            if (pressed) ControllerBridge.nativeToggleOverlay();
+            if (pressed) {
+                releaseGameplayControls();
+                menuMode = !menuMode;
+                ControllerBridge.nativeToggleOverlay();
+            }
         } else if (c.keyCode >= 0) {
             ControllerBridge.nativeSetButton(DEVICE_ID, c.keyCode, pressed);
         }
@@ -238,15 +256,29 @@ final class VirtualPadView extends View {
                 DEVICE_ID, stickX, -stickY, rightX, 0f, 0f, 0f);
     }
 
-    private void releaseAll() {
-        for (Control c : new Control[]{a,b,cu,cd,cl,cr,start,menu,z,l,r}) {
-            if (c.pressed) press(c, false);
+    private void releaseGameplayControls() {
+        for (Control c : new Control[]{a,b,cu,cd,cl,cr,start,z,l,r}) {
+            if (c.pressed) {
+                c.pressed = false;
+                if (c == cl) {
+                    cLeft = false;
+                } else if (c.keyCode >= 0) {
+                    ControllerBridge.nativeSetButton(DEVICE_ID, c.keyCode, false);
+                }
+            }
         }
-        pointers.clear();
+        pointers.entrySet().removeIf(entry -> entry.getValue() != menu);
         stickPointer = -1;
         stickX = stickY = 0f;
         cLeft = false;
         ControllerBridge.nativeSetAxis(DEVICE_ID, 0f,0f,0f,0f,0f,0f);
+    }
+
+    private void releaseAll() {
+        releaseGameplayControls();
+        if (menu.pressed) menu.pressed = false;
+        pointers.clear();
+        menuMode = false;
         ControllerBridge.nativeRemoveDevice(DEVICE_ID);
         invalidate();
     }
