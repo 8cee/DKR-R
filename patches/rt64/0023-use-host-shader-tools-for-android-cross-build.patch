@@ -2,7 +2,7 @@ diff --git a/CMakeLists.txt b/CMakeLists.txt
 index a1b2c3d..d5f94e1 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -43,6 +43,21 @@ if (WIN32)
+@@ -43,5 +43,19 @@ if (WIN32)
      configure_file("${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64/dxcompiler.dll" "dxcompiler.dll" COPYONLY)
      configure_file("${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64/dxil.dll" "dxil.dll" COPYONLY)
 +elseif(ANDROID AND CMAKE_HOST_WIN32)
