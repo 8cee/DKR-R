@@ -221,9 +221,9 @@ final class ModManagerView {
                 File archive = ModInstaller.packageArchive(installedDirectory);
                 String activation = CatalogModNative.activate(activity.getFilesDir(), archive, target);
                 activity.runOnUiThread(() -> {
-                    if (activation.startsWith("OK\\n")) {
+                    if (activation.startsWith("OK\n")) {
                         toast(name + ": " + activation.substring(3));
-                    } else if (activation.startsWith("ERR\\n")) {
+                    } else if (activation.startsWith("ERR\n")) {
                         toast(name + " downloaded, but activation failed: " + activation.substring(4));
                     } else {
                         toast(name + ": " + activation);
