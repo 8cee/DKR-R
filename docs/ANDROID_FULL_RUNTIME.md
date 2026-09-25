@@ -1,5 +1,20 @@
 # Full Android runtime build
 
+## Recommended Windows path
+
+For a normal Android build, start directly from your legally obtained DKR US
+v1.0 ROM. No WSL/Ubuntu or separately built N64 ELF is required:
+
+```powershell
+.\scripts\Build-Android-From-Rom.ps1 -RomV77 "C:\path\to\Diddy Kong Racing.z64"
+```
+
+Add `-RomV80` only if Rev A support is wanted in the same APK.
+
+The ROM-direct pipeline uses the pinned DKR decomp's checked-in symbol metadata
+to build an N64Recomp symbol context, then N64Recomp reads the CPU instructions
+from the locally validated ROM. ROM bytes never enter Git or the APK.
+
 The public Android workflow deliberately stays ROM-free. It validates the
 Android/NDK/RT64/N64ModernRuntime integration without embedding Diddy Kong
 Racing game data.

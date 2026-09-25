@@ -1,4 +1,14 @@
-# Generate both Android CPU payloads
+# Generate Android CPU payloads
+
+For the normal Windows Android build, use
+`scripts/Build-Android-From-Rom.ps1`. It generates the required payload
+directly from the validated user-owned ROM plus pinned symbol metadata and does
+not require an N64 ELF.
+
+## Optional development/ELF path
+
+The commands below remain available for decomp/recompiler development when
+matching v77/v80 ELF files have already been prepared.
 
 The full Android runtime needs N64Recomp output for both supported US DKR
 revisions. The ROMs themselves remain local and are never committed or bundled
