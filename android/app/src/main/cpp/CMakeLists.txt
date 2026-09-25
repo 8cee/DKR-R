@@ -45,6 +45,9 @@ set(RT64_HOST_FILE_TO_C "" CACHE FILEPATH "Host file_to_c executable for Android
 option(DKR_ANDROID_BUILD_RT64_PROBE
        "Configure and compile the pinned RT64 renderer in the Android APK build"
        ON)
+option(DKR_ANDROID_BUILD_NMR_PROBE
+       "Configure and compile pinned N64ModernRuntime targets in the Android APK build"
+       ON)
 
 add_library(dkr_android_compat STATIC
     "${ANDROID_COMPAT_DIR}/android_paths.cpp"
@@ -70,6 +73,16 @@ target_include_directories(dkr_runtime_platform_android PRIVATE
     "${sdl2_SOURCE_DIR}/include"
 )
 target_link_libraries(dkr_runtime_platform_android PRIVATE SDL2-static android log)
+
+if(DKR_ANDROID_BUILD_NMR_PROBE)
+    if(NOT EXISTS "${DKR_ANDROID_NMR_DIR}/CMakeLists.txt")
+        message(FATAL_ERROR
+            "Pinned N64ModernRuntime checkout is missing. Run "
+            "scripts/bootstrap_dependencies.py --only n64-modern-runtime first.")
+    endif()
+
+    add_subdirectory("${DKR_ANDROID_NMR_DIR}" "${CMAKE_BINARY_DIR}/n64-modern-runtime-android")
+endif()
 
 if(DKR_ANDROID_BUILD_RT64_PROBE)
     if(NOT EXISTS "${DKR_ANDROID_RT64_DIR}/CMakeLists.txt")
@@ -112,7 +125,17 @@ target_link_libraries(dkr_runtime_portability_probe PRIVATE android log)
 add_library(dkr_android SHARED dkr_android.cpp)
 target_compile_features(dkr_android PRIVATE cxx_std_20)
 target_include_directories(dkr_android PRIVATE "${DKR_RUNTIME_GAME_DIR}")
-target_link_libraries(dkr_android PRIVATE dkr_android_compat dkr_runtime_portability_probe dkr_runtime_platform_android)
+target_link_libraries(dkr_android PRIVATE
+    dkr_android_compat
+    dkr_runtime_portability_probe
+    dkr_runtime_platform_android
+)
+if(DKR_ANDROID_BUILD_NMR_PROBE)
+    target_link_libraries(dkr_android PRIVATE ultramodern librecomp)
+endif()
+if(DKR_ANDROID_BUILD_RT64_PROBE)
+    target_link_libraries(dkr_android PRIVATE rt64)
+endif()
 
 # Match the robust Android packaging used by the DK64 port and Android's
 # modern 16 KiB page-size expectations.
