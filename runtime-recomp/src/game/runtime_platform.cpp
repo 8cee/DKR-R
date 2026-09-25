@@ -306,7 +306,7 @@ dkr::runtime::platform::InputBackend ParseInputBackend(
 }
 
 bool IsSteamDeckHost() {
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__ANDROID__)
     return false;
 #else
     if (const char* deck = std::getenv("SteamDeck");
@@ -344,7 +344,11 @@ std::filesystem::path RuntimeInputHostPath() {
         std::error_code error;
         if (std::filesystem::is_regular_file(candidate, error)) return candidate;
     }
-#if defined(_WIN32)
+#if defined(__ANDROID__)
+    // The desktop SDL3 helper is a separate executable. APKs cannot use that
+    // process model; Android input is supplied in-process.
+    return {};
+#elif defined(_WIN32)
     constexpr const char* kHostName = "DKR-R-InputHost.exe";
 #else
     constexpr const char* kHostName = "DKR-R-InputHost";
