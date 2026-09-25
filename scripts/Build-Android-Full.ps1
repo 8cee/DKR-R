@@ -22,6 +22,15 @@ if (-not [string]::IsNullOrWhiteSpace($GeneratedV80)) {
     $V80 = (Resolve-Path -LiteralPath $GeneratedV80).Path
 }
 
+function Invoke-Checked([string]$Label, [scriptblock]$Command) {
+    Write-Host ""
+    Write-Host "==> $Label" -ForegroundColor Cyan
+    & $Command
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Label failed with exit code $LASTEXITCODE."
+    }
+}
+
 function Resolve-AndroidSdk {
     $candidates = @(
         $env:ANDROID_SDK_ROOT,
@@ -71,15 +80,6 @@ if (-not (Test-Path -LiteralPath $SdkCMake -PathType Leaf)) {
         throw 'CMake was not found. Install Android SDK CMake 3.22.1 or put cmake on PATH.'
     }
     $SdkCMake = $cmakeCommand.Source
-}
-
-function Invoke-Checked([string]$Label, [scriptblock]$Command) {
-    Write-Host ""
-    Write-Host "==> $Label" -ForegroundColor Cyan
-    & $Command
-    if ($LASTEXITCODE -ne 0) {
-        throw "$Label failed with exit code $LASTEXITCODE."
-    }
 }
 
 function Require-GeneratedPayload([string]$Path, [string]$Revision) {
