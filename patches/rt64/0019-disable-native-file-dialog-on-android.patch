@@ -1,0 +1,81 @@
+diff --git a/src/gui/rt64_file_dialog.cpp b/src/gui/rt64_file_dialog.cpp
+index 8ed9961..68c0e55 100644
+--- a/src/gui/rt64_file_dialog.cpp
++++ b/src/gui/rt64_file_dialog.cpp
+@@ -6,7 +6,9 @@
+ 
+ #include <cassert>
+ 
++#if !defined(__ANDROID__)
+ #include <nfd.h>
++#endif
+ 
+ namespace RT64 {
+     // FileDialog
+@@ -14,10 +16,14 @@ namespace RT64 {
+     std::atomic<bool> FileDialog::isOpen = false;
+ 
+     void FileDialog::initialize() {
++#if !defined(__ANDROID__)
+         NFD_Init();
++#endif
+     }
+ 
+     void FileDialog::finish() {
++#if !defined(__ANDROID__)
+         NFD_Quit();
++#endif
+     }
+ 
++#if !defined(__ANDROID__)
+     static std::vector<nfdnfilteritem_t> convertFilters(const std::vector<FileFilter> &filters) {
+         std::vector<nfdnfilteritem_t> nfdFilters;
+         for (const FileFilter &filter : filters) {
+@@ -27,8 +33,12 @@ namespace RT64 {
+ 
+         return nfdFilters;
+     }
++#endif
+ 
+     std::filesystem::path FileDialog::getDirectoryPath() {
++#if defined(__ANDROID__)
++        return {};
++#else
+         isOpen = true;
+ 
+         std::filesystem::path path;
+@@ -41,9 +51,13 @@ namespace RT64 {
+ 
+         isOpen = false;
+         return path;
++#endif
+     }
+ 
+     std::filesystem::path FileDialog::getOpenFilename(const std::vector<FileFilter> &filters) {
++#if defined(__ANDROID__)
++        return {};
++#else
+         isOpen = true;
+         
+         std::filesystem::path path;
+@@ -58,9 +72,13 @@ namespace RT64 {
+ 
+         isOpen = false;
+         return path;
++#endif
+     }
+ 
+     std::filesystem::path FileDialog::getSaveFilename(const std::vector<FileFilter> &filters) {
++#if defined(__ANDROID__)
++        return {};
++#else
+         isOpen = true;
+ 
+         std::filesystem::path path;
+@@ -75,5 +93,6 @@ namespace RT64 {
+ 
+         isOpen = false;
+         return path;
++#endif
+     }
+ };
