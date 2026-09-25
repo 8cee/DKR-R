@@ -249,16 +249,15 @@ public final class DkrSdlActivity extends SDLActivity {
     }
 
     @Override public boolean dispatchKeyEvent(KeyEvent event) {
-        if (ControllerBridge.handleKey(event)) {
-            return true;
-        }
+        // Mirror controller state into DKR-R's Android bridge, but do not
+        // consume the event: SDLActivity must still receive it for launcher
+        // navigation, hotplug/controller bookkeeping and SDL mappings.
+        ControllerBridge.handleKey(event);
         return super.dispatchKeyEvent(event);
     }
 
     @Override public boolean onGenericMotionEvent(MotionEvent event) {
-        if (ControllerBridge.handleMotion(event)) {
-            return true;
-        }
+        ControllerBridge.handleMotion(event);
         return super.onGenericMotionEvent(event);
     }
 
