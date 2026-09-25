@@ -4,9 +4,9 @@
 #include <mutex>
 #include <string>
 
-#include "../../../native/compat/android_paths.hpp"
-#include "../../../native/compat/app_lifecycle.hpp"
-#include "../../../native/compat/crash_handler.hpp"
+#include "android_paths.hpp"
+#include "app_lifecycle.hpp"
+#include "crash_handler.hpp"
 
 namespace {
 std::mutex g_input_mutex;
