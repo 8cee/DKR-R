@@ -22,6 +22,57 @@ if (-not [string]::IsNullOrWhiteSpace($GeneratedV80)) {
     $V80 = (Resolve-Path -LiteralPath $GeneratedV80).Path
 }
 
+function Resolve-AndroidSdk {
+    $candidates = @(
+        $env:ANDROID_SDK_ROOT,
+        $env:ANDROID_HOME,
+        (Join-Path $env:LOCALAPPDATA 'Android\\Sdk')
+    ) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Container) } |
+        Select-Object -Unique
+
+    foreach ($candidate in $candidates) {
+        return (Resolve-Path -LiteralPath $candidate).Path
+    }
+    throw 'Android SDK not found. Install Android Studio/SDK once or set ANDROID_SDK_ROOT.'
+}
+
+$AndroidSdk = Resolve-AndroidSdk
+$env:ANDROID_SDK_ROOT = $AndroidSdk
+$env:ANDROID_HOME = $AndroidSdk
+
+$SdkManagerCandidates = @(
+    (Join-Path $AndroidSdk 'cmdline-tools\\latest\\bin\\sdkmanager.bat'),
+    (Join-Path $AndroidSdk 'cmdline-tools\\bin\\sdkmanager.bat'),
+    (Join-Path $AndroidSdk 'tools\\bin\\sdkmanager.bat')
+)
+$SdkManager = $SdkManagerCandidates |
+    Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+    Select-Object -First 1
+
+if ($SdkManager) {
+    $SdkPackages = @(
+        'platforms;android-35',
+        'build-tools;35.0.0',
+        'ndk;27.2.12479018',
+        'cmake;3.22.1'
+    )
+    Invoke-Checked 'Ensuring Android SDK 35 / NDK 27.2 / CMake 3.22.1 are installed' {
+        & $SdkManager @SdkPackages
+    }
+}
+
+$SdkCMake = Join-Path $AndroidSdk 'cmake\\3.22.1\\bin\\cmake.exe'
+if (-not (Test-Path -LiteralPath $SdkCMake -PathType Leaf)) {
+    $cmakeCommand = Get-Command cmake -ErrorAction SilentlyContinue
+    if (-not $cmakeCommand) {
+        if ($SdkManager) {
+            throw "Android SDK CMake 3.22.1 was requested but was not found at $SdkCMake."
+        }
+        throw 'CMake was not found. Install Android SDK CMake 3.22.1 or put cmake on PATH.'
+    }
+    $SdkCMake = $cmakeCommand.Source
+}
+
 function Invoke-Checked([string]$Label, [scriptblock]$Command) {
     Write-Host ""
     Write-Host "==> $Label" -ForegroundColor Cyan
@@ -71,10 +122,10 @@ Invoke-Checked 'Applying pinned dependency patches' {
 $HostBuild = Join-Path $Root 'build\android-host-file-to-c'
 $Rt64ToolSource = Join-Path $Root 'extern\rt64\src\tools\file_to_c'
 Invoke-Checked 'Configuring RT64 host file_to_c' {
-    & cmake -S $Rt64ToolSource -B $HostBuild -DCMAKE_BUILD_TYPE=Release
+    & $SdkCMake -S $Rt64ToolSource -B $HostBuild -DCMAKE_BUILD_TYPE=Release
 }
 Invoke-Checked 'Building RT64 host file_to_c' {
-    & cmake --build $HostBuild --config Release --parallel
+    & $SdkCMake --build $HostBuild --config Release --parallel
 }
 
 $FileToC = Get-ChildItem -LiteralPath $HostBuild -File -Recurse |
