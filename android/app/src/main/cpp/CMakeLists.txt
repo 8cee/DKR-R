@@ -3,17 +3,19 @@ project(dkr_android LANGUAGES C CXX)
 
 set(ANDROID_COMPAT_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../../native/compat")
 
-add_library(dkr_android SHARED
-    dkr_android.cpp
+add_library(dkr_android_compat STATIC
     "${ANDROID_COMPAT_DIR}/android_paths.cpp"
     "${ANDROID_COMPAT_DIR}/app_lifecycle.cpp"
     "${ANDROID_COMPAT_DIR}/crash_handler.cpp"
     "${ANDROID_COMPAT_DIR}/file_bridge.cpp"
 )
+target_compile_features(dkr_android_compat PRIVATE cxx_std_20)
+target_include_directories(dkr_android_compat PUBLIC "${ANDROID_COMPAT_DIR}")
+target_link_libraries(dkr_android_compat PUBLIC android log)
 
+add_library(dkr_android SHARED dkr_android.cpp)
 target_compile_features(dkr_android PRIVATE cxx_std_20)
-target_include_directories(dkr_android PRIVATE "${ANDROID_COMPAT_DIR}")
-target_link_libraries(dkr_android PRIVATE android log)
+target_link_libraries(dkr_android PRIVATE dkr_android_compat)
 
 # Match the robust Android packaging used by the DK64 port and Android's
 # modern 16 KiB page-size expectations.
