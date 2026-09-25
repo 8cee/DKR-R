@@ -140,30 +140,14 @@ final class ModManagerView {
             ModCompatibility.Verdict removeVerdict = ModCompatibility.canRemove(modsRoot, mod);
             Button remove = new Button(activity);
             remove.setText("Remove");
-            boolean nativeManaged = !installTarget.equals("library");
-            remove.setEnabled(removeVerdict.allowed && !nativeManaged);
-            String removalReason = nativeManaged
-                    ? "Activated content is managed by DKR-R's native Mods / Textures library."
-                    : removeVerdict.reason;
-            if (!removalReason.isEmpty()) remove.setContentDescription(removalReason);
-            remove.setOnClickListener(v -> {
-                ModCompatibility.Verdict latest = ModCompatibility.canRemove(modsRoot, mod);
-                if (!latest.allowed) {
-                    toast(latest.reason);
-                    refreshLocal();
-                    return;
-                }
-                if (ModInstaller.remove(modsRoot, mod)) {
-                    toast(name + " removed.");
-                    refreshLocal();
-                } else {
-                    toast("Could not remove " + name + ".");
-                }
-            });
+            remove.setEnabled(removeVerdict.allowed);
+            if (!removeVerdict.reason.isEmpty()) remove.setContentDescription(removeVerdict.reason);
+            JSONObject installedMetadata = installed;
+            remove.setOnClickListener(v -> removeMod(mod, installedMetadata, remove));
             actions.addView(remove);
-            if (!removeVerdict.allowed || nativeManaged) {
+            if (!removeVerdict.allowed) {
                 TextView removalNote = new TextView(activity);
-                removalNote.setText("Cannot remove here: " + removalReason);
+                removalNote.setText("Cannot remove: " + removeVerdict.reason);
                 removalNote.setPadding(0, 2, 0, 2);
                 root.addView(removalNote);
             }
@@ -219,14 +203,17 @@ final class ModManagerView {
             @Override public void onSuccess(File installedDirectory) {
                 String target = mod.optString("installTarget", "library");
                 File archive = ModInstaller.packageArchive(installedDirectory);
-                String activation = CatalogModNative.activate(activity.getFilesDir(), archive, target);
+                CatalogModNative.Result activation =
+                        CatalogModNative.activate(activity.getFilesDir(), archive, target);
+                if (activation.ok) {
+                    ModInstaller.recordActivation(
+                            installedDirectory, target, activation.nativeId);
+                }
                 activity.runOnUiThread(() -> {
-                    if (activation.startsWith("OK\n")) {
-                        toast(name + ": " + activation.substring(3));
-                    } else if (activation.startsWith("ERR\n")) {
-                        toast(name + " downloaded, but activation failed: " + activation.substring(4));
+                    if (activation.ok) {
+                        toast(name + ": " + activation.message);
                     } else {
-                        toast(name + ": " + activation);
+                        toast(name + " downloaded, but activation failed: " + activation.message);
                     }
                     refreshLocal();
                 });
@@ -240,6 +227,49 @@ final class ModManagerView {
                 });
             }
         });
+    }
+
+    private void removeMod(JSONObject mod, JSONObject installedMetadata, Button button) {
+        ModCompatibility.Verdict verdict = ModCompatibility.canRemove(modsRoot, mod);
+        if (!verdict.allowed) {
+            toast(verdict.reason);
+            refreshLocal();
+            return;
+        }
+
+        String name = mod.optString("name", mod.optString("id", "mod"));
+        String target = installedMetadata.optString(
+                "activatedTarget", mod.optString("installTarget", "library"));
+        String nativeId = installedMetadata.optString("activatedNativeId", "");
+
+        button.setEnabled(false);
+        button.setText("Removing…");
+
+        new Thread(() -> {
+            CatalogModNative.Result deactivation =
+                    CatalogModNative.deactivate(activity.getFilesDir(), target, nativeId);
+            boolean catalogRemoved = false;
+            if (deactivation.ok) {
+                catalogRemoved = ModInstaller.remove(modsRoot, mod);
+            }
+            final boolean removed = catalogRemoved;
+            activity.runOnUiThread(() -> {
+                if (!deactivation.ok) {
+                    button.setEnabled(true);
+                    button.setText("Retry remove");
+                    toast("Could not deactivate " + name + ": " + deactivation.message);
+                    return;
+                }
+                if (!removed) {
+                    button.setEnabled(true);
+                    button.setText("Retry remove");
+                    toast(name + " was deactivated, but its catalog copy could not be removed.");
+                    return;
+                }
+                toast(name + ": " + deactivation.message);
+                refreshLocal();
+            });
+        }, "DKR-CatalogModRemove").start();
     }
 
     private void refreshLocal() {
