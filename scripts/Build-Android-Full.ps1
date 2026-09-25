@@ -119,6 +119,44 @@ Invoke-Checked 'Applying pinned dependency patches' {
     & $Python $patchScript
 }
 
+function Ensure-HostCompiler {
+    if (Get-Command cl.exe -ErrorAction SilentlyContinue) { return }
+    if (Get-Command clang++.exe -ErrorAction SilentlyContinue) { return }
+    if (Get-Command g++.exe -ErrorAction SilentlyContinue) { return }
+
+    $programFilesX86 = [Environment]::GetFolderPath('ProgramFilesX86')
+    $programFiles = [Environment]::GetFolderPath('ProgramFiles')
+    $vswhereCandidates = @(
+        (Join-Path $programFilesX86 'Microsoft Visual Studio\Installer\vswhere.exe'),
+        (Join-Path $programFiles 'Microsoft Visual Studio\Installer\vswhere.exe')
+    ) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) }
+
+    foreach ($vswhere in $vswhereCandidates) {
+        $install = (& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath).Trim()
+        if (-not $install) { continue }
+
+        $devCmd = Join-Path $install 'Common7\Tools\VsDevCmd.bat'
+        if (-not (Test-Path -LiteralPath $devCmd -PathType Leaf)) { continue }
+
+        $command = '""{0}" -no_logo -arch=x64 -host_arch=x64 >nul && set"' -f $devCmd
+        $environment = & cmd.exe /s /c $command
+        if ($LASTEXITCODE -ne 0) { continue }
+
+        foreach ($line in $environment) {
+            $separator = $line.IndexOf('=')
+            if ($separator -le 0) { continue }
+            $name = $line.Substring(0, $separator)
+            $value = $line.Substring($separator + 1)
+            Set-Item -Path "Env:$name" -Value $value
+        }
+        if (Get-Command cl.exe -ErrorAction SilentlyContinue) {
+            Write-Host '[OK] Visual Studio x64 host compiler environment loaded.' -ForegroundColor Green
+            return
+        }
+    }
+
+    throw 'No Windows host C/C++ compiler was found. Install Visual Studio Build Tools with Desktop development with C++, or put clang++/g++ on PATH.'
+}
 function Reset-CMakeGeneratorCache([string]$BuildDirectory) {
     $cache = Join-Path $BuildDirectory 'CMakeCache.txt'
     $files = Join-Path $BuildDirectory 'CMakeFiles'
@@ -130,6 +168,7 @@ function Reset-CMakeGeneratorCache([string]$BuildDirectory) {
     }
 }
 
+Ensure-HostCompiler
 $NinjaCandidates = @(
     (Join-Path (Split-Path -Parent $SdkCMake) 'ninja.exe'),
     (Get-Command ninja -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue)
