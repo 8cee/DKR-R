@@ -1,0 +1,17 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 4c8b8b0..972018a 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -448,8 +448,10 @@ target_link_libraries(rt64 libzstd_static)
+ target_link_libraries(rt64 plume)
+ 
+ # Add tools.
+-add_subdirectory(src/tools/texture_hasher)
+-add_subdirectory(src/tools/texture_packer)
++if (NOT ANDROID)
++    add_subdirectory(src/tools/texture_hasher)
++    add_subdirectory(src/tools/texture_packer)
++endif()
+ 
+ # Add any Apple-specific source files and libraries
+ if (APPLE)

@@ -215,6 +215,10 @@
         {
           "path": "patches/rt64/0021-skip-nfd-link-on-android.patch",
           "sha256": "5622323c727858dc5eac1feaa3bd2b198411414d7ca876c1bfc0ce992daa1bb5"
+        },
+        {
+          "path": "patches/rt64/0022-skip-developer-tools-on-android.patch",
+          "sha256": "bf5dc13eebce80185cc965172975b28236933d1a5d511097b999ede509cbbab8"
         }
       ]
     },
