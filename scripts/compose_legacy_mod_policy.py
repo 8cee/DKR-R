@@ -86,7 +86,7 @@ def elf_functions(path: Path, symbol_types=(2,)) -> dict:
     return result
 
 
-SYMBOL_LINE = re.compile(r"^([A-Za-z_.$][\\w.$]*)\\s*=\\s*(0x[0-9A-Fa-f]+);")
+SYMBOL_LINE = re.compile(r"^([A-Za-z_.$][\w.$]*)\s*=\s*(0x[0-9A-Fa-f]+);")
 CPU_VRAM_BASE = 0x80000400
 CPU_ROM_BASE = 0x1000
 
