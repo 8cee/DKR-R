@@ -1,5 +1,6 @@
 #include "legacy_track_catalog.hpp"
 #include "legacy_mod_process.hpp"
+#include "legacy_track_prepare_job.hpp"
 #include <json/json.hpp>
 #include <algorithm>
 #include <chrono>
@@ -364,14 +365,37 @@ bool TrackCatalog::start(Action action,std::string id,std::vector<std::filesyste
                 if(action==Action::Prepare) {
                     if(!digest(id) || roms.empty() || roms.size()>8)throw Error("Select a saved review and its imported Game Pak first.");
                     ordinary(root_/"reviews");
+#if !defined(__ANDROID__)
                     if(!worker_.is_absolute() || !std::filesystem::is_regular_file(worker_))throw Error("The packaged ModWorker is missing.");
+#endif
                     job=root_/"prepare-jobs"/nonce();
                     if(!std::filesystem::create_directory(job))throw Error("Could not reserve a track preparation job.");
+                    WorkerResult outcome{WorkerOutcome::Completed,0};
+#if defined(__ANDROID__)
+                    const auto report=[&](const Progress& progress) {
+                        if(stop.stop_requested())return false;
+                        if(progress.count>32 || progress.patch>progress.count)
+                            throw Error("Invalid track preparation progress.");
+                        std::lock_guard lock(mutex_);
+                        view_.stage=progress.stage;
+                        view_.completed=progress.patch;
+                        view_.total=progress.count;
+                        publish();
+                        return true;
+                    };
+                    if(characters) {
+                        prepare_imported_characters(
+                            root_/"reviews"/id,roms,job/"content",report);
+                    } else {
+                        prepare_imported_tracks(
+                            root_/"reviews"/id,roms,job/"content",report);
+                    }
+#else
                     json request={{"schema",Schema},{"operation",characters?"prepare-characters":"prepare-tracks"},{"source",path_text(root_/"reviews"/id)},{"roms",json::array()}};
                     for(const auto& path:roms)request["roms"].push_back(path_text(std::filesystem::absolute(path)));
                     write_json(job/"request.json",request);
                     auto next_poll=std::chrono::steady_clock::now();
-                    const auto outcome=run_worker(worker_,job/"request.json",[&] {
+                    outcome=run_worker(worker_,job/"request.json",[&] {
                         if(stop.stop_requested())return false;
                         const auto now=std::chrono::steady_clock::now();if(now<next_poll)return true;next_poll=now+std::chrono::milliseconds(200);
                         const auto path=job/"progress.jsonl";if(!std::filesystem::exists(path))return true;
@@ -383,10 +407,11 @@ bool TrackCatalog::start(Action action,std::string id,std::vector<std::filesyste
                         if(count>32 || patch>count)throw Error("Invalid track preparation progress.");
                         std::lock_guard lock(mutex_);view_.stage=stage;view_.completed=patch;view_.total=count;publish();return true;
                     });
+#endif
                     if(outcome.outcome==WorkerOutcome::Cancelled || stop.stop_requested())throw Error("Preparation cancelled. Enabled tracks and saves were not changed.");
                     if(outcome.outcome!=WorkerOutcome::Completed) {
                         if(std::filesystem::exists(job/"failure.json"))throw Error(field(read_json(job/"failure.json",8192),"error",1024));
-                        throw Error("The isolated track preparation stopped safely or exceeded its time limit.");
+                        throw Error("Track preparation stopped safely or exceeded its time limit.");
                     }
                     const auto receipt=read_file(job/"content"/"prepared.json",MiB);const auto hash=sha256(receipt);
                     const auto incoming=group(job/"content",hash,characters);
