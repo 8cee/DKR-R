@@ -23,6 +23,10 @@ name: Build Android APK
       - dependencies.lock.json
       - .github/workflows/build-android.yml
 
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     name: Android debug APK
