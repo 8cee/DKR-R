@@ -3,6 +3,8 @@
 #include <filesystem>
 #include <string>
 #include <set>
+#include <chrono>
+#include <thread>
 
 #include "android_paths.hpp"
 #include "app_lifecycle.hpp"
@@ -16,6 +18,7 @@
 #include "runtime_ui.hpp"
 #include "custom_tracks.hpp"
 #include "runtime_texture_packs.hpp"
+#include "mods/legacy_mod_library.hpp"
 #endif
 
 extern "C" JNIEXPORT jstring JNICALL
@@ -261,16 +264,19 @@ Java_com_eightcee_dkrrecomp_MainActivity_nativeInspectRom(
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_eightcee_dkrrecomp_CatalogModNative_nativeActivate(
         JNIEnv* env, jclass, jstring targetValue, jstring archiveValue,
-        jstring filesDirValue) {
+        jstring filesDirValue, jstring expectedIdValue) {
     const char* targetRaw = env->GetStringUTFChars(targetValue, nullptr);
     const char* archiveRaw = env->GetStringUTFChars(archiveValue, nullptr);
     const char* filesRaw = env->GetStringUTFChars(filesDirValue, nullptr);
+    const char* expectedRaw = env->GetStringUTFChars(expectedIdValue, nullptr);
     const std::string target = targetRaw ? targetRaw : "";
     const std::filesystem::path archive = archiveRaw ? archiveRaw : "";
     const std::filesystem::path files = filesRaw ? filesRaw : "";
+    const std::string expected_id = expectedRaw ? expectedRaw : "";
     if (targetRaw) env->ReleaseStringUTFChars(targetValue, targetRaw);
     if (archiveRaw) env->ReleaseStringUTFChars(archiveValue, archiveRaw);
     if (filesRaw) env->ReleaseStringUTFChars(filesDirValue, filesRaw);
+    if (expectedRaw) env->ReleaseStringUTFChars(expectedIdValue, expectedRaw);
 
 #if DKR_ANDROID_FULL_RUNTIME
     try {
@@ -341,7 +347,97 @@ Java_com_eightcee_dkrrecomp_CatalogModNative_nativeActivate(
             return env->NewStringUTF(result.c_str());
         }
 
-        return env->NewStringUTF("ERR\nUnsupported catalog activation target.");
+        if (target == "legacy-track" || target == "legacy-character") {
+            const auto root = files / "mods" / "legacy";
+            const auto rom = files / "roms" / "dkr.rom";
+            if (!std::filesystem::is_regular_file(rom)) {
+                return env->NewStringUTF("ERR\n\nSelect a supported DKR ROM before importing a legacy mod.");
+            }
+
+            dkr::mods::ModLibrary library;
+            library.configure(root, {});
+            auto wait_for_idle = [&]() {
+                for (unsigned tick = 0; tick < 3000; ++tick) {
+                    library.tick();
+                    if (!library.snapshot().busy) return true;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                }
+                return false;
+            };
+            if (!wait_for_idle()) {
+                return env->NewStringUTF("ERR\n\nLegacy mod library refresh timed out.");
+            }
+
+            const auto before = library.snapshot();
+            const bool character = target == "legacy-character";
+            std::set<std::string> before_ids;
+            const auto before_catalog = character ? before.characters : before.tracks;
+            if (before_catalog) {
+                for (const auto& item : before_catalog->tracks) before_ids.insert(item.id);
+            }
+
+            if (!library.import_file(archive, {rom})) {
+                return env->NewStringUTF("ERR\n\nLegacy import could not be started.");
+            }
+            if (!wait_for_idle()) {
+                library.cancel();
+                return env->NewStringUTF("ERR\n\nLegacy import timed out.");
+            }
+            const auto imported = library.snapshot();
+            if (!imported.succeeded) {
+                const std::string result = "ERR\n\n" +
+                    (imported.result.empty() ? std::string("Legacy import failed.") : imported.result);
+                return env->NewStringUTF(result.c_str());
+            }
+
+            const auto catalog = character ? imported.characters : imported.tracks;
+            if (!catalog) return env->NewStringUTF("ERR\n\nLegacy import catalogue is unavailable.");
+
+            std::string native_id;
+            if (!expected_id.empty()) {
+                for (const auto& item : catalog->tracks) {
+                    if (item.id == expected_id) {
+                        native_id = expected_id;
+                        break;
+                    }
+                }
+            }
+            if (native_id.empty()) {
+                for (const auto& item : catalog->tracks) {
+                    if (!before_ids.contains(item.id)) {
+                        if (!native_id.empty() && native_id != item.id) {
+                            return env->NewStringUTF("ERR\n\nLegacy package produced multiple new items; install them from DKR-R's Mods / Hacks page.");
+                        }
+                        native_id = item.id;
+                    }
+                }
+            }
+            if (native_id.empty()) {
+                return env->NewStringUTF("ERR\n\nNo new reviewed legacy item was identified.");
+            }
+
+            const auto kind = character
+                ? dkr::mods::TrackCatalog::Kind::Character
+                : dkr::mods::TrackCatalog::Kind::Track;
+            if (!library.set_enabled(kind, native_id, true)) {
+                return env->NewStringUTF("ERR\n\nPrepared legacy item could not be enabled.");
+            }
+            if (!wait_for_idle()) {
+                library.cancel();
+                return env->NewStringUTF("ERR\n\nLegacy activation timed out.");
+            }
+            const auto enabled = library.snapshot();
+            if (!enabled.succeeded) {
+                const std::string result = "ERR\n" + native_id + "\n" +
+                    (enabled.result.empty() ? std::string("Legacy activation failed.") : enabled.result);
+                return env->NewStringUTF(result.c_str());
+            }
+            const std::string result = "OK\n" + native_id + "\n" +
+                (character ? "Legacy character prepared and enabled." : "Legacy track prepared and enabled.");
+            return env->NewStringUTF(result.c_str());
+        }
+
+        return env->NewStringUTF("ERR\n\nUnsupported catalog activation target.");
     } catch (const std::exception& e) {
         const std::string result = std::string("ERR\n") + e.what();
         return env->NewStringUTF(result.c_str());
@@ -350,7 +446,8 @@ Java_com_eightcee_dkrrecomp_CatalogModNative_nativeActivate(
     (void)target;
     (void)archive;
     (void)files;
-    return env->NewStringUTF("ERR\nCatalog activation requires a full-runtime APK.");
+    (void)expected_id;
+    return env->NewStringUTF("ERR\n\nCatalog activation requires a full-runtime APK.");
 #endif
 }
 
@@ -395,6 +492,42 @@ Java_com_eightcee_dkrrecomp_CatalogModNative_nativeDeactivate(
             }
             const std::string result = "OK\n" + native_id + "\n" +
                 (status.empty() ? std::string("Texture pack removed.") : status);
+            return env->NewStringUTF(result.c_str());
+        }
+
+        if (target == "legacy-track" || target == "legacy-character") {
+            dkr::mods::ModLibrary library;
+            library.configure(files / "mods" / "legacy", {});
+            auto wait_for_idle = [&]() {
+                for (unsigned tick = 0; tick < 3000; ++tick) {
+                    library.tick();
+                    if (!library.snapshot().busy) return true;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                }
+                return false;
+            };
+            if (!wait_for_idle()) return env->NewStringUTF("ERR\n\nLegacy mod library refresh timed out.");
+
+            const auto kind = target == "legacy-character"
+                ? dkr::mods::TrackCatalog::Kind::Character
+                : dkr::mods::TrackCatalog::Kind::Track;
+            if (!library.remove(kind, native_id)) {
+                return env->NewStringUTF("ERR\n\nLegacy mod removal could not be started.");
+            }
+            if (!wait_for_idle()) {
+                library.cancel();
+                return env->NewStringUTF("ERR\n\nLegacy mod removal timed out.");
+            }
+            const auto removed = library.snapshot();
+            if (!removed.succeeded) {
+                const std::string result = "ERR\n" + native_id + "\n" +
+                    (removed.result.empty() ? std::string("Legacy mod removal failed.") : removed.result);
+                return env->NewStringUTF(result.c_str());
+            }
+            const std::string result = "OK\n" + native_id + "\n" +
+                (target == "legacy-character"
+                    ? "Legacy character removed from DKR-R's managed library."
+                    : "Legacy track removed from DKR-R's managed library.");
             return env->NewStringUTF(result.c_str());
         }
 
