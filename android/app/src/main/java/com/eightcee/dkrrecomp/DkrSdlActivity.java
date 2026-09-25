@@ -129,7 +129,7 @@ public final class DkrSdlActivity extends SDLActivity {
             try {
                 Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
                 intent.addCategory(Intent.CATEGORY_OPENABLE);
-                intent.setType("application/octet-stream");
+                intent.setType(kind == 23 ? "text/plain" : "application/octet-stream");
                 intent.putExtra(Intent.EXTRA_TITLE,
                         suggestedName == null || suggestedName.isEmpty()
                                 ? "dkr-r-export.bin" : suggestedName);

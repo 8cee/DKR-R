@@ -4389,8 +4389,22 @@ void DrawSupportSummary(float width) {
         std::string error;
         if (dkr::runtime::support::export_report(BuildSupportReport(), output,
                                                  error)) {
+#if defined(__ANDROID__)
+            const std::string source = output.string();
+            const std::string suggested = output.filename().string();
+            g_support_action_status = "Choose where to save the support summary...";
+            dkr::android::filedialog::request_export(
+                dkr::android::filedialog::Kind::SupportReportExport,
+                source, suggested,
+                [](bool ok, const std::string&) {
+                    g_support_action_status = ok
+                        ? "Support summary exported successfully."
+                        : "Support summary export cancelled or failed.";
+                });
+#else
             g_support_action_status =
                 "Support summary exported to the DKR-R support-reports folder.";
+#endif
         } else {
             g_support_action_status = error;
         }

@@ -17,6 +17,7 @@ enum class Kind {
     AdventureSaveExport = 20,
     SaveBundleExport = 21,
     ControllerMappingsExport = 22,
+    SupportReportExport = 23,
 };
 
 using Callback = std::function<void(bool ok, const std::string& staged_path)>;
