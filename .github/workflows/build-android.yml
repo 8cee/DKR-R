@@ -106,10 +106,10 @@ jobs:
           test -f "$APK"
           unzip -l "$APK" | grep 'lib/arm64-v8a/libdkr_android.so'
           unzip -p "$APK" lib/arm64-v8a/libdkr_android.so > build/libdkr_android.so
-          llvm-nm -D build/libdkr_android.so | grep 'Java_com_eightcee_dkrrecomp_MainActivity_nativeBridgeInit'
-          llvm-nm -D build/libdkr_android.so | grep 'Java_com_eightcee_dkrrecomp_MainActivity_nativeOnFilePicked'
-          llvm-nm -D build/libdkr_android.so | grep 'Java_com_eightcee_dkrrecomp_DkrSdlActivity_nativeBridgeInit'
-          llvm-nm -D build/libdkr_android.so | grep 'Java_com_eightcee_dkrrecomp_DkrSdlActivity_nativeOnFilePicked'
+          nm -D build/libdkr_android.so | grep 'Java_com_eightcee_dkrrecomp_MainActivity_nativeBridgeInit'
+          nm -D build/libdkr_android.so | grep 'Java_com_eightcee_dkrrecomp_MainActivity_nativeOnFilePicked'
+          nm -D build/libdkr_android.so | grep 'Java_com_eightcee_dkrrecomp_DkrSdlActivity_nativeBridgeInit'
+          nm -D build/libdkr_android.so | grep 'Java_com_eightcee_dkrrecomp_DkrSdlActivity_nativeOnFilePicked'
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
