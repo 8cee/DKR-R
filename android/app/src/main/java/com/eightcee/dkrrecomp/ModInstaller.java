@@ -193,12 +193,46 @@ final class ModInstaller {
             JSONObject metadata = readMetadata(metadataFile);
             if (metadata == null) return false;
             metadata.put("activatedTarget", target == null ? "library" : target);
+            metadata.put("activatedVersion", metadata.optString("version", ""));
+            metadata.remove("activationError");
             if (nativeId == null || nativeId.isEmpty()) metadata.remove("activatedNativeId");
             else metadata.put("activatedNativeId", nativeId);
-            try (FileOutputStream out = new FileOutputStream(metadataFile)) {
-                out.write(metadata.toString(2).getBytes(StandardCharsets.UTF_8));
-                out.getFD().sync();
+            return writeMetadata(metadataFile, metadata);
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    static boolean recordActivationFailure(File installedDirectory, JSONObject previous, String error) {
+        try {
+            File metadataFile = new File(installedDirectory, "mod.json");
+            JSONObject metadata = readMetadata(metadataFile);
+            if (metadata == null) return false;
+            metadata.put("activationError", error == null ? "Activation failed." : error);
+            if (previous != null) {
+                String oldTarget = previous.optString("activatedTarget", "library");
+                String oldId = previous.optString("activatedNativeId", "");
+                String oldVersion = previous.optString(
+                        "activatedVersion", previous.optString("version", ""));
+                metadata.put("activatedTarget", oldTarget);
+                metadata.put("activatedVersion", oldVersion);
+                if (oldId.isEmpty()) metadata.remove("activatedNativeId");
+                else metadata.put("activatedNativeId", oldId);
+            } else {
+                metadata.remove("activatedTarget");
+                metadata.remove("activatedVersion");
+                metadata.remove("activatedNativeId");
             }
+            return writeMetadata(metadataFile, metadata);
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private static boolean writeMetadata(File metadataFile, JSONObject metadata) {
+        try (FileOutputStream out = new FileOutputStream(metadataFile)) {
+            out.write(metadata.toString(2).getBytes(StandardCharsets.UTF_8));
+            out.getFD().sync();
             return true;
         } catch (Exception ignored) {
             return false;
