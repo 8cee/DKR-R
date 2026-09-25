@@ -5,6 +5,7 @@
 #include <csignal>
 #include <cstdlib>
 #include <exception>
+#include <initializer_list>
 
 namespace {
 void signal_handler(int signal_number) {
