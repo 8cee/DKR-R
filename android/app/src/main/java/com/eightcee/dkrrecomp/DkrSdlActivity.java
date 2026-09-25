@@ -3,6 +3,8 @@ package com.eightcee.dkrrecomp;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
+import android.database.Cursor;
+import android.provider.OpenableColumns;
 import android.util.Log;
 import android.view.SurfaceHolder;
 
@@ -125,22 +127,28 @@ public final class DkrSdlActivity extends SDLActivity {
         }
     }
 
+    private String displayName(Uri uri) {
+        try (Cursor cursor = getContentResolver().query(
+                uri, new String[]{OpenableColumns.DISPLAY_NAME},
+                null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                String name = cursor.getString(0);
+                if (name != null && !name.isEmpty()) return name;
+            }
+        } catch (Throwable ignored) {
+        }
+        return "selection.dat";
+    }
+
     private String stageSelection(Uri uri, int kind) throws Exception {
         File inbox = new File(getCacheDir(), "saf-inbox");
         if (!inbox.exists() && !inbox.mkdirs()) {
             throw new IllegalStateException("Could not create SAF staging directory.");
         }
-        String extension;
-        switch (kind) {
-            case 0: extension = ".rom"; break;
-            case 1: extension = ".bin"; break;
-            case 2: extension = ".dkrsave"; break;
-            case 3: extension = ".mpk"; break;
-            case 4: extension = ".zip"; break;
-            default: extension = ".dat"; break;
-        }
+        String name = displayName(uri).replaceAll("[^A-Za-z0-9._-]", "_");
+        if (name.length() > 120) name = name.substring(name.length() - 120);
         File staged = new File(inbox,
-                "picked-" + System.currentTimeMillis() + "-" + kind + extension);
+                "picked-" + System.currentTimeMillis() + "-" + kind + "-" + name);
         try (InputStream in = getContentResolver().openInputStream(uri);
              FileOutputStream out = new FileOutputStream(staged)) {
             if (in == null) throw new IllegalStateException("Could not open selected file.");
