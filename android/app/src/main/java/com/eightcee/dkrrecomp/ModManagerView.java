@@ -197,6 +197,7 @@ final class ModManagerView {
         }
 
         final String name = mod.optString("name", mod.optString("id", "mod"));
+        final JSONObject previousInstall = ModInstaller.installedMetadata(modsRoot, mod);
         button.setEnabled(false);
         button.setText("Installing…");
         ModInstaller.install(modsRoot, mod, new ModInstaller.Callback() {
@@ -208,6 +209,16 @@ final class ModManagerView {
                 if (activation.ok) {
                     ModInstaller.recordActivation(
                             installedDirectory, target, activation.nativeId);
+                    if (previousInstall != null) {
+                        String previousTarget = previousInstall.optString("activatedTarget", "library");
+                        String previousId = previousInstall.optString("activatedNativeId", "");
+                        if (!previousId.isEmpty() &&
+                                previousTarget.equals(target) &&
+                                !previousId.equals(activation.nativeId)) {
+                            CatalogModNative.deactivate(
+                                    activity.getFilesDir(), previousTarget, previousId);
+                        }
+                    }
                 }
                 activity.runOnUiThread(() -> {
                     if (activation.ok) {
@@ -246,8 +257,14 @@ final class ModManagerView {
         button.setText("Removing…");
 
         new Thread(() -> {
-            CatalogModNative.Result deactivation =
-                    CatalogModNative.deactivate(activity.getFilesDir(), target, nativeId);
+            CatalogModNative.Result deactivation;
+            if (!target.equals("library") && nativeId.isEmpty()) {
+                deactivation = new CatalogModNative.Result(
+                        true, "", "Unactivated catalog package removed.");
+            } else {
+                deactivation = CatalogModNative.deactivate(
+                        activity.getFilesDir(), target, nativeId);
+            }
             boolean catalogRemoved = false;
             if (deactivation.ok) {
                 catalogRemoved = ModInstaller.remove(modsRoot, mod);
