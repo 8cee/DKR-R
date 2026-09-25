@@ -7,19 +7,23 @@ import android.view.MotionEvent;
 final class ControllerBridge {
     private ControllerBridge() {}
 
-    static native void nativeSetButton(int keyCode, boolean pressed);
-    static native void nativeSetAxis(float lx, float ly, float rx, float ry, float lt, float rt);
+    static native void nativeSetButton(int deviceId, int keyCode, boolean pressed);
+    static native void nativeSetAxis(
+            int deviceId, float lx, float ly, float rx, float ry, float lt, float rt);
 
     static boolean handleKey(KeyEvent event) {
         if ((event.getSource() & InputDevice.SOURCE_GAMEPAD) == 0 &&
             (event.getSource() & InputDevice.SOURCE_JOYSTICK) == 0) return false;
-        nativeSetButton(event.getKeyCode(), event.getAction() != KeyEvent.ACTION_UP);
+        nativeSetButton(
+                event.getDeviceId(), event.getKeyCode(),
+                event.getAction() != KeyEvent.ACTION_UP);
         return true;
     }
 
     static boolean handleMotion(MotionEvent event) {
         if ((event.getSource() & InputDevice.SOURCE_JOYSTICK) == 0) return false;
         nativeSetAxis(
+                event.getDeviceId(),
                 axis(event, MotionEvent.AXIS_X),
                 axis(event, MotionEvent.AXIS_Y),
                 axis(event, MotionEvent.AXIS_Z),

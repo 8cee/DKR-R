@@ -2186,23 +2186,23 @@ void dkr::runtime::platform::poll_input() {
     // Until the SDL/RT64 Android host is fully linked, Android's Activity feeds
     // physical gamepad state through the native bridge. Publish it using the
     // same N64 button/stick representation consumed by the rest of DKR-R.
-    const auto state = dkr::runtime::android_input::sample();
-    g_physical_buttons[0].store(state.buttons, std::memory_order_release);
-    g_physical_stick_x[0].store(state.stick_x, std::memory_order_release);
-    g_physical_stick_y[0].store(state.stick_y, std::memory_order_release);
-    if (!g_online_input_routing.load(std::memory_order_acquire)) {
-        g_buttons[0].store(state.buttons, std::memory_order_release);
-        g_stick_x[0].store(state.stick_x, std::memory_order_release);
-        g_stick_y[0].store(state.stick_y, std::memory_order_release);
-    }
-    for (std::size_t player = 1; player < kControllerCount; ++player) {
-        g_physical_buttons[player].store(0, std::memory_order_release);
-        g_physical_stick_x[player].store(0.0F, std::memory_order_release);
-        g_physical_stick_y[player].store(0.0F, std::memory_order_release);
-        if (!g_online_input_routing.load(std::memory_order_acquire)) {
-            g_buttons[player].store(0, std::memory_order_release);
-            g_stick_x[player].store(0.0F, std::memory_order_release);
-            g_stick_y[player].store(0.0F, std::memory_order_release);
+    const bool online_routing =
+        g_online_input_routing.load(std::memory_order_acquire);
+    for (std::size_t player = 0; player < kControllerCount; ++player) {
+        const auto state = dkr::runtime::android_input::sample(player);
+        g_physical_buttons[player].store(
+            state.buttons, std::memory_order_release);
+        g_physical_stick_x[player].store(
+            state.stick_x, std::memory_order_release);
+        g_physical_stick_y[player].store(
+            state.stick_y, std::memory_order_release);
+        if (!online_routing) {
+            g_buttons[player].store(
+                state.buttons, std::memory_order_release);
+            g_stick_x[player].store(
+                state.stick_x, std::memory_order_release);
+            g_stick_y[player].store(
+                state.stick_y, std::memory_order_release);
         }
     }
     return;

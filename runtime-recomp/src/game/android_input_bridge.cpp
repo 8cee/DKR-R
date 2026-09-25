@@ -40,13 +40,36 @@ constexpr int kKeyButtonR2 = 105;
 constexpr int kKeyButtonStart = 108;
 
 std::mutex g_mutex;
-std::array<bool, 512> g_keys{};
-float g_left_x = 0.0F;
-float g_left_y = 0.0F;
-float g_right_x = 0.0F;
-float g_right_y = 0.0F;
-float g_left_trigger = 0.0F;
-float g_right_trigger = 0.0F;
+constexpr std::size_t kControllerCount = 4;
+
+struct ControllerState {
+    int device_id = -1;
+    std::array<bool, 512> keys{};
+    float left_x = 0.0F;
+    float left_y = 0.0F;
+    float right_x = 0.0F;
+    float right_y = 0.0F;
+    float left_trigger = 0.0F;
+    float right_trigger = 0.0F;
+};
+
+std::array<ControllerState, kControllerCount> g_controllers{};
+
+ControllerState* controller_for_device(int device_id, bool create) {
+    if (device_id < 0) return nullptr;
+    for (auto& controller : g_controllers) {
+        if (controller.device_id == device_id) return &controller;
+    }
+    if (!create) return nullptr;
+    for (auto& controller : g_controllers) {
+        if (controller.device_id < 0) {
+            controller = {};
+            controller.device_id = device_id;
+            return &controller;
+        }
+    }
+    return nullptr;
+}
 
 float shaped(float value) {
     constexpr float deadzone = 0.14F;
@@ -57,73 +80,79 @@ float shaped(float value) {
     return std::copysign(std::clamp(normalized, 0.0F, 1.0F), value);
 }
 
-bool key(int code) {
-    return code >= 0 && code < static_cast<int>(g_keys.size()) &&
-           g_keys[static_cast<std::size_t>(code)];
+bool key(const ControllerState& controller, int code) {
+    return code >= 0 &&
+           code < static_cast<int>(controller.keys.size()) &&
+           controller.keys[static_cast<std::size_t>(code)];
 }
 
 } // namespace
 
-void set_key(int android_key_code, bool pressed) {
-    if (android_key_code < 0 ||
-        android_key_code >= static_cast<int>(g_keys.size())) return;
+void set_key(int device_id, int android_key_code, bool pressed) {
+    if (android_key_code < 0 || android_key_code >= 512) return;
     std::scoped_lock lock(g_mutex);
-    g_keys[static_cast<std::size_t>(android_key_code)] = pressed;
+    ControllerState* controller = controller_for_device(device_id, true);
+    if (controller == nullptr) return;
+    controller->keys[static_cast<std::size_t>(android_key_code)] = pressed;
 }
 
-void set_axes(float left_x, float left_y, float right_x, float right_y,
+void set_axes(int device_id, float left_x, float left_y,
+              float right_x, float right_y,
               float left_trigger, float right_trigger) {
     std::scoped_lock lock(g_mutex);
-    g_left_x = left_x;
-    g_left_y = left_y;
-    g_right_x = right_x;
-    g_right_y = right_y;
-    g_left_trigger = std::clamp(left_trigger, 0.0F, 1.0F);
-    g_right_trigger = std::clamp(right_trigger, 0.0F, 1.0F);
+    ControllerState* controller = controller_for_device(device_id, true);
+    if (controller == nullptr) return;
+    controller->left_x = left_x;
+    controller->left_y = left_y;
+    controller->right_x = right_x;
+    controller->right_y = right_y;
+    controller->left_trigger = std::clamp(left_trigger, 0.0F, 1.0F);
+    controller->right_trigger = std::clamp(right_trigger, 0.0F, 1.0F);
 }
 
 void clear() {
     std::scoped_lock lock(g_mutex);
-    g_keys.fill(false);
-    g_left_x = g_left_y = g_right_x = g_right_y = 0.0F;
-    g_left_trigger = g_right_trigger = 0.0F;
+    g_controllers = {};
 }
 
-Sample sample() {
+Sample sample(std::size_t player) {
     std::scoped_lock lock(g_mutex);
     Sample out{};
+    if (player >= g_controllers.size()) return out;
+    const ControllerState& controller = g_controllers[player];
+    if (controller.device_id < 0) return out;
 
-    // Match DKR-R's default SDL controller policy.
-    if (key(kKeyButtonA)) out.buttons |= kButtonA;
-    if (key(kKeyButtonX)) out.buttons |= kButtonB;
-    if (key(kKeyButtonStart)) out.buttons |= kButtonStart;
-    if (key(kKeyDpadUp)) out.buttons |= kDpadUp;
-    if (key(kKeyDpadDown)) out.buttons |= kDpadDown;
-    if (key(kKeyDpadLeft)) out.buttons |= kDpadLeft;
-    if (key(kKeyDpadRight)) out.buttons |= kDpadRight;
-    if (key(kKeyButtonL1)) out.buttons |= kButtonL;
-    if (key(kKeyButtonR1)) out.buttons |= kButtonR;
+    if (key(controller, kKeyButtonA)) out.buttons |= kButtonA;
+    if (key(controller, kKeyButtonX)) out.buttons |= kButtonB;
+    if (key(controller, kKeyButtonStart)) out.buttons |= kButtonStart;
+    if (key(controller, kKeyDpadUp)) out.buttons |= kDpadUp;
+    if (key(controller, kKeyDpadDown)) out.buttons |= kDpadDown;
+    if (key(controller, kKeyDpadLeft)) out.buttons |= kDpadLeft;
+    if (key(controller, kKeyDpadRight)) out.buttons |= kDpadRight;
+    if (key(controller, kKeyButtonL1)) out.buttons |= kButtonL;
+    if (key(controller, kKeyButtonR1)) out.buttons |= kButtonR;
 
-    // DKR-R desktop defaults map Z to the left trigger. Keep L2 key fallback
-    // for controllers that expose digital trigger buttons instead of axes.
-    if (g_left_trigger > 0.50F || key(kKeyButtonL2)) out.buttons |= kButtonZ;
+    if (controller.left_trigger > 0.50F ||
+        key(controller, kKeyButtonL2)) {
+        out.buttons |= kButtonZ;
+    }
 
-    const float rx = shaped(g_right_x);
-    const float ry = shaped(g_right_y);
+    const float rx = shaped(controller.right_x);
+    const float ry = shaped(controller.right_y);
     if (ry < -0.50F) out.buttons |= kCUp;
     if (ry > 0.50F) out.buttons |= kCDown;
     if (rx < -0.50F) out.buttons |= kCLeft;
     if (rx > 0.50F) out.buttons |= kCRight;
 
-    // Face-button fallbacks make controllers without a useful right stick
-    // practical on phones/handhelds without changing the primary mapping.
-    if (key(kKeyButtonY)) out.buttons |= kCUp;
-    if (key(kKeyButtonB)) out.buttons |= kCRight;
-    if (key(kKeyButtonR2) || g_right_trigger > 0.50F) out.buttons |= kCDown;
+    if (key(controller, kKeyButtonY)) out.buttons |= kCUp;
+    if (key(controller, kKeyButtonB)) out.buttons |= kCRight;
+    if (key(controller, kKeyButtonR2) ||
+        controller.right_trigger > 0.50F) {
+        out.buttons |= kCDown;
+    }
 
-    out.stick_x = shaped(g_left_x);
-    // Android joystick Y is negative upward; DKR-R expects positive upward.
-    out.stick_y = -shaped(g_left_y);
+    out.stick_x = shaped(controller.left_x);
+    out.stick_y = -shaped(controller.left_y);
     return out;
 }
 

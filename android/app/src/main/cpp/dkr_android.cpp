@@ -48,16 +48,19 @@ Java_com_eightcee_dkrrecomp_MainActivity_nativeSetResumed(
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_eightcee_dkrrecomp_ControllerBridge_nativeSetButton(
-        JNIEnv*, jclass, jint key, jboolean pressed) {
+        JNIEnv*, jclass, jint device, jint key, jboolean pressed) {
     dkr::runtime::android_input::set_key(
-        static_cast<int>(key), pressed == JNI_TRUE);
+        static_cast<int>(device), static_cast<int>(key),
+        pressed == JNI_TRUE);
 }
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_eightcee_dkrrecomp_ControllerBridge_nativeSetAxis(
-        JNIEnv*, jclass, jfloat lx, jfloat ly, jfloat rx, jfloat ry,
+        JNIEnv*, jclass, jint device,
+        jfloat lx, jfloat ly, jfloat rx, jfloat ry,
         jfloat lt, jfloat rt) {
-    dkr::runtime::android_input::set_axes(lx, ly, rx, ry, lt, rt);
+    dkr::runtime::android_input::set_axes(
+        static_cast<int>(device), lx, ly, rx, ry, lt, rt);
 }
 
 
