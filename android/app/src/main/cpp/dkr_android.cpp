@@ -155,3 +155,20 @@ Java_com_eightcee_dkrrecomp_MainActivity_nativeInputStatus(JNIEnv* env, jclass) 
                   static_cast<double>(sample.stick_y));
     return env->NewStringUTF(buffer);
 }
+
+
+extern "C" int DKRAndroidHostMain(int argc, char** argv) {
+    try {
+        if (argc > 1 && argv != nullptr && argv[1] != nullptr) {
+            dkr::android::configure_paths(argv[1]);
+            dkr::runtime::saves::configure(argv[1]);
+            dkr::runtime::support::configure(argv[1]);
+        }
+        dkr::android::install_crash_handler();
+        dkr::android::lifecycle::set_resumed(true);
+        dkr::android::lifecycle::set_surface_available(true);
+        return 0;
+    } catch (...) {
+        return 1;
+    }
+}
