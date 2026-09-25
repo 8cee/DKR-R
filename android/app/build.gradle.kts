@@ -1,9 +1,10 @@
-val dkrFullRuntime = System.getenv("DKR_ANDROID_FULL_RUNTIME").let {
-    it == "1" || it.equals("true", ignoreCase = true)
-}
-
 plugins {
     id("com.android.application")
+}
+
+
+val dkrFullRuntime = System.getenv("DKR_ANDROID_FULL_RUNTIME").let {
+    it == "1" || it.equals("true", ignoreCase = true)
 }
 
 android {
