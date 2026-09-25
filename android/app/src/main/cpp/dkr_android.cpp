@@ -150,7 +150,7 @@ Java_com_eightcee_dkrrecomp_MainActivity_nativeExportSaveFile(
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_eightcee_dkrrecomp_MainActivity_nativeInputStatus(JNIEnv* env, jclass) {
-    const auto sample = dkr::runtime::android_input::sample();
+    const auto sample = dkr::runtime::android_input::sample(0);
     char buffer[160]{};
     std::snprintf(buffer, sizeof(buffer),
                   "N64 input buttons=0x%04X stick=(%.2f, %.2f)",
