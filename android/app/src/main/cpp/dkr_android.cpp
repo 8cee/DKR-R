@@ -7,6 +7,8 @@
 #include "android_paths.hpp"
 #include "app_lifecycle.hpp"
 #include "crash_handler.hpp"
+#include "save_manager.hpp"
+#include "runtime_support.hpp"
 
 namespace {
 std::mutex g_input_mutex;
@@ -24,6 +26,8 @@ Java_com_eightcee_dkrrecomp_MainActivity_nativeBootstrap(
     try {
         dkr::android::install_crash_handler();
         dkr::android::configure_paths(files);
+        dkr::runtime::saves::configure(files);
+        dkr::runtime::support::configure(files);
         dkr::android::lifecycle::set_resumed(true);
         dkr::android::lifecycle::set_surface_available(true);
         return env->NewStringUTF("ready");
@@ -34,7 +38,7 @@ Java_com_eightcee_dkrrecomp_MainActivity_nativeBootstrap(
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_eightcee_dkrrecomp_MainActivity_nativeVersion(JNIEnv* env, jclass) {
-    return env->NewStringUTF("dkr-android-bootstrap/0.3");
+    return env->NewStringUTF("dkr-android-bootstrap/0.4");
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -57,4 +61,26 @@ Java_com_eightcee_dkrrecomp_ControllerBridge_nativeSetAxis(
         jfloat lt, jfloat rt) {
     std::scoped_lock lock(g_input_mutex);
     g_axes = {lx, ly, rx, ry, lt, rt};
+}
+
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_eightcee_dkrrecomp_MainActivity_nativeSaveStatus(JNIEnv* env, jclass) {
+    const auto info = dkr::runtime::saves::adventure_info();
+    std::string status = "Native save manager: ";
+    if (!info.exists) {
+        status += "no Adventure save yet";
+    } else if (!info.valid) {
+        status += "Adventure save exists but is invalid";
+    } else {
+        status += "Adventure save valid (" + std::to_string(info.size) + " bytes)";
+    }
+
+    int valid_paks = 0;
+    for (int channel = 0; channel < dkr::runtime::saves::kControllerPakCount; ++channel) {
+        const auto pak = dkr::runtime::saves::controller_pak_info(channel);
+        if (pak.exists && pak.valid) ++valid_paks;
+    }
+    status += "; valid Controller Paks: " + std::to_string(valid_paks);
+    return env->NewStringUTF(status.c_str());
 }

@@ -28,6 +28,7 @@ target_link_libraries(dkr_runtime_portability_probe PRIVATE android log)
 
 add_library(dkr_android SHARED dkr_android.cpp)
 target_compile_features(dkr_android PRIVATE cxx_std_20)
+target_include_directories(dkr_android PRIVATE "${DKR_RUNTIME_GAME_DIR}")
 target_link_libraries(dkr_android PRIVATE dkr_android_compat dkr_runtime_portability_probe)
 
 # Match the robust Android packaging used by the DK64 port and Android's

@@ -38,6 +38,7 @@ public final class MainActivity extends Activity {
     private static native void nativeSetResumed(boolean resumed);
     private static native void nativeBridgeInit();
     private static native void nativeOnFilePicked(int kind, boolean ok, String stagedPath);
+    private static native String nativeSaveStatus();
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
