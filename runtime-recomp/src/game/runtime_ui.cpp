@@ -2723,6 +2723,67 @@ bool SelectRomWithDialog(std::filesystem::path& selected,
 }
 
 bool ImportCrtFilterWithDialog() {
+#if defined(__ANDROID__)
+    constexpr std::size_t maximum_crt_filters = 63;
+    if (g_crt_filters.size() >= maximum_crt_filters) {
+        g_crt_status =
+            "The CRT filter library is full. Remove a custom filter first.";
+        return false;
+    }
+    g_crt_status = "Opening Android file picker...";
+    const bool requested = dkr::android::filedialog::request(
+        dkr::android::filedialog::Kind::CrtFilter,
+        [](bool ok, const std::string& staged) {
+            if (!ok || staged.empty()) {
+                g_crt_status = "CRT filter import cancelled.";
+                return;
+            }
+            const std::filesystem::path source = std::filesystem::u8path(staged);
+            std::error_code error;
+            constexpr std::uintmax_t maximum_filter_bytes = 64U * 1024U * 1024U;
+            const std::uintmax_t size = std::filesystem::file_size(source, error);
+            if (error || size == 0 || size > maximum_filter_bytes) {
+                g_crt_status = "Choose a valid PNG filter no larger than 64 MB.";
+                return;
+            }
+            const auto custom_directory = g_config_directory / "filters";
+            std::filesystem::create_directories(custom_directory, error);
+            if (error) {
+                g_crt_status = "The custom filter folder could not be created.";
+                return;
+            }
+            std::string stem = source.stem().string();
+            if (stem.empty()) stem = "custom-filter";
+            std::filesystem::path destination = custom_directory / (stem + ".png");
+            for (int suffix = 2;
+                 std::filesystem::exists(destination, error) && suffix < 1000;
+                 ++suffix) {
+                destination = custom_directory /
+                    (stem + "-" + std::to_string(suffix) + ".png");
+            }
+            std::filesystem::copy_file(
+                source, destination, std::filesystem::copy_options::none, error);
+            if (error) {
+                g_crt_status = "The custom filter could not be imported: " + error.message();
+                return;
+            }
+            RefreshCrtFilters();
+            for (std::size_t index = 0; index < g_crt_filters.size(); ++index) {
+                if (g_crt_filters[index].path == destination) {
+                    g_crt_filter_index = static_cast<int>(index);
+                    break;
+                }
+            }
+            g_crt_enabled = true;
+            g_crt_status = "Imported " + destination.filename().string() + ".";
+            SaveSettings();
+            std::filesystem::remove(source, error);
+        });
+    if (!requested) {
+        g_crt_status = "The Android file picker is busy or unavailable.";
+    }
+    return requested;
+#else
     // The Vulkan Inspector pool reserves one descriptor for the font atlas and
     // provides 63 image descriptors. Six are used by the built-in masks, so
     // cap the imported catalogue before a live session can exhaust the pool.
@@ -2789,6 +2850,8 @@ bool ImportCrtFilterWithDialog() {
     g_crt_status = "Imported " + destination.filename().string() + ".";
     SaveSettings();
     return true;
+
+#endif
 }
 
 bool TexturePackImportRunning() {
@@ -2955,6 +3018,25 @@ bool PickFolder(std::filesystem::path& chosen, std::string& error) {
 }
 
 bool ImportTexturePackWithDialog() {
+#if defined(__ANDROID__)
+    if (TexturePackImportRunning()) return false;
+    g_texture_pack_status = "Opening Android file picker...";
+    const bool requested = dkr::android::filedialog::request(
+        dkr::android::filedialog::Kind::TexturePack,
+        [](bool ok, const std::string& staged) {
+            if (!ok || staged.empty()) {
+                g_texture_pack_status = "Texture-pack selection cancelled.";
+                return;
+            }
+            if (!StartTexturePackImport(std::filesystem::u8path(staged))) {
+                g_texture_pack_status = "Texture-pack import is already running.";
+            }
+        });
+    if (!requested) {
+        g_texture_pack_status = "The Android file picker is busy or unavailable.";
+    }
+    return requested;
+#else
     if (TexturePackImportRunning()) return false;
     return StartDialogJob([]() -> std::function<void()> {
         if (NFD_Init() != NFD_OKAY) {
@@ -2985,9 +3067,34 @@ bool ImportTexturePackWithDialog() {
         }
         return [source] { StartTexturePackImport(source); };
     });
+
+#endif
 }
 
 void ImportLegacyModWithDialog() {
+#if defined(__ANDROID__)
+    if (g_legacy_imports.snapshot().busy) return;
+    g_legacy_import_status = "Opening Android file picker...";
+    const bool requested = dkr::android::filedialog::request(
+        dkr::android::filedialog::Kind::ModPackage,
+        [](bool ok, const std::string& staged) {
+            if (!ok || staged.empty()) {
+                g_legacy_import_status = "Mod selection cancelled.";
+                return;
+            }
+            std::vector<std::filesystem::path> roms;
+            for (const auto& entry : LoadRomCatalog()) {
+                if (roms.size() == 8) break;
+                roms.push_back(entry.path);
+            }
+            g_legacy_import_status.clear();
+            g_legacy_imports.import_file(
+                std::filesystem::u8path(staged), std::move(roms));
+        });
+    if (!requested) {
+        g_legacy_import_status = "The Android file picker is busy or unavailable.";
+    }
+#else
     if (g_legacy_imports.snapshot().busy) return;
     if (NFD_Init() != NFD_OKAY) {
         g_legacy_import_status = "The system file picker could not be initialized.";
@@ -3012,9 +3119,38 @@ void ImportLegacyModWithDialog() {
     }
     g_legacy_import_status.clear();
     g_legacy_imports.import_file(std::move(source), std::move(roms));
+
+#endif
 }
 
 bool ImportAdventureWithDialog() {
+#if defined(__ANDROID__)
+    g_save_manager_status = "Opening Android file picker...";
+    const bool requested = dkr::android::filedialog::request(
+        dkr::android::filedialog::Kind::AdventureSave,
+        [](bool ok, const std::string& staged) {
+            if (!ok || staged.empty()) {
+                g_save_manager_status = "Adventure save import cancelled.";
+                return;
+            }
+            std::string error;
+            const bool imported = dkr::runtime::saves::import_adventure(
+                std::filesystem::u8path(staged), error);
+            if (imported) {
+                InvalidateSaveManagerViewCache();
+                g_save_builder_image.reset();
+            }
+            g_save_manager_status = imported
+                ? "Adventure save imported. The previous save was backed up first."
+                : error;
+            std::error_code cleanup;
+            std::filesystem::remove(std::filesystem::u8path(staged), cleanup);
+        });
+    if (!requested) {
+        g_save_manager_status = "The Android file picker is busy or unavailable.";
+    }
+    return requested;
+#else
     if (NFD_Init() != NFD_OKAY) {
         g_save_manager_status = "The system file picker could not be initialized.";
         return false;
@@ -3040,9 +3176,42 @@ bool ImportAdventureWithDialog() {
     }
     NFD_Quit();
     return imported;
+
+#endif
 }
 
 bool ExportAdventureWithDialog() {
+#if defined(__ANDROID__)
+    std::error_code fs_error;
+    const auto staging_dir = g_config_directory / "export-staging";
+    std::filesystem::create_directories(staging_dir, fs_error);
+    if (fs_error) {
+        g_save_manager_status = "Could not create Android export staging directory.";
+        return false;
+    }
+    const auto staging = staging_dir / "dkr-adventure-save.bin";
+    std::string error;
+    if (!dkr::runtime::saves::export_adventure(staging, error)) {
+        g_save_manager_status = error;
+        return false;
+    }
+    g_save_manager_status = "Choose where to export the Adventure save...";
+    const bool requested = dkr::android::filedialog::request_export(
+        dkr::android::filedialog::Kind::AdventureSaveExport,
+        PathUtf8(staging), "dkr-adventure-save.bin",
+        [staging](bool ok, const std::string&) {
+            g_save_manager_status = ok
+                ? "Adventure save exported successfully."
+                : "Adventure save export cancelled.";
+            std::error_code cleanup;
+            std::filesystem::remove(staging, cleanup);
+        });
+    if (!requested) {
+        g_save_manager_status = "The Android export picker is busy or unavailable.";
+        std::filesystem::remove(staging, fs_error);
+    }
+    return requested;
+#else
     if (NFD_Init() != NFD_OKAY) {
         g_save_manager_status = "The system file picker could not be initialized.";
         return false;
@@ -3068,9 +3237,38 @@ bool ExportAdventureWithDialog() {
     }
     NFD_Quit();
     return exported;
+
+#endif
 }
 
 bool ImportSaveBundleWithDialog() {
+#if defined(__ANDROID__)
+    g_save_manager_status = "Opening Android file picker...";
+    const bool requested = dkr::android::filedialog::request(
+        dkr::android::filedialog::Kind::SaveBundle,
+        [](bool ok, const std::string& staged) {
+            if (!ok || staged.empty()) {
+                g_save_manager_status = "Save-garage import cancelled.";
+                return;
+            }
+            std::string error;
+            const bool imported = dkr::runtime::saves::import_bundle(
+                std::filesystem::u8path(staged), error);
+            if (imported) {
+                InvalidateSaveManagerViewCache();
+                g_save_builder_image.reset();
+            }
+            g_save_manager_status = imported
+                ? "Adventure and Controller Pak saves returned safely to T.T.'s garage."
+                : error;
+            std::error_code cleanup;
+            std::filesystem::remove(std::filesystem::u8path(staged), cleanup);
+        });
+    if (!requested) {
+        g_save_manager_status = "The Android file picker is busy or unavailable.";
+    }
+    return requested;
+#else
     if (NFD_Init() != NFD_OKAY) {
         g_save_manager_status = "The system file picker could not be initialized.";
         return false;
@@ -3096,9 +3294,42 @@ bool ImportSaveBundleWithDialog() {
     }
     NFD_Quit();
     return imported;
+
+#endif
 }
 
 bool ExportSaveBundleWithDialog() {
+#if defined(__ANDROID__)
+    std::error_code fs_error;
+    const auto staging_dir = g_config_directory / "export-staging";
+    std::filesystem::create_directories(staging_dir, fs_error);
+    if (fs_error) {
+        g_save_manager_status = "Could not create Android export staging directory.";
+        return false;
+    }
+    const auto staging = staging_dir / "dkr-port-save-garage.dkrsave";
+    std::string error;
+    if (!dkr::runtime::saves::export_bundle(staging, error)) {
+        g_save_manager_status = error;
+        return false;
+    }
+    g_save_manager_status = "Choose where to export the complete save garage...";
+    const bool requested = dkr::android::filedialog::request_export(
+        dkr::android::filedialog::Kind::SaveBundleExport,
+        PathUtf8(staging), "dkr-port-save-garage.dkrsave",
+        [staging](bool ok, const std::string&) {
+            g_save_manager_status = ok
+                ? "Complete save garage exported successfully."
+                : "Save-garage export cancelled.";
+            std::error_code cleanup;
+            std::filesystem::remove(staging, cleanup);
+        });
+    if (!requested) {
+        g_save_manager_status = "The Android export picker is busy or unavailable.";
+        std::filesystem::remove(staging, fs_error);
+    }
+    return requested;
+#else
     if (NFD_Init() != NFD_OKAY) {
         g_save_manager_status = "The system file picker could not be initialized.";
         return false;
@@ -3124,6 +3355,8 @@ bool ExportSaveBundleWithDialog() {
     }
     NFD_Quit();
     return exported;
+
+#endif
 }
 
 bool ImportControllerMappingsWithDialog() {
