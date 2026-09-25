@@ -101,6 +101,8 @@ final class ModManagerView {
 
         JSONObject installed = ModInstaller.installedMetadata(modsRoot, mod);
         String installedVersion = installed == null ? null : installed.optString("version", "");
+        String activeVersion = installed == null ? null : installed.optString("activatedVersion", installedVersion == null ? "" : installedVersion);
+        String activationError = installed == null ? "" : installed.optString("activationError", "");
         boolean sameVersion = installedVersion != null && installedVersion.equals(version);
         ModCompatibility.Verdict installVerdict =
                 ModCompatibility.canInstall(activity.getFilesDir(), modsRoot, mod);
@@ -116,7 +118,13 @@ final class ModManagerView {
         if (!installTarget.equals("library")) details.append(" • activates as ").append(installTarget);
         if (!author.isEmpty()) details.append(" • by ").append(author);
         if (installedVersion != null) {
-            details.append("\nInstalled: ").append(installedVersion.isEmpty() ? "unknown" : installedVersion);
+            details.append("\nDownloaded: ").append(installedVersion.isEmpty() ? "unknown" : installedVersion);
+            if (activeVersion != null && !activeVersion.isEmpty()) {
+                details.append("\nActive: ").append(activeVersion);
+            }
+            if (!activationError.isEmpty()) {
+                details.append("\nActivation issue: ").append(activationError);
+            }
         }
         appendCompatibility(details, mod);
         if (!installVerdict.allowed) details.append("\nBlocked: ").append(installVerdict.reason);
@@ -219,6 +227,9 @@ final class ModManagerView {
                                     activity.getFilesDir(), previousTarget, previousId);
                         }
                     }
+                } else {
+                    ModInstaller.recordActivationFailure(
+                            installedDirectory, previousInstall, activation.message);
                 }
                 activity.runOnUiThread(() -> {
                     if (activation.ok) {
