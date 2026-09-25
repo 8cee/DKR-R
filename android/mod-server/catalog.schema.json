@@ -16,7 +16,7 @@
           "name": {"type": "string"},
           "version": {"type": "string"},
           "category": {"enum": ["translations","textures","characters","tracks","gameplay","ui"]},
-          "installTarget": {"enum": ["library","custom-track","texture-pack"]},
+          "installTarget": {"enum": ["library","custom-track","texture-pack","legacy-track","legacy-character"]},
           "description": {"type": "string"},
           "author": {"type": "string"},
           "downloadUrl": {"type": "string", "pattern": "^https://"},
