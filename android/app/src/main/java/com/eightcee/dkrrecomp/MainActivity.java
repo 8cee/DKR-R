@@ -80,13 +80,22 @@ public final class MainActivity extends Activity {
                 + "\nSaves: " + new File(getFilesDir(), "saves").getAbsolutePath()
                 + "\nNative mods: " + new File(getFilesDir(), "mods").getAbsolutePath()
                 + "\nCatalog library: " + new File(getFilesDir(), "catalog-mods").getAbsolutePath()
-                + (migratedCatalogMods > 0 ? "\nMigrated old catalog installs: " + migratedCatalogMods : ""));
+                + (migratedCatalogMods > 0 ? "\nMigrated old catalog installs: " + migratedCatalogMods : "")
+                + (BuildConfig.FULL_RUNTIME ? "\nRuntime: full" :
+                    "\nRuntime: bootstrap-only (game launch disabled)"));
         statusView.setTextSize(15);
         statusView.setPadding(0, 24, 0, 24);
         content.addView(statusView);
 
         addButton(content, "Select legally obtained DKR ROM", this::chooseRom);
-        addButton(content, "Launch Native DKR-R", this::launchNativeDkr);
+        if (BuildConfig.FULL_RUNTIME) {
+            addButton(content, "Launch Native DKR-R", this::launchNativeDkr);
+        } else {
+            Button unavailable = new Button(this);
+            unavailable.setText("Full DKR-R runtime not included in this build");
+            unavailable.setEnabled(false);
+            content.addView(unavailable);
+        }
         addButton(content, "Import Adventure Save", this::importSave);
         addButton(content, "Export Adventure Save", this::exportSave);
         addButton(content, "Import Full Save Bundle", this::importBundle);
