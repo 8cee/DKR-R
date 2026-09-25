@@ -4,6 +4,9 @@
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#elif defined(__ANDROID__)
+// Android does not launch the desktop legacy-mod worker process. Imported
+// Android mod packages are handled through the app-private mod pipeline.
 #else
 #include <cerrno>
 #include <csignal>
@@ -37,7 +40,9 @@ std::wstring quoted(const std::filesystem::path& path) {
 #endif
 }
 void constrain_import_worker() {
-#if !defined(_WIN32)
+#if defined(__ANDROID__)
+    throw Error("The desktop legacy-mod worker is not available on Android.");
+#elif !defined(_WIN32)
     const auto parent=getppid();
     if(parent==1 || prctl(PR_SET_PDEATHSIG,SIGKILL) || getppid()!=parent)
         throw Error("The import worker lost its parent process.");
@@ -55,7 +60,12 @@ WorkerResult run_worker(const std::filesystem::path& executable,const std::files
         throw Error("Importer requires absolute private executable/request paths and a bounded timeout.");
     if(keep_running && !keep_running()) return {WorkerOutcome::Cancelled,0};
     const auto deadline=std::chrono::steady_clock::now()+timeout;
-#if defined(_WIN32)
+#if defined(__ANDROID__)
+    (void)executable;
+    (void)request;
+    (void)deadline;
+    return {WorkerOutcome::Failed, 1};
+#elif defined(_WIN32)
     Handle job{CreateJobObjectW(nullptr,nullptr)};
     if(!job.value) throw Error("Could not create an isolated import job.");
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
