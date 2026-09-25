@@ -97,6 +97,7 @@ final class ModManagerView {
         String category = mod.optString("category", "gameplay");
         String author = mod.optString("author", "");
         String description = mod.optString("description", "");
+        String installTarget = mod.optString("installTarget", "library");
 
         JSONObject installed = ModInstaller.installedMetadata(modsRoot, mod);
         String installedVersion = installed == null ? null : installed.optString("version", "");
@@ -112,6 +113,7 @@ final class ModManagerView {
         root.addView(title);
 
         StringBuilder details = new StringBuilder(category);
+        if (!installTarget.equals("library")) details.append(" • activates as ").append(installTarget);
         if (!author.isEmpty()) details.append(" • by ").append(author);
         if (installedVersion != null) {
             details.append("\nInstalled: ").append(installedVersion.isEmpty() ? "unknown" : installedVersion);
@@ -138,8 +140,12 @@ final class ModManagerView {
             ModCompatibility.Verdict removeVerdict = ModCompatibility.canRemove(modsRoot, mod);
             Button remove = new Button(activity);
             remove.setText("Remove");
-            remove.setEnabled(removeVerdict.allowed);
-            if (!removeVerdict.allowed) remove.setContentDescription(removeVerdict.reason);
+            boolean nativeManaged = !installTarget.equals("library");
+            remove.setEnabled(removeVerdict.allowed && !nativeManaged);
+            String removalReason = nativeManaged
+                    ? "Activated content is managed by DKR-R's native Mods / Textures library."
+                    : removeVerdict.reason;
+            if (!removalReason.isEmpty()) remove.setContentDescription(removalReason);
             remove.setOnClickListener(v -> {
                 ModCompatibility.Verdict latest = ModCompatibility.canRemove(modsRoot, mod);
                 if (!latest.allowed) {
@@ -155,9 +161,9 @@ final class ModManagerView {
                 }
             });
             actions.addView(remove);
-            if (!removeVerdict.allowed) {
+            if (!removeVerdict.allowed || nativeManaged) {
                 TextView removalNote = new TextView(activity);
-                removalNote.setText("Cannot remove: " + removeVerdict.reason);
+                removalNote.setText("Cannot remove here: " + removalReason);
                 removalNote.setPadding(0, 2, 0, 2);
                 root.addView(removalNote);
             }
@@ -211,8 +217,17 @@ final class ModManagerView {
         button.setText("Installing…");
         ModInstaller.install(modsRoot, mod, new ModInstaller.Callback() {
             @Override public void onSuccess(File installedDirectory) {
+                String target = mod.optString("installTarget", "library");
+                File archive = ModInstaller.packageArchive(installedDirectory);
+                String activation = CatalogModNative.activate(activity.getFilesDir(), archive, target);
                 activity.runOnUiThread(() -> {
-                    toast(name + " installed.");
+                    if (activation.startsWith("OK\\n")) {
+                        toast(name + ": " + activation.substring(3));
+                    } else if (activation.startsWith("ERR\\n")) {
+                        toast(name + " downloaded, but activation failed: " + activation.substring(4));
+                    } else {
+                        toast(name + ": " + activation);
+                    }
                     refreshLocal();
                 });
             }
