@@ -57,7 +57,11 @@
 #include "imgui/imgui_internal.h"
 #include "imgui/imgui_impl_sdl2_custom.h"
 #include "imgui/backends/imgui_impl_sdlrenderer2.h"
+#if !defined(__ANDROID__)
 #include "nfd.h"
+#else
+#include "file_bridge.hpp"
+#endif
 #include "ultramodern/config.hpp"
 #include "ultramodern/ultramodern.hpp"
 #include "stb/stb_image.h"
@@ -2663,6 +2667,33 @@ bool AcceptRom(const std::filesystem::path& path, std::filesystem::path& selecte
 bool SelectRomWithDialog(std::filesystem::path& selected,
                          std::vector<RomCatalogEntry>& catalog,
                          std::string& status) {
+#if defined(__ANDROID__)
+    status = "Opening Android file picker...";
+    const bool requested = dkr::android::filedialog::request(
+        dkr::android::filedialog::Kind::Rom,
+        [&selected, &catalog, &status](bool ok, const std::string& staged_path) {
+            if (!ok || staged_path.empty()) {
+                status = "Game Pak selection cancelled.";
+                return;
+            }
+            const std::filesystem::path candidate =
+                std::filesystem::u8path(staged_path);
+            std::string error;
+            dkr::runtime::rom::Identity identity{};
+            if (!dkr::runtime::ValidateRomForLauncher(
+                    candidate, identity, error)) {
+                status = error;
+                std::error_code cleanup_error;
+                std::filesystem::remove(candidate, cleanup_error);
+                return;
+            }
+            CommitRomSelection(candidate, identity, selected, catalog, status);
+        });
+    if (!requested) {
+        status = "The Android file picker is already busy or unavailable.";
+    }
+    return false;
+#else
     if (NFD_Init() != NFD_OKAY) {
         status = "The system file picker could not be initialized.";
         return false;
@@ -2689,6 +2720,7 @@ bool SelectRomWithDialog(std::filesystem::path& selected,
     }
     NFD_Quit();
     return false;
+#endif
 }
 
 bool ImportCrtFilterWithDialog() {
