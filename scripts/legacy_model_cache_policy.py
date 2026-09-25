@@ -6,12 +6,12 @@ remain untouched. Verified against the same hash-pinned retail ELFs as portraits
 import copy
 import hashlib
 import struct
-from legacy_character_presentation_policy import ELFS
+from legacy_character_presentation_policy import reviewed_source
 
 
 def compose_model_cache(policy, elf, revision, sections, symbols):
-    if revision not in ELFS or hashlib.sha256(elf.read_bytes()).hexdigest() != ELFS[revision]:
-        raise ValueError('Model cache requires a reviewed retail ELF')
+    if not reviewed_source(elf, revision):
+        raise ValueError('Model cache requires a reviewed retail ELF or canonical ROM')
     result = copy.deepcopy(policy)
     words = {base+i: struct.unpack_from('>I', data, i)[0]
              for base, data in sections for i in range(0, len(data), 4)}

@@ -11,6 +11,18 @@ ELFS = {
     'us.v77': '15eb20705e4ccd8ad75c07f43f073d28674f0fe542bac721d32c0034395f4409',
     'us.v80': 'a3fd54e626af1e99a51751dafd0c6fa2498ea035722e1e4aed73df9cd94c7bbb',
 }
+ROMS_SHA1 = {
+    'us.v77': '0cb115d8716dbbc2922fda38e533b9fe63bb9670',
+    'us.v80': '6d96743d46f8c0cd0edb0ec5600b003c89b93755',
+}
+
+def reviewed_source(path, revision):
+    data = path.read_bytes()
+    return (
+        revision in ELFS and hashlib.sha256(data).hexdigest() == ELFS[revision]
+    ) or (
+        revision in ROMS_SHA1 and hashlib.sha1(data).hexdigest() == ROMS_SHA1[revision]
+    )
 # function, address, Settings+racer*24 register, lookup-address register, lw word
 PORTRAITS = {
     'us.v77': [('postrace_load',0x80094ae8,10,13,0x8dae0000),
@@ -42,8 +54,8 @@ HUD_LOADS = {'us.v77':[(0x800aab2c,12,0x8d820000),(0x800aabd8,14,0x8dc30000),(0x
 CINEMATIC = {'us.v77':(0x800993d8,0x8009ae94),'us.v80':(0x80099914,0x8009b3d0)}
 
 def compose_presentation(policy, elf, revision, sections, symbols, *, extended=True):
-    if revision not in ELFS or hashlib.sha256(elf.read_bytes()).hexdigest()!=ELFS[revision]:
-        raise ValueError('Custom presentation requires a reviewed retail ELF')
+    if not reviewed_source(elf, revision):
+        raise ValueError('Custom presentation requires a reviewed retail ELF or canonical ROM')
     result=copy.deepcopy(policy)
     words={base+i:struct.unpack_from('>I',data,i)[0] for base,data in sections for i in range(0,len(data),4)}
     def one(name):
