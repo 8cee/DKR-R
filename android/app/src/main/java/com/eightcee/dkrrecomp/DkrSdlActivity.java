@@ -13,6 +13,9 @@ import android.util.Log;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.SurfaceHolder;
+import android.view.Gravity;
+import android.widget.Button;
+import android.widget.FrameLayout;
 
 import org.libsdl.app.SDLActivity;
 
@@ -29,6 +32,7 @@ public final class DkrSdlActivity extends SDLActivity {
     private static volatile int pendingNativeKind = -1;
     private static volatile String pendingExportSource = null;
     private static volatile boolean restartRequested = false;
+    private VirtualPadView virtualPad;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -43,6 +47,25 @@ public final class DkrSdlActivity extends SDLActivity {
         ControllerBridge.register(this);
         nativeBridgeInit();
         nativeRestartInit();
+
+        virtualPad = new VirtualPadView(this);
+        addContentView(virtualPad, new android.view.ViewGroup.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT));
+
+        Button touchToggle = new Button(this);
+        touchToggle.setText("TOUCH");
+        touchToggle.setAlpha(0.72f);
+        touchToggle.setOnClickListener(v -> {
+            virtualPad.setPadVisible(!virtualPad.isPadVisible());
+            touchToggle.setText(virtualPad.isPadVisible() ? "HIDE" : "TOUCH");
+        });
+        FrameLayout.LayoutParams toggleLayout = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM | Gravity.END);
+        toggleLayout.setMargins(12, 12, 20, 20);
+        addContentView(touchToggle, toggleLayout);
 
         if (mSurface != null) {
             mSurface.getHolder().addCallback(new SurfaceHolder.Callback() {
@@ -248,6 +271,9 @@ public final class DkrSdlActivity extends SDLActivity {
     }
 
     @Override protected void onPause() {
+        if (virtualPad != null) {
+            virtualPad.setPadVisible(virtualPad.isPadVisible());
+        }
         nativeHostResumed(false);
         super.onPause();
     }
