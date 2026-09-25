@@ -119,6 +119,17 @@ Invoke-Checked 'Applying pinned dependency patches' {
     & $Python $patchScript
 }
 
+function Reset-CMakeGeneratorCache([string]$BuildDirectory) {
+    $cache = Join-Path $BuildDirectory 'CMakeCache.txt'
+    $files = Join-Path $BuildDirectory 'CMakeFiles'
+    if (Test-Path -LiteralPath $cache -PathType Leaf) {
+        Remove-Item -LiteralPath $cache -Force
+    }
+    if (Test-Path -LiteralPath $files -PathType Container) {
+        Remove-Item -LiteralPath $files -Recurse -Force
+    }
+}
+
 $NinjaCandidates = @(
     (Join-Path (Split-Path -Parent $SdkCMake) 'ninja.exe'),
     (Get-Command ninja -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue)
@@ -130,6 +141,7 @@ if (-not $Ninja) {
 }
 
 $HostBuild = Join-Path $Root 'build\android-host-file-to-c'
+Reset-CMakeGeneratorCache $HostBuild
 $Rt64ToolSource = Join-Path $Root 'extern\rt64\src\tools\file_to_c'
 $configureFileToCArgs = @(
     '-S', $Rt64ToolSource,

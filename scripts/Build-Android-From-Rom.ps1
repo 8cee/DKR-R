@@ -65,6 +65,17 @@ function Resolve-HostCMake {
     throw 'CMake was not found. Install Android Studio CMake 3.22.1 or put cmake on PATH.'
 }
 
+function Reset-CMakeGeneratorCache([string]$BuildDirectory) {
+    $cache = Join-Path $BuildDirectory 'CMakeCache.txt'
+    $files = Join-Path $BuildDirectory 'CMakeFiles'
+    if (Test-Path -LiteralPath $cache -PathType Leaf) {
+        Remove-Item -LiteralPath $cache -Force
+    }
+    if (Test-Path -LiteralPath $files -PathType Container) {
+        Remove-Item -LiteralPath $files -Recurse -Force
+    }
+}
+
 $CMake = Resolve-HostCMake
 $NinjaCandidates = @(
     (Join-Path (Split-Path -Parent $CMake) 'ninja.exe'),
@@ -77,6 +88,7 @@ if (-not $Ninja) {
 }
 
 $HostRecompBuild = Join-Path $BuildRoot 'android-host-n64recomp'
+Reset-CMakeGeneratorCache $HostRecompBuild
 $configureRecompArgs = @(
     '-S', $N64RecompSource,
     '-B', $HostRecompBuild,
