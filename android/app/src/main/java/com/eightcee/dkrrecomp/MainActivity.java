@@ -18,7 +18,7 @@ import java.io.FileOutputStream;
 import java.io.InputStream;
 
 public final class MainActivity extends Activity {
-    private static final int PICK_ROM=1001;
+    private static final int PICK_ROM=1001;\n    private static final int IMPORT_SAVE=1002;\n    private static final int EXPORT_SAVE=1003;
     private TextView statusView;
 
     static { System.loadLibrary("dkr_android"); }
@@ -48,6 +48,12 @@ public final class MainActivity extends Activity {
         Button rom=new Button(this); rom.setText("Select legally obtained DKR ROM");
         rom.setOnClickListener(v->chooseRom()); content.addView(rom);
 
+        Button importSave=new Button(this); importSave.setText("Import Save");
+        importSave.setOnClickListener(v->importSave()); content.addView(importSave);
+
+        Button exportSave=new Button(this); exportSave.setText("Export Save");
+        exportSave.setOnClickListener(v->exportSave()); content.addView(exportSave);
+
         Button mods=new Button(this); mods.setText("Check Mod Server");
         mods.setOnClickListener(v->ModCatalogClient.fetch(BuildConfig.MOD_SERVER_URL,
                 text->runOnUiThread(()->statusView.setText(text)),
@@ -67,6 +73,26 @@ public final class MainActivity extends Activity {
         intent.setType("application/octet-stream");
         intent.putExtra(Intent.EXTRA_MIME_TYPES,new String[]{"application/octet-stream","application/x-n64-rom","*/*"});
         startActivityForResult(intent,PICK_ROM);
+    }
+
+    private void importSave() {
+        Intent intent=new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("application/octet-stream");
+        startActivityForResult(intent,IMPORT_SAVE);
+    }
+
+    private void exportSave() {
+        File save=SaveTransfer.adventureFile(getFilesDir());
+        if(!save.isFile()){
+            Toast.makeText(this,"No DKR Adventure save exists yet.",Toast.LENGTH_LONG).show();
+            return;
+        }
+        Intent intent=new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("application/octet-stream");
+        intent.putExtra(Intent.EXTRA_TITLE,"dkr.us.v77.bin");
+        startActivityForResult(intent,EXPORT_SAVE);
     }
 
     @Override protected void onActivityResult(int requestCode,int resultCode,Intent data) {
