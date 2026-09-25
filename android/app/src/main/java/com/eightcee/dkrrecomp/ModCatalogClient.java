@@ -113,6 +113,16 @@ final class ModCatalogClient {
                     !installTarget.equals("legacy-character")) {
                 throw new IllegalArgumentException("Mod " + id + " uses unsupported installTarget " + installTarget + ".");
             }
+            if ((installTarget.equals("custom-track") || installTarget.equals("legacy-track")) &&
+                    !category.equals("tracks")) {
+                throw new IllegalArgumentException("Mod " + id + " must use category tracks for " + installTarget + ".");
+            }
+            if (installTarget.equals("legacy-character") && !category.equals("characters")) {
+                throw new IllegalArgumentException("Mod " + id + " must use category characters for legacy-character.");
+            }
+            if (installTarget.equals("texture-pack") && !category.equals("textures")) {
+                throw new IllegalArgumentException("Mod " + id + " must use category textures for texture-pack.");
+            }
             if (!url.startsWith("https://")) {
                 throw new IllegalArgumentException("Mod " + id + " download must use HTTPS.");
             }
