@@ -228,6 +228,13 @@ if(DKR_ANDROID_FULL_RUNTIME)
             "${ANDROID_COMPAT_DIR}"
             "${DKR_ANDROID_RT64_DIR}/src/contrib/nativefiledialog-extended/src/include"
         )
+        # DKRPortGame directly calls Android lifecycle/SAF/input bridge symbols.
+        # Express that dependency on the target itself so LLD can order static
+        # archives correctly when DKRPortGame is folded into libdkr_android.so.
+        target_link_libraries(DKRPortGame PRIVATE
+            dkr_android_compat
+            dkr_android_input
+        )
     endif()
 endif()
 
