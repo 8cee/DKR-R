@@ -98,6 +98,7 @@ add_library(dkr_android_input STATIC
 target_compile_features(dkr_android_input PRIVATE cxx_std_20)
 target_include_directories(dkr_android_input PUBLIC "${DKR_RUNTIME_GAME_DIR}")
 
+if(NOT DKR_ANDROID_FULL_RUNTIME)
 add_library(dkr_runtime_platform_android STATIC
     "${DKR_RUNTIME_GAME_DIR}/runtime_platform.cpp"
 )
@@ -111,6 +112,7 @@ target_include_directories(dkr_runtime_platform_android PRIVATE
     "${sdl2_SOURCE_DIR}/include"
 )
 target_link_libraries(dkr_runtime_platform_android PRIVATE dkr_android_input SDL2-static android log)
+endif()
 
 if(DKR_ANDROID_BUILD_NMR_PROBE AND NOT DKR_ANDROID_FULL_RUNTIME)
     if(NOT EXISTS "${DKR_ANDROID_NMR_DIR}/CMakeLists.txt")
@@ -198,6 +200,7 @@ if(DKR_ANDROID_FULL_RUNTIME)
     set(DKR_RUNTIME_BUILD_GENERATED ON CACHE BOOL "" FORCE)
     set(DKR_RUNTIME_BUILD_RT64 ON CACHE BOOL "" FORCE)
     set(DKR_RUNTIME_BUILD_SDL3_INPUT_HOST OFF CACHE BOOL "" FORCE)
+    set(DKR_NETPLAY_WEBRTC OFF CACHE BOOL "" FORCE)
     set(DKR_GENERATED_SOURCE_V77 "${DKR_ANDROID_GENERATED_V77}" CACHE PATH "" FORCE)
     set(DKR_GENERATED_SOURCE_V80 "${DKR_ANDROID_GENERATED_V80}" CACHE PATH "" FORCE)
     set(DKR_GENERATED_RSP_SOURCE
@@ -216,6 +219,7 @@ if(DKR_ANDROID_FULL_RUNTIME)
     endif()
 endif()
 
+if(NOT DKR_ANDROID_FULL_RUNTIME)
 # Compile a dependency-light slice of the real DKR-R runtime with the NDK on
 # every APK build. This catches Android portability regressions before RT64 and
 # the generated recomp payload are brought into the Android link.
@@ -233,6 +237,8 @@ target_include_directories(dkr_runtime_portability_probe PRIVATE
 )
 target_link_libraries(dkr_runtime_portability_probe PRIVATE android log)
 
+endif()
+
 add_library(dkr_android SHARED dkr_android.cpp)
 target_compile_features(dkr_android PRIVATE cxx_std_20)
 target_compile_definitions(dkr_android PRIVATE
@@ -241,14 +247,18 @@ target_compile_definitions(dkr_android PRIVATE
 target_include_directories(dkr_android PRIVATE "${DKR_RUNTIME_GAME_DIR}")
 target_link_libraries(dkr_android PRIVATE
     dkr_android_compat
-    dkr_runtime_portability_probe
-    dkr_runtime_platform_android
     dkr_android_input
 )
 if(DKR_ANDROID_FULL_RUNTIME)
     target_link_libraries(dkr_android PRIVATE DKRPortGame dkr_android_nfd_stub)
-elseif(DKR_ANDROID_BUILD_NMR_PROBE)
-    target_link_libraries(dkr_android PRIVATE ultramodern librecomp)
+else()
+    target_link_libraries(dkr_android PRIVATE
+        dkr_runtime_portability_probe
+        dkr_runtime_platform_android
+    )
+    if(DKR_ANDROID_BUILD_NMR_PROBE)
+        target_link_libraries(dkr_android PRIVATE ultramodern librecomp)
+    endif()
 endif()
 if(DKR_ANDROID_BUILD_RT64_PROBE AND NOT DKR_ANDROID_FULL_RUNTIME)
     target_link_libraries(dkr_android PRIVATE rt64)
