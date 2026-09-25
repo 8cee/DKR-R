@@ -81,6 +81,16 @@ Java_com_eightcee_dkrrecomp_ControllerBridge_nativeToggleOverlay(
 #endif
 }
 
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_eightcee_dkrrecomp_ControllerBridge_nativeOverlayVisible(
+        JNIEnv*, jclass) {
+#if DKR_ANDROID_FULL_RUNTIME
+    return dkr::runtime::ui::overlay_visible() ? JNI_TRUE : JNI_FALSE;
+#else
+    return JNI_FALSE;
+#endif
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_eightcee_dkrrecomp_MainActivity_nativeSaveStatus(JNIEnv* env, jclass) {
     const auto info = dkr::runtime::saves::adventure_info();
