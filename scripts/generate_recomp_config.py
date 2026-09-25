@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 
@@ -40,6 +41,19 @@ def main() -> int:
     policy = json.loads(arguments.policy.read_text(encoding="utf-8"))
     if policy.get("schemaVersion") != 1:
         raise ValueError("unsupported Patch Pipeline policy schema")
+
+    ignored_entries = policy.get("ignored", [])
+    if arguments.symbols_file is not None:
+        # Metadata-driven symbol contexts deliberately omit RSP/data boundary
+        # markers such as aspMainTextStart. N64Recomp requires every ignored
+        # name to correspond to an actual CPU function in the supplied context,
+        # so keep only names that are present in the generated symbols TOML.
+        symbol_text = arguments.symbols_file.read_text(encoding="utf-8")
+        symbol_names = set(re.findall(r'name\\s*=\\s*"([^"]+)"', symbol_text))
+        ignored_entries = [
+            entry for entry in ignored_entries
+            if str(entry.get("name", "")) in symbol_names
+        ]
 
     manual = ", ".join(
         "{ name = %s, section = %s, vram = %s, size = %s }"
@@ -86,7 +100,7 @@ function_sizes = [{sizes}]
 [patches]
 stubs = [{string_list(policy.get('stubs', []))}]
 renamed = [{string_list(policy.get('renamed', []))}]
-ignored = [{string_list(policy.get('ignored', []))}]
+ignored = [{string_list(ignored_entries)}]
 
 # BEGIN DKR_INSTRUCTION_PATCHES
 {patches}
