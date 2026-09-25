@@ -5,6 +5,8 @@
 #include "xxHash/xxhash.h"
 
 #include <array>
+#include <chrono>
+#include <cstdint>
 #include <fstream>
 #include <iomanip>
 #include <iterator>
@@ -24,7 +26,7 @@ constexpr std::array<std::uint8_t, 4> kLittleEndian32Magic{0x40, 0x12, 0x37, 0x8
 
 struct FileStamp {
     std::uintmax_t size = 0;
-    std::filesystem::file_time_type::rep modified = 0;
+    std::int64_t modified = 0;
     bool valid = false;
 };
 
@@ -56,7 +58,8 @@ FileStamp ReadStamp(const std::filesystem::path& path) {
     if (error) return stamp;
     const auto modified = std::filesystem::last_write_time(path, error);
     if (error) return stamp;
-    stamp.modified = modified.time_since_epoch().count();
+    stamp.modified = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        modified.time_since_epoch()).count();
     stamp.valid = true;
     return stamp;
 }
