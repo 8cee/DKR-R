@@ -26,6 +26,7 @@ public final class DkrSdlActivity extends SDLActivity {
     private static volatile DkrSdlActivity activeInstance;
     private static volatile int pendingNativeKind = -1;
     private static volatile String pendingExportSource = null;
+    private static volatile boolean restartRequested = false;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -203,6 +204,7 @@ public final class DkrSdlActivity extends SDLActivity {
         DkrSdlActivity activity = activeInstance;
         if (activity == null || activity.isFinishing()) return;
 
+        restartRequested = true;
         try {
             Intent launch = activity.getPackageManager()
                     .getLaunchIntentForPackage(activity.getPackageName());
@@ -241,7 +243,12 @@ public final class DkrSdlActivity extends SDLActivity {
 
     @Override protected void onDestroy() {
         if (activeInstance == this) activeInstance = null;
+        boolean killForRestart = restartRequested;
+        restartRequested = false;
         super.onDestroy();
+        if (killForRestart) {
+            android.os.Process.killProcess(android.os.Process.myPid());
+        }
     }
 
     @Override protected String[] getLibraries() {
