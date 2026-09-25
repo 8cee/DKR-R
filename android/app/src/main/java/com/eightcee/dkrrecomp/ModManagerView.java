@@ -212,8 +212,10 @@ final class ModManagerView {
             @Override public void onSuccess(File installedDirectory) {
                 String target = mod.optString("installTarget", "library");
                 File archive = ModInstaller.packageArchive(installedDirectory);
+                String expectedNativeId = previousInstall == null
+                        ? "" : previousInstall.optString("activatedNativeId", "");
                 CatalogModNative.Result activation =
-                        CatalogModNative.activate(activity.getFilesDir(), archive, target);
+                        CatalogModNative.activate(activity.getFilesDir(), archive, target, expectedNativeId);
                 if (activation.ok) {
                     ModInstaller.recordActivation(
                             installedDirectory, target, activation.nativeId);
