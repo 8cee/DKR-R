@@ -210,7 +210,7 @@
         },
         {
           "path": "patches/rt64/0019-disable-native-file-dialog-on-android.patch",
-          "sha256": "384fbe254a38d7ffad973a76caf334366b155d6e849ea5bd7994d785b3ab07c3"
+          "sha256": "cd3dd12f62c574e17bbd06c3dac502677b2f93427d8c7aa03d05d4907f42f08a"
         },
         {
           "path": "patches/rt64/0020-gate-present-queue-on-android-lifecycle.patch",
