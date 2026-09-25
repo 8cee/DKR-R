@@ -1067,7 +1067,7 @@ int DkrMain(int argc, char** argv) {
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     return DkrMain(__argc, __argv);
 }
-#else
+#elif !defined(__ANDROID__)
 int main(int argc, char** argv) {
     return DkrMain(argc, argv);
 }
