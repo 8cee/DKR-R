@@ -14,6 +14,32 @@ FetchContent_Declare(sdl2
     URL https://github.com/libsdl-org/SDL/releases/download/release-${SDL2_VERSION}/SDL2-${SDL2_VERSION}.tar.gz
     URL_HASH SHA256=380c295ea76b9bd72d90075793971c8bcb232ba0a69a9b14da4ae8f603350058
 )
+# Keep the vendored SDLActivity Java contract in lock-step with the native
+# SDL2 release. A mismatch compiles successfully but aborts at runtime.
+set(SDL_JAVA_ACTIVITY "${CMAKE_CURRENT_LIST_DIR}/../java/org/libsdl/app/SDLActivity.java")
+file(READ "${SDL_JAVA_ACTIVITY}" _dkr_sdl_java)
+foreach(_component MAJOR MINOR MICRO)
+    string(REGEX MATCH "SDL_${_component}_VERSION *= *([0-9]+)"
+           _match "${_dkr_sdl_java}")
+    if(NOT _match)
+        message(FATAL_ERROR
+            "Vendored SDLActivity.java does not expose SDL_${_component}_VERSION")
+    endif()
+    set(DKR_SDL_JAVA_${_component} "${CMAKE_MATCH_1}")
+endforeach()
+string(REPLACE "." ";" _dkr_sdl_native_parts "${SDL2_VERSION}")
+list(GET _dkr_sdl_native_parts 0 DKR_SDL_NATIVE_MAJOR)
+list(GET _dkr_sdl_native_parts 1 DKR_SDL_NATIVE_MINOR)
+list(GET _dkr_sdl_native_parts 2 DKR_SDL_NATIVE_MICRO)
+if(NOT (DKR_SDL_JAVA_MAJOR STREQUAL DKR_SDL_NATIVE_MAJOR
+    AND DKR_SDL_JAVA_MINOR STREQUAL DKR_SDL_NATIVE_MINOR
+    AND DKR_SDL_JAVA_MICRO STREQUAL DKR_SDL_NATIVE_MICRO))
+    message(FATAL_ERROR
+        "SDL Java ${DKR_SDL_JAVA_MAJOR}.${DKR_SDL_JAVA_MINOR}.${DKR_SDL_JAVA_MICRO} "
+        "does not match native SDL ${SDL2_VERSION}")
+endif()
+message(STATUS "SDL Java vendored matches native SDL ${SDL2_VERSION}")
+
 FetchContent_MakeAvailable(sdl2)
 
 # RT64's pinned build still discovers SDL2 through find_package(). Export the

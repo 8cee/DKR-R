@@ -172,3 +172,20 @@ extern "C" int DKRAndroidHostMain(int argc, char** argv) {
         return 1;
     }
 }
+
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_eightcee_dkrrecomp_DkrSdlActivity_nativeHostResumed(
+        JNIEnv*, jclass, jboolean resumed) {
+    const bool active = resumed == JNI_TRUE;
+    dkr::android::lifecycle::set_resumed(active);
+    if (!active) {
+        dkr::runtime::android_input::clear();
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_eightcee_dkrrecomp_DkrSdlActivity_nativeSurfaceState(
+        JNIEnv*, jclass, jboolean available) {
+    dkr::android::lifecycle::set_surface_available(available == JNI_TRUE);
+}
