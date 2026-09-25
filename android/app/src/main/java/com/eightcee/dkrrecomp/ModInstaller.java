@@ -3,11 +3,13 @@ package com.eightcee.dkrrecomp;
 import org.json.JSONObject;
 
 import java.io.BufferedInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Locale;
 import java.util.UUID;
@@ -22,6 +24,42 @@ final class ModInstaller {
 
     private ModInstaller() {}
 
+    static File installedDirectory(File modsRoot, JSONObject mod) throws Exception {
+        String id = safeId(mod.getString("id"));
+        String category = safeId(mod.optString("category", "gameplay"));
+        return new File(new File(modsRoot, category), id);
+    }
+
+    static JSONObject installedMetadata(File modsRoot, JSONObject mod) {
+        try {
+            File metadata = new File(installedDirectory(modsRoot, mod), "mod.json");
+            if (!metadata.isFile()) return null;
+            try (FileInputStream in = new FileInputStream(metadata);
+                 ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+                byte[] buffer = new byte[8192];
+                int n;
+                while ((n = in.read(buffer)) > 0) {
+                    if (out.size() + n > 1024 * 1024) return null;
+                    out.write(buffer, 0, n);
+                }
+                return new JSONObject(new String(out.toByteArray(), StandardCharsets.UTF_8));
+            }
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    static boolean remove(File modsRoot, JSONObject mod) {
+        try {
+            File destination = installedDirectory(modsRoot, mod);
+            if (!destination.exists()) return true;
+            deleteRecursive(destination);
+            return !destination.exists();
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     static void install(File modsRoot, JSONObject mod, Callback callback) {
         new Thread(() -> {
             File tempZip = null;
@@ -30,18 +68,19 @@ final class ModInstaller {
                 String id = safeId(mod.getString("id"));
                 String category = safeId(mod.optString("category", "gameplay"));
                 String url = mod.getString("downloadUrl");
-                String expectedSha = mod.optString("sha256", "").toLowerCase(Locale.ROOT);
+                String expectedSha = mod.getString("sha256").toLowerCase(Locale.ROOT);
+                if (!expectedSha.matches("[0-9a-f]{64}")) {
+                    throw new IllegalArgumentException("Mod SHA-256 is missing or invalid.");
+                }
                 if (!url.startsWith("https://")) throw new IllegalArgumentException("Mod downloads must use HTTPS.");
 
                 File categoryDir = new File(modsRoot, category);
                 if (!categoryDir.exists() && !categoryDir.mkdirs()) throw new IllegalStateException("Could not create mod category.");
                 tempZip = new File(categoryDir, "." + id + "-" + UUID.randomUUID() + ".zip");
-                download(url, tempZip);
+                download(url, tempZip, mod.optLong("size", -1));
 
-                if (!expectedSha.isEmpty()) {
-                    String actual = sha256(tempZip);
-                    if (!actual.equals(expectedSha)) throw new SecurityException("SHA-256 verification failed.");
-                }
+                String actual = sha256(tempZip);
+                if (!actual.equals(expectedSha)) throw new SecurityException("SHA-256 verification failed.");
 
                 staging = new File(categoryDir, "." + id + "-staging-" + UUID.randomUUID());
                 if (!staging.mkdirs()) throw new IllegalStateException("Could not create staging directory.");
@@ -49,7 +88,8 @@ final class ModInstaller {
 
                 File metadata = new File(staging, "mod.json");
                 try (FileOutputStream out = new FileOutputStream(metadata)) {
-                    out.write(mod.toString(2).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    out.write(mod.toString(2).getBytes(StandardCharsets.UTF_8));
+                    out.getFD().sync();
                 }
 
                 File destination = new File(categoryDir, id);
@@ -73,18 +113,31 @@ final class ModInstaller {
         }, "DKR-ModInstaller").start();
     }
 
-    private static void download(String source, File destination) throws Exception {
+    private static void download(String source, File destination, long declaredSize) throws Exception {
         HttpURLConnection c = (HttpURLConnection)new URL(source).openConnection();
-        c.setConnectTimeout(10000); c.setReadTimeout(30000); c.setInstanceFollowRedirects(true);
+        c.setConnectTimeout(10000);
+        c.setReadTimeout(30000);
+        c.setInstanceFollowRedirects(true);
+        c.setRequestProperty("User-Agent", "DKR-R-Android/" + BuildConfig.VERSION_NAME);
         if (c.getResponseCode() != 200) throw new IllegalStateException("Download HTTP " + c.getResponseCode());
+        long contentLength = c.getContentLengthLong();
+        if (contentLength > 512L * 1024L * 1024L) throw new SecurityException("Mod archive exceeds 512 MiB limit.");
+        if (declaredSize >= 0 && contentLength >= 0 && declaredSize != contentLength) {
+            throw new SecurityException("Mod archive size does not match catalog.");
+        }
         try (BufferedInputStream in = new BufferedInputStream(c.getInputStream());
              FileOutputStream out = new FileOutputStream(destination)) {
             byte[] buffer = new byte[64 * 1024];
-            long total = 0; int n;
+            long total = 0;
+            int n;
             while ((n=in.read(buffer))>0) {
                 total += n;
                 if (total > 512L * 1024L * 1024L) throw new SecurityException("Mod archive exceeds 512 MiB limit.");
                 out.write(buffer,0,n);
+            }
+            out.getFD().sync();
+            if (declaredSize >= 0 && total != declaredSize) {
+                throw new SecurityException("Downloaded size does not match catalog.");
             }
         } finally { c.disconnect(); }
     }
@@ -92,9 +145,11 @@ final class ModInstaller {
     private static void unzipSafely(File zip, File destination) throws Exception {
         String root = destination.getCanonicalPath() + File.separator;
         long expanded = 0;
+        int files = 0;
         try (ZipInputStream zin = new ZipInputStream(new BufferedInputStream(new FileInputStream(zip)))) {
             ZipEntry entry;
             while ((entry=zin.getNextEntry())!=null) {
+                if (++files > 10000) throw new SecurityException("Mod archive contains too many entries.");
                 File out = new File(destination, entry.getName());
                 String canonical = out.getCanonicalPath();
                 if (!canonical.startsWith(root)) throw new SecurityException("Unsafe archive path rejected.");
@@ -104,7 +159,8 @@ final class ModInstaller {
                     File parent=out.getParentFile();
                     if (parent!=null && !parent.exists() && !parent.mkdirs()) throw new IllegalStateException("Could not create mod directory.");
                     try (FileOutputStream fout=new FileOutputStream(out)) {
-                        byte[] buffer=new byte[64*1024]; int n;
+                        byte[] buffer=new byte[64*1024];
+                        int n;
                         while ((n=zin.read(buffer))>0) {
                             expanded += n;
                             if (expanded > 1024L*1024L*1024L) throw new SecurityException("Expanded mod exceeds 1 GiB limit.");
@@ -120,7 +176,8 @@ final class ModInstaller {
     static String sha256(File file) throws Exception {
         MessageDigest md=MessageDigest.getInstance("SHA-256");
         try (FileInputStream in=new FileInputStream(file)) {
-            byte[] b=new byte[64*1024]; int n;
+            byte[] b=new byte[64*1024];
+            int n;
             while ((n=in.read(b))>0) md.update(b,0,n);
         }
         StringBuilder s=new StringBuilder();
