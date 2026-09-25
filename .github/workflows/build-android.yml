@@ -1,46 +1,51 @@
 name: Build Android APK
 
 "on":
-  workflow_dispatch:
+  workflow_dispatch: {}
   push:
-    branches: [android]
+    branches:
+      - android
     paths:
-      - "android/**"
-      - "runtime-recomp/**"
-      - "scripts/**"
-      - "patches/**"
-      - "dependencies.lock.json"
-      - ".github/workflows/build-android.yml"
+      - android/**
+      - runtime-recomp/**
+      - scripts/**
+      - patches/**
+      - dependencies.lock.json
+      - .github/workflows/build-android.yml
   pull_request:
-    branches: [android]
+    branches:
+      - android
     paths:
-      - "android/**"
-      - "runtime-recomp/**"
-      - "scripts/**"
-      - "patches/**"
-      - "dependencies.lock.json"
-      - ".github/workflows/build-android.yml"
+      - android/**
+      - runtime-recomp/**
+      - scripts/**
+      - patches/**
+      - dependencies.lock.json
+      - .github/workflows/build-android.yml
 
 jobs:
   build:
+    name: Android debug APK
     runs-on: ubuntu-latest
     permissions:
       contents: read
-
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-java@v4
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-
-      - uses: gradle/actions/setup-gradle@v4
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.10.2"
 
       - name: Locate Android SDK
+        shell: bash
         run: |
           echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
           echo "ANDROID_HOME=$ANDROID_HOME"
@@ -50,27 +55,26 @@ jobs:
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
 
       - name: Install SDK and NDK
-        run: "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+        shell: bash
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"             "platforms;android-35"             "build-tools;35.0.0"             "ndk;27.2.12479018"             "cmake;3.22.1"
 
       - name: Prepare pinned runtime dependencies
+        shell: bash
         run: |
           python3 scripts/bootstrap_dependencies.py --only dkr-decomp --only n64-modern-runtime --only rt64
           python3 scripts/apply_dependency_patches.py
 
       - name: Verify ROM-free DKR symbol contexts
+        shell: bash
         run: |
-          python3 scripts/generate_dkr_symbol_context.py \
-            --symbols extern/dkr-decomp/ver/symbols/symbol_addrs.us.v77.txt \
-            --policy runtime-recomp/dkr.us.v77.recomp-policy.json \
-            --output build/android-context/v77.toml
-          python3 scripts/generate_dkr_symbol_context.py \
-            --symbols extern/dkr-decomp/ver/symbols/symbol_addrs.us.v80.txt \
-            --policy runtime-recomp/dkr.us.v80.recomp-policy.json \
-            --output build/android-context/v80.toml
+          python3 scripts/generate_dkr_symbol_context.py             --symbols extern/dkr-decomp/ver/symbols/symbol_addrs.us.v77.txt             --policy runtime-recomp/dkr.us.v77.recomp-policy.json             --output build/android-context/v77.toml
+          python3 scripts/generate_dkr_symbol_context.py             --symbols extern/dkr-decomp/ver/symbols/symbol_addrs.us.v80.txt             --policy runtime-recomp/dkr.us.v80.recomp-policy.json             --output build/android-context/v80.toml
           grep -q 'name = "mainproc"' build/android-context/v77.toml
           grep -q 'name = "__scMain"' build/android-context/v77.toml
 
       - name: Build RT64 host file_to_c
+        shell: bash
         run: |
           cmake -S extern/rt64/src/tools/file_to_c -B build/host-file-to-c -DCMAKE_BUILD_TYPE=Release
           cmake --build build/host-file-to-c --config Release --parallel
@@ -80,14 +84,17 @@ jobs:
 
       - name: Test and build debug APK
         working-directory: android
+        shell: bash
         run: gradle --no-daemon --stacktrace testDebugUnitTest assembleDebug
 
       - name: Verify APK
+        shell: bash
         run: |
           test -f android/app/build/outputs/apk/debug/app-debug.apk
           unzip -l android/app/build/outputs/apk/debug/app-debug.apk | grep 'lib/arm64-v8a/libdkr_android.so'
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
         with:
           name: DKR-R-Android-debug
           path: android/app/build/outputs/apk/debug/app-debug.apk
