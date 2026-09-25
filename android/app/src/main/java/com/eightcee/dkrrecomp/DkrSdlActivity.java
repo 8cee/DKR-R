@@ -10,6 +10,8 @@ import android.os.SystemClock;
 import android.database.Cursor;
 import android.provider.OpenableColumns;
 import android.util.Log;
+import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.SurfaceHolder;
 
 import org.libsdl.app.SDLActivity;
@@ -239,6 +241,20 @@ public final class DkrSdlActivity extends SDLActivity {
     @Override protected void onPause() {
         nativeHostResumed(false);
         super.onPause();
+    }
+
+    @Override public boolean dispatchKeyEvent(KeyEvent event) {
+        if (ControllerBridge.handleKey(event)) {
+            return true;
+        }
+        return super.dispatchKeyEvent(event);
+    }
+
+    @Override public boolean onGenericMotionEvent(MotionEvent event) {
+        if (ControllerBridge.handleMotion(event)) {
+            return true;
+        }
+        return super.onGenericMotionEvent(event);
     }
 
     @Override protected void onDestroy() {
