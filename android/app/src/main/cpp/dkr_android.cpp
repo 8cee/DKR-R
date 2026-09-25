@@ -1,4 +1,5 @@
 #include <jni.h>
+#include <cstdio>
 #include <filesystem>
 #include <string>
 
@@ -31,13 +32,17 @@ Java_com_eightcee_dkrrecomp_MainActivity_nativeBootstrap(
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_eightcee_dkrrecomp_MainActivity_nativeVersion(JNIEnv* env, jclass) {
-    return env->NewStringUTF("dkr-android-bootstrap/0.4");
+    return env->NewStringUTF("dkr-android-bootstrap/0.5");
 }
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_eightcee_dkrrecomp_MainActivity_nativeSetResumed(
         JNIEnv*, jclass, jboolean resumed) {
-    dkr::android::lifecycle::set_resumed(resumed == JNI_TRUE);
+    const bool is_resumed = resumed == JNI_TRUE;
+    dkr::android::lifecycle::set_resumed(is_resumed);
+    if (!is_resumed) {
+        dkr::runtime::android_input::clear();
+    }
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -136,4 +141,17 @@ Java_com_eightcee_dkrrecomp_MainActivity_nativeExportSaveFile(
         break;
     }
     return SaveTransferResult(env, ok, error);
+}
+
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_eightcee_dkrrecomp_MainActivity_nativeInputStatus(JNIEnv* env, jclass) {
+    const auto sample = dkr::runtime::android_input::sample();
+    char buffer[160]{};
+    std::snprintf(buffer, sizeof(buffer),
+                  "N64 input buttons=0x%04X stick=(%.2f, %.2f)",
+                  static_cast<unsigned>(sample.buttons),
+                  static_cast<double>(sample.stick_x),
+                  static_cast<double>(sample.stick_y));
+    return env->NewStringUTF(buffer);
 }

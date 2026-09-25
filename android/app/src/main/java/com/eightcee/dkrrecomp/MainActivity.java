@@ -39,6 +39,7 @@ public final class MainActivity extends Activity {
     private static native void nativeBridgeInit();
     private static native void nativeOnFilePicked(int kind, boolean ok, String stagedPath);
     private static native String nativeSaveStatus();
+    private static native String nativeInputStatus();
     private static native String nativeImportSaveFile(int kind, int channel, String sourcePath);
     private static native String nativeExportSaveFile(int kind, int channel, String destinationPath);
 
