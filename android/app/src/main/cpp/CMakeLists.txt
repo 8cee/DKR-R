@@ -21,6 +21,7 @@ add_library(dkr_runtime_portability_probe STATIC
     "${DKR_RUNTIME_GAME_DIR}/runtime_support.cpp"
     "${DKR_RUNTIME_GAME_DIR}/dkr_save_codec.cpp"
     "${DKR_RUNTIME_GAME_DIR}/save_manager.cpp"
+    "${DKR_RUNTIME_GAME_DIR}/android_input_bridge.cpp"
 )
 target_compile_features(dkr_runtime_portability_probe PRIVATE cxx_std_20)
 target_include_directories(dkr_runtime_portability_probe PRIVATE "${DKR_RUNTIME_GAME_DIR}")

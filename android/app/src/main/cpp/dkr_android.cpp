@@ -1,7 +1,5 @@
 #include <jni.h>
-#include <array>
 #include <filesystem>
-#include <mutex>
 #include <string>
 
 #include "android_paths.hpp"
@@ -9,12 +7,7 @@
 #include "crash_handler.hpp"
 #include "save_manager.hpp"
 #include "runtime_support.hpp"
-
-namespace {
-std::mutex g_input_mutex;
-std::array<bool, 512> g_buttons{};
-struct Axes { float lx=0, ly=0, rx=0, ry=0, lt=0, rt=0; } g_axes;
-}
+#include "android_input_bridge.hpp"
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_eightcee_dkrrecomp_MainActivity_nativeBootstrap(
@@ -50,17 +43,15 @@ Java_com_eightcee_dkrrecomp_MainActivity_nativeSetResumed(
 extern "C" JNIEXPORT void JNICALL
 Java_com_eightcee_dkrrecomp_ControllerBridge_nativeSetButton(
         JNIEnv*, jclass, jint key, jboolean pressed) {
-    if (key < 0 || key >= static_cast<jint>(g_buttons.size())) return;
-    std::scoped_lock lock(g_input_mutex);
-    g_buttons[static_cast<size_t>(key)] = pressed == JNI_TRUE;
+    dkr::runtime::android_input::set_key(
+        static_cast<int>(key), pressed == JNI_TRUE);
 }
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_eightcee_dkrrecomp_ControllerBridge_nativeSetAxis(
         JNIEnv*, jclass, jfloat lx, jfloat ly, jfloat rx, jfloat ry,
         jfloat lt, jfloat rt) {
-    std::scoped_lock lock(g_input_mutex);
-    g_axes = {lx, ly, rx, ry, lt, rt};
+    dkr::runtime::android_input::set_axes(lx, ly, rx, ry, lt, rt);
 }
 
 

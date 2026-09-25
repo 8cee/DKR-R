@@ -1,5 +1,8 @@
 #include "runtime_platform.hpp"
 #include "audio_equalizer.hpp"
+#if defined(__ANDROID__)
+#include "android_input_bridge.hpp"
+#endif
 #include "controller_snapshot.hpp"
 #include "controller_mapping_policy.hpp"
 #include "netplay/online_input_broker.hpp"
@@ -2168,7 +2171,31 @@ void dkr::runtime::platform::set_audio_frequency(std::uint32_t frequency) {
 }
 
 void dkr::runtime::platform::poll_input() {
-#if DKR_RUNTIME_HAS_RT64
+#if defined(__ANDROID__)
+    // Until the SDL/RT64 Android host is fully linked, Android's Activity feeds
+    // physical gamepad state through the native bridge. Publish it using the
+    // same N64 button/stick representation consumed by the rest of DKR-R.
+    const auto state = dkr::runtime::android_input::sample();
+    g_physical_buttons[0].store(state.buttons, std::memory_order_release);
+    g_physical_stick_x[0].store(state.stick_x, std::memory_order_release);
+    g_physical_stick_y[0].store(state.stick_y, std::memory_order_release);
+    if (!g_online_input_routing.load(std::memory_order_acquire)) {
+        g_buttons[0].store(state.buttons, std::memory_order_release);
+        g_stick_x[0].store(state.stick_x, std::memory_order_release);
+        g_stick_y[0].store(state.stick_y, std::memory_order_release);
+    }
+    for (std::size_t player = 1; player < kControllerCount; ++player) {
+        g_physical_buttons[player].store(0, std::memory_order_release);
+        g_physical_stick_x[player].store(0.0F, std::memory_order_release);
+        g_physical_stick_y[player].store(0.0F, std::memory_order_release);
+        if (!g_online_input_routing.load(std::memory_order_acquire)) {
+            g_buttons[player].store(0, std::memory_order_release);
+            g_stick_x[player].store(0.0F, std::memory_order_release);
+            g_stick_y[player].store(0.0F, std::memory_order_release);
+        }
+    }
+    return;
+#elif DKR_RUNTIME_HAS_RT64
     if (g_input_backend_switch_in_progress.load(std::memory_order_acquire)) {
         ClearPublishedControllerInput(false);
         if (g_online_input_routing.load(std::memory_order_acquire)) {
