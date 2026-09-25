@@ -53,6 +53,15 @@ android {
         buildConfig = true
     }
 
+    // Package DKR-R's redistributable runtime UI/filter/controller assets.
+    // Java extracts these into app-private storage because the native runtime
+    // consumes ordinary filesystem paths rather than AssetManager streams.
+    sourceSets {
+        getByName("main") {
+            assets.srcDir(file("../../assets"))
+        }
+    }
+
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")

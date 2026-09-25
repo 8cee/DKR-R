@@ -34,6 +34,11 @@ public final class DkrSdlActivity extends SDLActivity {
     protected void onCreate(Bundle state) {
         Log.i(TAG, "Starting DKR-R SDL host");
         activeInstance = this;
+        try {
+            RuntimeAssets.ensureInstalled(this);
+        } catch (Exception error) {
+            throw new IllegalStateException("Could not install DKR-R runtime assets.", error);
+        }
         super.onCreate(state);
         nativeBridgeInit();
         nativeRestartInit();

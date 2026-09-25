@@ -2,6 +2,7 @@
 #include "audio_equalizer.hpp"
 #if defined(__ANDROID__)
 #include "android_input_bridge.hpp"
+#include "android_paths.hpp"
 #endif
 #include "controller_snapshot.hpp"
 #include "controller_mapping_policy.hpp"
@@ -270,6 +271,16 @@ std::string PathUtf8(const std::filesystem::path& path) {
 }
 
 std::filesystem::path RuntimeAssetPath(const std::filesystem::path& relative) {
+#if defined(__ANDROID__)
+    {
+        const std::filesystem::path candidate =
+            dkr::android::paths().files / relative;
+        std::error_code error;
+        if (std::filesystem::is_regular_file(candidate, error)) {
+            return candidate;
+        }
+    }
+#endif
     if (char* base = SDL_GetBasePath(); base != nullptr) {
         const std::filesystem::path candidate =
             std::filesystem::path(base) / relative;

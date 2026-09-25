@@ -49,6 +49,11 @@ public final class MainActivity extends Activity {
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
         activeInstance = this;
+        try {
+            RuntimeAssets.ensureInstalled(this);
+        } catch (Exception error) {
+            throw new IllegalStateException("Could not install DKR-R runtime assets.", error);
+        }
         nativeBridgeInit();
         String bootstrap = nativeBootstrap(getFilesDir().getAbsolutePath());
 
