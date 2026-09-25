@@ -230,7 +230,7 @@
         },
         {
           "path": "patches/rt64/0024-android-zstd-portable-qsort.patch",
-          "sha256": "d11d98fbe105a682e3231cc3d6020c2924c2b3a0abce15cd683312354716c590"
+          "sha256": "93abcc0a5090a3608538726bcff385768ed23ad6d7789746f2feb4e771ebf8e7"
         }
       ]
     },
