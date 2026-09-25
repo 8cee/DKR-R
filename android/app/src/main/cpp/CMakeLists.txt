@@ -87,6 +87,7 @@ add_library(dkr_android_compat STATIC
     "${ANDROID_COMPAT_DIR}/app_lifecycle.cpp"
     "${ANDROID_COMPAT_DIR}/crash_handler.cpp"
     "${ANDROID_COMPAT_DIR}/file_bridge.cpp"
+    "${ANDROID_COMPAT_DIR}/app_restart.cpp"
 )
 target_compile_features(dkr_android_compat PRIVATE cxx_std_20)
 target_include_directories(dkr_android_compat PUBLIC "${ANDROID_COMPAT_DIR}")

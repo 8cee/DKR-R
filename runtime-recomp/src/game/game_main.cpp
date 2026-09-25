@@ -446,13 +446,10 @@ bool RelaunchApplication(int argc, char** argv) {
     CloseHandle(process.hProcess);
     return true;
 #elif defined(__ANDROID__)
-    // Android application relaunch must go through the Activity/process host.
-    // execv(argv[0]) is not a valid APK relaunch mechanism.
     (void)argc;
     (void)argv;
-    std::fprintf(stderr,
-                 "[boot][restart] Android restart requested; host restart bridge not active yet\n");
-    return false;
+    dkr::android::request_app_restart();
+    return true;
 #else
     if (argc <= 0 || argv == nullptr || argv[0] == nullptr) {
         return false;

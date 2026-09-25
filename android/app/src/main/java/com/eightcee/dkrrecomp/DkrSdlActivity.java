@@ -1,8 +1,12 @@
 package com.eightcee.dkrrecomp;
 
 import android.content.Intent;
+import android.app.AlarmManager;
+import android.app.PendingIntent;
+import android.content.Context;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.SystemClock;
 import android.database.Cursor;
 import android.provider.OpenableColumns;
 import android.util.Log;
@@ -29,6 +33,7 @@ public final class DkrSdlActivity extends SDLActivity {
         activeInstance = this;
         super.onCreate(state);
         nativeBridgeInit();
+        nativeRestartInit();
 
         if (mSurface != null) {
             mSurface.getHolder().addCallback(new SurfaceHolder.Callback() {
@@ -194,6 +199,36 @@ public final class DkrSdlActivity extends SDLActivity {
         super.onActivityResult(requestCode, resultCode, data);
     }
 
+    public static void handleNativeAppRestart() {
+        DkrSdlActivity activity = activeInstance;
+        if (activity == null || activity.isFinishing()) return;
+
+        try {
+            Intent launch = activity.getPackageManager()
+                    .getLaunchIntentForPackage(activity.getPackageName());
+            AlarmManager alarm =
+                    (AlarmManager) activity.getSystemService(Context.ALARM_SERVICE);
+            if (launch != null && alarm != null) {
+                launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                        | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
+                PendingIntent pending = PendingIntent.getActivity(
+                        activity, 0, launch,
+                        PendingIntent.FLAG_UPDATE_CURRENT
+                                | PendingIntent.FLAG_IMMUTABLE);
+                alarm.set(
+                        AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                        SystemClock.elapsedRealtime() + 1200L,
+                        pending);
+            }
+        } catch (Throwable error) {
+            Log.w(TAG, "Could not schedule automatic DKR-R relaunch", error);
+        }
+
+        activity.runOnUiThread(() -> {
+            if (!activity.isFinishing()) activity.finish();
+        });
+    }
+
     @Override protected void onResume() {
         super.onResume();
         nativeHostResumed(true);
@@ -229,6 +264,7 @@ public final class DkrSdlActivity extends SDLActivity {
     }
 
     private static native void nativeBridgeInit();
+    private static native void nativeRestartInit();
     private static native void nativeOnFilePicked(int kind, boolean ok, String payload);
     private static native void nativeHostResumed(boolean resumed);
     private static native void nativeSurfaceState(boolean available);
