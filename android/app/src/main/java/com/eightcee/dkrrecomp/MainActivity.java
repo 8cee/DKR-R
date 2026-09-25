@@ -21,11 +21,14 @@ public final class MainActivity extends Activity {
     private static final int PICK_ROM = 1001;
     private static final int IMPORT_SAVE = 1002;
     private static final int EXPORT_SAVE = 1003;
+    private static final int IMPORT_BUNDLE = 1010;
+    private static final int EXPORT_BUNDLE = 1011;
+    private static final int IMPORT_PAK_BASE = 1100;
+    private static final int EXPORT_PAK_BASE = 1200;
 
     private TextView statusView;
 
     static { System.loadLibrary("dkr_android"); }
-
     private static native String nativeBootstrap(String filesDir);
     private static native String nativeVersion();
     private static native void nativeSetResumed(boolean resumed);
@@ -46,45 +49,36 @@ public final class MainActivity extends Activity {
         content.addView(title);
 
         statusView = new TextView(this);
-        statusView.setText(
-                "Android bootstrap: " + bootstrap +
-                "\nNative: " + nativeVersion() +
-                "\n\nData: " + getFilesDir().getAbsolutePath() +
-                "\nSaves: " + new File(getFilesDir(), "saves").getAbsolutePath() +
-                "\nMods: " + new File(getFilesDir(), "mods").getAbsolutePath());
+        statusView.setText("Android bootstrap: " + bootstrap + "\nNative: " + nativeVersion()
+                + "\n\nData: " + getFilesDir().getAbsolutePath()
+                + "\nSaves: " + new File(getFilesDir(), "saves").getAbsolutePath()
+                + "\nMods: " + new File(getFilesDir(), "mods").getAbsolutePath());
         statusView.setTextSize(15);
         statusView.setPadding(0, 24, 0, 24);
         content.addView(statusView);
 
-        Button rom = new Button(this);
-        rom.setText("Select legally obtained DKR ROM");
-        rom.setOnClickListener(v -> chooseRom());
-        content.addView(rom);
+        addButton(content, "Select legally obtained DKR ROM", this::chooseRom);
+        addButton(content, "Import Adventure Save", this::importSave);
+        addButton(content, "Export Adventure Save", this::exportSave);
+        addButton(content, "Import Full Save Bundle", this::importBundle);
+        addButton(content, "Export Full Save Bundle", this::exportBundle);
 
-        Button importSave = new Button(this);
-        importSave.setText("Import Save");
-        importSave.setOnClickListener(v -> importSave());
-        content.addView(importSave);
-
-        Button exportSave = new Button(this);
-        exportSave.setText("Export Save");
-        exportSave.setOnClickListener(v -> exportSave());
-        content.addView(exportSave);
+        for (int channel = 0; channel < SaveTransfer.CONTROLLER_PAK_COUNT; channel++) {
+            final int pak = channel;
+            addButton(content, "Import Controller Pak " + (pak + 1), () -> importPak(pak));
+            addButton(content, "Export Controller Pak " + (pak + 1), () -> exportPak(pak));
+        }
 
         Button mods = new Button(this);
         mods.setText("Check Mod Server");
-        mods.setOnClickListener(v -> ModCatalogClient.fetch(
-                BuildConfig.MOD_SERVER_URL,
+        mods.setOnClickListener(v -> ModCatalogClient.fetch(BuildConfig.MOD_SERVER_URL,
                 text -> runOnUiThread(() -> statusView.setText(text)),
-                error -> runOnUiThread(() ->
-                        Toast.makeText(this, error, Toast.LENGTH_LONG).show())));
+                error -> runOnUiThread(() -> Toast.makeText(this, error, Toast.LENGTH_LONG).show())));
         content.addView(mods);
 
         TextView note = new TextView(this);
         note.setPadding(0, 24, 0, 0);
-        note.setText(
-                "Game data is never bundled. Controller events are captured by the Android bridge. " +
-                "Final ROM revision validation remains authoritative in DKR-R's native runtime.");
+        note.setText("The temporary Android host now understands DKR-R Adventure saves, four Controller Paks and DKR-R save bundles. Final checksum-aware Adventure validation will be delegated to the native DKR-R save manager when the full runtime is linked.");
         content.addView(note);
 
         ScrollView scroll = new ScrollView(this);
@@ -92,103 +86,116 @@ public final class MainActivity extends Activity {
         setContentView(scroll);
     }
 
-    @Override protected void onResume() {
-        super.onResume();
-        nativeSetResumed(true);
+    private void addButton(LinearLayout content, String label, Runnable action) {
+        Button button = new Button(this);
+        button.setText(label);
+        button.setOnClickListener(v -> action.run());
+        content.addView(button);
     }
 
-    @Override protected void onPause() {
-        nativeSetResumed(false);
-        super.onPause();
-    }
+    @Override protected void onResume() { super.onResume(); nativeSetResumed(true); }
+    @Override protected void onPause() { nativeSetResumed(false); super.onPause(); }
 
-    private void chooseRom() {
+    private void chooseRom() { openFile(PICK_ROM); }
+    private void importSave() { openFile(IMPORT_SAVE); }
+    private void importBundle() { openFile(IMPORT_BUNDLE); }
+    private void importPak(int channel) { openFile(IMPORT_PAK_BASE + channel); }
+
+    private void openFile(int requestCode) {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.setType("application/octet-stream");
-        intent.putExtra(Intent.EXTRA_MIME_TYPES,
-                new String[]{"application/octet-stream", "application/x-n64-rom", "*/*"});
-        startActivityForResult(intent, PICK_ROM);
-    }
-
-    private void importSave() {
-        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-        intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType("application/octet-stream");
-        startActivityForResult(intent, IMPORT_SAVE);
+        if (requestCode == PICK_ROM) {
+            intent.putExtra(Intent.EXTRA_MIME_TYPES,
+                    new String[]{"application/octet-stream", "application/x-n64-rom", "*/*"});
+        }
+        startActivityForResult(intent, requestCode);
     }
 
     private void exportSave() {
-        File save = SaveTransfer.adventureFile(getFilesDir());
-        if (!save.isFile()) {
-            Toast.makeText(this, "No DKR Adventure save exists yet.", Toast.LENGTH_LONG).show();
+        if (!SaveTransfer.adventureFile(getFilesDir()).isFile()) {
+            toast("No DKR Adventure save exists yet.");
             return;
         }
+        createFile(EXPORT_SAVE, "dkr.us.v77.bin");
+    }
+
+    private void exportBundle() { createFile(EXPORT_BUNDLE, "DKR-R-Saves.dkrsave"); }
+
+    private void exportPak(int channel) {
+        File pak = SaveTransfer.controllerPakFile(getFilesDir(), channel);
+        if (!pak.isFile()) {
+            toast("Controller Pak " + (channel + 1) + " does not exist yet.");
+            return;
+        }
+        createFile(EXPORT_PAK_BASE + channel, "controller-pak-" + (channel + 1) + ".mpk");
+    }
+
+    private void createFile(int requestCode, String filename) {
         Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.setType("application/octet-stream");
-        intent.putExtra(Intent.EXTRA_TITLE, "dkr.us.v77.bin");
-        startActivityForResult(intent, EXPORT_SAVE);
+        intent.putExtra(Intent.EXTRA_TITLE, filename);
+        startActivityForResult(intent, requestCode);
     }
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
-
         Uri uri = data.getData();
 
-        if (requestCode == IMPORT_SAVE) {
-            try {
-                String result = SaveTransfer.importAdventure(
-                        getContentResolver(), uri, getFilesDir());
-                statusView.setText(
-                        result + "\n\nActive save:\n" +
-                        SaveTransfer.adventureFile(getFilesDir()).getAbsolutePath());
-            } catch (Exception e) {
-                Toast.makeText(this,
-                        "Save import failed: " + e.getMessage(),
-                        Toast.LENGTH_LONG).show();
+        try {
+            if (requestCode == IMPORT_SAVE) {
+                statusView.setText(SaveTransfer.importAdventure(getContentResolver(), uri, getFilesDir()));
+                return;
             }
-            return;
-        }
-
-        if (requestCode == EXPORT_SAVE) {
-            try {
-                String result = SaveTransfer.exportAdventure(
-                        getContentResolver(), uri, getFilesDir());
-                statusView.setText(result);
-            } catch (Exception e) {
-                Toast.makeText(this,
-                        "Save export failed: " + e.getMessage(),
-                        Toast.LENGTH_LONG).show();
+            if (requestCode == EXPORT_SAVE) {
+                statusView.setText(SaveTransfer.exportAdventure(getContentResolver(), uri, getFilesDir()));
+                return;
             }
-            return;
+            if (requestCode == IMPORT_BUNDLE) {
+                statusView.setText(SaveTransfer.importBundle(getContentResolver(), uri, getFilesDir()));
+                return;
+            }
+            if (requestCode == EXPORT_BUNDLE) {
+                statusView.setText(SaveTransfer.exportBundle(getContentResolver(), uri, getFilesDir()));
+                return;
+            }
+            if (requestCode >= IMPORT_PAK_BASE && requestCode < IMPORT_PAK_BASE + SaveTransfer.CONTROLLER_PAK_COUNT) {
+                int channel = requestCode - IMPORT_PAK_BASE;
+                statusView.setText(SaveTransfer.importControllerPak(getContentResolver(), uri, getFilesDir(), channel));
+                return;
+            }
+            if (requestCode >= EXPORT_PAK_BASE && requestCode < EXPORT_PAK_BASE + SaveTransfer.CONTROLLER_PAK_COUNT) {
+                int channel = requestCode - EXPORT_PAK_BASE;
+                statusView.setText(SaveTransfer.exportControllerPak(getContentResolver(), uri, getFilesDir(), channel));
+                return;
+            }
+            if (requestCode == PICK_ROM) {
+                importRom(uri);
+            }
+        } catch (Exception e) {
+            toast("File operation failed: " + e.getMessage());
         }
+    }
 
-        if (requestCode != PICK_ROM) return;
-
+    private void importRom(Uri uri) throws Exception {
         File dst = new File(getFilesDir(), "roms/dkr.rom");
         File parent = dst.getParentFile();
         if (parent != null) parent.mkdirs();
-
         try (InputStream in = getContentResolver().openInputStream(uri);
              FileOutputStream out = new FileOutputStream(dst)) {
             if (in == null) throw new IllegalStateException("Could not open selected ROM");
             byte[] buffer = new byte[1024 * 1024];
             int read;
             while ((read = in.read(buffer)) > 0) out.write(buffer, 0, read);
-
-            RomInspector.Result inspection = RomInspector.inspect(dst);
-            statusView.setText(
-                    inspection.describe() +
-                    "\n\nStored privately at:\n" + dst.getAbsolutePath());
-            if (!inspection.candidate) dst.delete();
-        } catch (Exception e) {
-            Toast.makeText(this,
-                    "ROM import failed: " + e.getMessage(),
-                    Toast.LENGTH_LONG).show();
         }
+        RomInspector.Result inspection = RomInspector.inspect(dst);
+        statusView.setText(inspection.describe() + "\n\nStored privately at:\n" + dst.getAbsolutePath());
+        if (!inspection.candidate) dst.delete();
     }
+
+    private void toast(String message) { Toast.makeText(this, message, Toast.LENGTH_LONG).show(); }
 
     @Override public boolean dispatchKeyEvent(KeyEvent event) {
         return ControllerBridge.handleKey(event) || super.dispatchKeyEvent(event);
