@@ -13,6 +13,8 @@
 #include "android_input_bridge.hpp"
 #if DKR_ANDROID_FULL_RUNTIME
 #include "runtime_ui.hpp"
+#include "custom_tracks.hpp"
+#include "runtime_texture_packs.hpp"
 #endif
 
 extern "C" JNIEXPORT jstring JNICALL
@@ -252,4 +254,73 @@ Java_com_eightcee_dkrrecomp_MainActivity_nativeInspectRom(
     const std::string result =
         std::string(identity.supported() ? "OK\n" : "ERR\n") + description;
     return env->NewStringUTF(result.c_str());
+}
+
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_eightcee_dkrrecomp_CatalogModNative_nativeActivate(
+        JNIEnv* env, jclass, jstring targetValue, jstring archiveValue,
+        jstring filesDirValue) {
+    const char* targetRaw = env->GetStringUTFChars(targetValue, nullptr);
+    const char* archiveRaw = env->GetStringUTFChars(archiveValue, nullptr);
+    const char* filesRaw = env->GetStringUTFChars(filesDirValue, nullptr);
+    const std::string target = targetRaw ? targetRaw : "";
+    const std::filesystem::path archive = archiveRaw ? archiveRaw : "";
+    const std::filesystem::path files = filesRaw ? filesRaw : "";
+    if (targetRaw) env->ReleaseStringUTFChars(targetValue, targetRaw);
+    if (archiveRaw) env->ReleaseStringUTFChars(archiveValue, archiveRaw);
+    if (filesRaw) env->ReleaseStringUTFChars(filesDirValue, filesRaw);
+
+#if DKR_ANDROID_FULL_RUNTIME
+    try {
+        if (target == "custom-track") {
+            dkr::runtime::custom_tracks::scan(files / "custom-tracks");
+            dkr::runtime::custom_tracks::InstallOutcome outcome;
+            std::string error;
+            if (!dkr::runtime::custom_tracks::install(archive, error, &outcome)) {
+                const std::string result = "ERR\n" + error;
+                return env->NewStringUTF(result.c_str());
+            }
+
+            std::string detail = "Custom track activated.";
+            if (!outcome.hd_pack_archive.empty()) {
+                dkr::runtime::texture_packs::configure(files);
+                dkr::runtime::texture_packs::TrackPackOwner owner{
+                    outcome.track_id, outcome.hd_pack_digest};
+                std::string status;
+                if (!dkr::runtime::texture_packs::import_archive(
+                        outcome.hd_pack_archive, status, {}, &owner)) {
+                    detail += " HD texture pack was not activated: " + status;
+                } else if (!status.empty()) {
+                    detail += " " + status;
+                }
+            }
+            dkr::runtime::custom_tracks::discard_install_temp(outcome.temp_root);
+            const std::string result = "OK\n" + detail;
+            return env->NewStringUTF(result.c_str());
+        }
+
+        if (target == "texture-pack") {
+            dkr::runtime::texture_packs::configure(files);
+            std::string status;
+            if (!dkr::runtime::texture_packs::import_archive(archive, status)) {
+                const std::string result = "ERR\n" + status;
+                return env->NewStringUTF(result.c_str());
+            }
+            const std::string result =
+                "OK\n" + (status.empty() ? std::string("Texture pack activated.") : status);
+            return env->NewStringUTF(result.c_str());
+        }
+
+        return env->NewStringUTF("ERR\nUnsupported catalog activation target.");
+    } catch (const std::exception& e) {
+        const std::string result = std::string("ERR\n") + e.what();
+        return env->NewStringUTF(result.c_str());
+    }
+#else
+    (void)target;
+    (void)archive;
+    (void)files;
+    return env->NewStringUTF("ERR\nCatalog activation requires a full-runtime APK.");
+#endif
 }
