@@ -5,7 +5,9 @@
 namespace dkr::runtime {
 
 const GamePayload& payload_v77();
+#if DKR_RUNTIME_HAS_V80_PAYLOAD
 const GamePayload& payload_v80();
+#endif
 
 namespace {
 
@@ -18,7 +20,11 @@ const GamePayload* payload_for(rom::Revision revision) {
     case rom::Revision::UsV77:
         return &payload_v77();
     case rom::Revision::UsV80:
+#if DKR_RUNTIME_HAS_V80_PAYLOAD
         return &payload_v80();
+#else
+        return nullptr;
+#endif
     default:
         return nullptr;
     }

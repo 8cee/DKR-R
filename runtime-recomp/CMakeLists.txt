@@ -77,26 +77,29 @@ set(DKR_GENERATED_SOURCE_V77 "${CMAKE_CURRENT_LIST_DIR}/RecompiledFuncs" CACHE P
     "N64Recomp-generated CPU source for DKR US v1.0")
 set(DKR_GENERATED_SOURCE_V80 "" CACHE PATH
     "N64Recomp-generated CPU source for DKR US Rev A/v1.1")
+option(DKR_RUNTIME_BUILD_V80_PAYLOAD
+    "Compile the optional DKR US Rev A/v1.1 CPU payload" ON)
 set(DKR_GENERATED_RSP_SOURCE "${CMAKE_CURRENT_LIST_DIR}/RecompiledRSP" CACHE PATH
     "RSPRecomp-generated source for the selected DKR revision")
 set(DKR_GENERATED_FILE_COUNT 0)
 
 if(DKR_RUNTIME_BUILD_GENERATED)
-    if(DKR_GENERATED_SOURCE_V80 STREQUAL "")
-        message(FATAL_ERROR
-            "DKR_GENERATED_SOURCE_V80 must name the generated US Rev A/v1.1 "
-            "CPU source directory. Both revision payloads are linked into the "
-            "same DKR-R executable.")
-    endif()
     get_filename_component(DKR_GENERATED_SOURCE_V77_ABSOLUTE
         "${DKR_GENERATED_SOURCE_V77}" ABSOLUTE)
-    get_filename_component(DKR_GENERATED_SOURCE_V80_ABSOLUTE
-        "${DKR_GENERATED_SOURCE_V80}" ABSOLUTE)
-    if(DKR_GENERATED_SOURCE_V77_ABSOLUTE STREQUAL
-       DKR_GENERATED_SOURCE_V80_ABSOLUTE)
-        message(FATAL_ERROR
-            "The v1.0 and Rev A CPU payloads must come from different generated "
-            "source directories; protected generated output is never rewritten.")
+    if(DKR_RUNTIME_BUILD_V80_PAYLOAD)
+        if(DKR_GENERATED_SOURCE_V80 STREQUAL "")
+            message(FATAL_ERROR
+                "DKR_GENERATED_SOURCE_V80 must name the generated US Rev A/v1.1 "
+                "CPU source directory when DKR_RUNTIME_BUILD_V80_PAYLOAD is ON.")
+        endif()
+        get_filename_component(DKR_GENERATED_SOURCE_V80_ABSOLUTE
+            "${DKR_GENERATED_SOURCE_V80}" ABSOLUTE)
+        if(DKR_GENERATED_SOURCE_V77_ABSOLUTE STREQUAL
+           DKR_GENERATED_SOURCE_V80_ABSOLUTE)
+            message(FATAL_ERROR
+                "The v1.0 and Rev A CPU payloads must come from different generated "
+                "source directories; protected generated output is never rewritten.")
+        endif()
     endif()
 endif()
 
@@ -337,21 +340,23 @@ if(DKR_RUNTIME_BUILD_GENERATED)
                     "${CMAKE_BINARY_DIR}/bin/${config}/libexec/dkr-r")
         endforeach()
     endif()
-    set(DKR_V80_SYMBOL_MAP
-        "${CMAKE_BINARY_DIR}/generated/dkr_v80_symbol_map.hpp")
-    execute_process(
-        COMMAND "${Python3_EXECUTABLE}"
-                "${CMAKE_CURRENT_LIST_DIR}/cmake/generate_revision_symbol_map.py"
-                "${DKR_GENERATED_SOURCE_V80}"
-                "dkr_v80_"
-                "${DKR_V80_SYMBOL_MAP}"
-        RESULT_VARIABLE DKR_SYMBOL_MAP_RESULT
-        ERROR_VARIABLE DKR_SYMBOL_MAP_ERROR
-    )
-    if(NOT DKR_SYMBOL_MAP_RESULT EQUAL 0)
-        message(FATAL_ERROR
-            "Could not namespace the Rev A CPU payload: ${DKR_SYMBOL_MAP_ERROR}")
-    endif()
+    if(DKR_RUNTIME_BUILD_V80_PAYLOAD)
+        set(DKR_V80_SYMBOL_MAP
+            "${CMAKE_BINARY_DIR}/generated/dkr_v80_symbol_map.hpp")
+        execute_process(
+            COMMAND "${Python3_EXECUTABLE}"
+                    "${CMAKE_CURRENT_LIST_DIR}/cmake/generate_revision_symbol_map.py"
+                    "${DKR_GENERATED_SOURCE_V80}"
+                    "dkr_v80_"
+                    "${DKR_V80_SYMBOL_MAP}"
+            RESULT_VARIABLE DKR_SYMBOL_MAP_RESULT
+            ERROR_VARIABLE DKR_SYMBOL_MAP_ERROR
+        )
+        if(NOT DKR_SYMBOL_MAP_RESULT EQUAL 0)
+            message(FATAL_ERROR
+                "Could not namespace the Rev A CPU payload: ${DKR_SYMBOL_MAP_ERROR}")
+        endif()
+        endif()
 
     # Each ROM revision contributes only its generated CPU payload. The
     # frontend, renderer, audio, input, netplay and settings runtime are linked
@@ -442,10 +447,14 @@ if(DKR_RUNTIME_BUILD_GENERATED)
     dkr_add_recompiled_payload(
         DKRRecompiledFuncsV77 77 "${DKR_GENERATED_SOURCE_V77}"
         "${CMAKE_CURRENT_LIST_DIR}/src/game/game_payload_v77.cpp")
-    dkr_add_recompiled_payload(
-        DKRRecompiledFuncsV80 80 "${DKR_GENERATED_SOURCE_V80}"
-        "${CMAKE_CURRENT_LIST_DIR}/src/game/game_payload_v80.cpp"
-        "${DKR_V80_SYMBOL_MAP}")
+    set(DKR_RECOMPILED_PAYLOAD_TARGETS DKRRecompiledFuncsV77)
+    if(DKR_RUNTIME_BUILD_V80_PAYLOAD)
+        dkr_add_recompiled_payload(
+            DKRRecompiledFuncsV80 80 "${DKR_GENERATED_SOURCE_V80}"
+            "${CMAKE_CURRENT_LIST_DIR}/src/game/game_payload_v80.cpp"
+            "${DKR_V80_SYMBOL_MAP}")
+        list(APPEND DKR_RECOMPILED_PAYLOAD_TARGETS DKRRecompiledFuncsV80)
+    endif()
 endif()
 
 if(DKR_RUNTIME_BUILD_GENERATED)
@@ -542,6 +551,7 @@ if(DKR_RUNTIME_BUILD_GENERATED)
         DKR_RUNTIME_HAS_RT64=$<BOOL:${DKR_RUNTIME_BUILD_RT64}>
         DKR_LEGACY_QUALIFICATION=$<BOOL:${DKR_LEGACY_QUALIFICATION}>
         DKR_RUNTIME_HAS_SDL3_INPUT_HOST=$<BOOL:${DKR_RUNTIME_BUILD_SDL3_INPUT_HOST}>
+        DKR_RUNTIME_HAS_V80_PAYLOAD=$<BOOL:${DKR_RUNTIME_BUILD_V80_PAYLOAD}>
         DKR_RELEASE_VERSION="${DKR_RELEASE_VERSION}"
         DKR_NETWORK_RELEASE_VERSION="${DKR_NETWORK_RELEASE_VERSION}"
         DKR_PATCH_POLICY_SHA256="${DKR_PATCH_POLICY_SHA256}"
@@ -559,8 +569,7 @@ if(DKR_RUNTIME_BUILD_GENERATED)
     # unresolved on Linux. MSVC is order-independent, and this ordering keeps
     # both platforms on the same single-runtime link graph.
     target_link_libraries(DKRPortGame PRIVATE
-        DKRRecompiledFuncsV77
-        DKRRecompiledFuncsV80
+        ${DKR_RECOMPILED_PAYLOAD_TARGETS}
         ultramodern
         librecomp)
     target_link_libraries(DKRPortGame PRIVATE DKRNetplayCore)

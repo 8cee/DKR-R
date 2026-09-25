@@ -182,16 +182,17 @@ if(DKR_ANDROID_FULL_RUNTIME)
         "${DKR_ANDROID_RT64_DIR}/src/contrib/nativefiledialog-extended/src/include"
     )
 
-    if(DKR_ANDROID_GENERATED_V77 STREQUAL "" OR
-       DKR_ANDROID_GENERATED_V80 STREQUAL "")
+    if(DKR_ANDROID_GENERATED_V77 STREQUAL "")
         message(FATAL_ERROR
-            "DKR_ANDROID_FULL_RUNTIME requires DKR_ANDROID_GENERATED_V77 and "
-            "DKR_ANDROID_GENERATED_V80. Generate both payloads from your own "
-            "legally obtained ROMs outside the repository.")
+            "DKR_ANDROID_FULL_RUNTIME requires DKR_ANDROID_GENERATED_V77. "
+            "Generate the v77 payload from your own legally obtained ROM.")
     endif()
-    if(NOT EXISTS "${DKR_ANDROID_GENERATED_V77}" OR
+    if(NOT EXISTS "${DKR_ANDROID_GENERATED_V77}")
+        message(FATAL_ERROR "The generated DKR v77 CPU source directory does not exist.")
+    endif()
+    if(NOT DKR_ANDROID_GENERATED_V80 STREQUAL "" AND
        NOT EXISTS "${DKR_ANDROID_GENERATED_V80}")
-        message(FATAL_ERROR "One or both generated DKR CPU source directories do not exist.")
+        message(FATAL_ERROR "The generated DKR v80 CPU source directory does not exist.")
     endif()
 
     # The production runtime owns N64ModernRuntime, RT64, netplay and all DKR
@@ -203,7 +204,13 @@ if(DKR_ANDROID_FULL_RUNTIME)
     set(DKR_RUNTIME_BUILD_SDL3_INPUT_HOST OFF CACHE BOOL "" FORCE)
     set(DKR_NETPLAY_WEBRTC OFF CACHE BOOL "" FORCE)
     set(DKR_GENERATED_SOURCE_V77 "${DKR_ANDROID_GENERATED_V77}" CACHE PATH "" FORCE)
-    set(DKR_GENERATED_SOURCE_V80 "${DKR_ANDROID_GENERATED_V80}" CACHE PATH "" FORCE)
+    if(DKR_ANDROID_GENERATED_V80 STREQUAL "")
+        set(DKR_RUNTIME_BUILD_V80_PAYLOAD OFF CACHE BOOL "" FORCE)
+        set(DKR_GENERATED_SOURCE_V80 "" CACHE PATH "" FORCE)
+    else()
+        set(DKR_RUNTIME_BUILD_V80_PAYLOAD ON CACHE BOOL "" FORCE)
+        set(DKR_GENERATED_SOURCE_V80 "${DKR_ANDROID_GENERATED_V80}" CACHE PATH "" FORCE)
+    endif()
     set(DKR_GENERATED_RSP_SOURCE
         "${DKR_REPO_ROOT}/runtime-recomp/RecompiledRSP" CACHE PATH "" FORCE)
     set(DKRPORT_ROOT "${DKR_REPO_ROOT}" CACHE PATH "" FORCE)
