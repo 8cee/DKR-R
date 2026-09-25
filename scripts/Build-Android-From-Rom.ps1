@@ -43,7 +43,13 @@ if (-not [string]::IsNullOrWhiteSpace($RomV80)) {
 }
 
 $bootstrap = Join-Path $Root 'scripts\bootstrap_dependencies.py'
-$bootstrapArgs = @($bootstrap, '--only', 'dkr-decomp', '--only', 'n64-modern-runtime', '--force')
+$bootstrapArgs = @(
+    $bootstrap,
+    '--only', 'dkr-decomp',
+    '--only', 'n64-modern-runtime',
+    '--only', 'n64recomp',
+    '--force'
+)
 Invoke-Checked 'Preparing pinned DKR metadata and N64Recomp sources' {
     & $Python @bootstrapArgs
 }
