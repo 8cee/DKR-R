@@ -57,9 +57,8 @@
 #include "imgui/imgui_internal.h"
 #include "imgui/imgui_impl_sdl2_custom.h"
 #include "imgui/backends/imgui_impl_sdlrenderer2.h"
-#if !defined(__ANDROID__)
 #include "nfd.h"
-#else
+#if defined(__ANDROID__)
 #include "file_bridge.hpp"
 #endif
 #include "ultramodern/config.hpp"

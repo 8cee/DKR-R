@@ -172,6 +172,13 @@ if(DKR_ANDROID_BUILD_RT64_PROBE AND NOT DKR_ANDROID_FULL_RUNTIME)
 endif()
 
 if(DKR_ANDROID_FULL_RUNTIME)
+    add_library(dkr_android_nfd_stub STATIC
+        "${CMAKE_CURRENT_LIST_DIR}/nfd_android_stub.cpp"
+    )
+    target_include_directories(dkr_android_nfd_stub PRIVATE
+        "${DKR_ANDROID_RT64_DIR}/src/contrib/nativefiledialog-extended/src/include"
+    )
+
     if(DKR_ANDROID_GENERATED_V77 STREQUAL "" OR
        DKR_ANDROID_GENERATED_V80 STREQUAL "")
         message(FATAL_ERROR
@@ -201,6 +208,12 @@ if(DKR_ANDROID_FULL_RUNTIME)
         "${DKR_REPO_ROOT}/runtime-recomp"
         "${CMAKE_BINARY_DIR}/dkr-full-runtime"
     )
+    if(TARGET DKRPortGame)
+        target_include_directories(DKRPortGame PRIVATE
+            "${ANDROID_COMPAT_DIR}"
+            "${DKR_ANDROID_RT64_DIR}/src/contrib/nativefiledialog-extended/src/include"
+        )
+    endif()
 endif()
 
 # Compile a dependency-light slice of the real DKR-R runtime with the NDK on
@@ -233,7 +246,7 @@ target_link_libraries(dkr_android PRIVATE
     dkr_android_input
 )
 if(DKR_ANDROID_FULL_RUNTIME)
-    target_link_libraries(dkr_android PRIVATE DKRPortGame)
+    target_link_libraries(dkr_android PRIVATE DKRPortGame dkr_android_nfd_stub)
 elseif(DKR_ANDROID_BUILD_NMR_PROBE)
     target_link_libraries(dkr_android PRIVATE ultramodern librecomp)
 endif()
