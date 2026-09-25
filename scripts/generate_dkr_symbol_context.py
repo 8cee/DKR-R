@@ -113,6 +113,32 @@ def merge_policy_functions(
         by_name[name] = address
         by_address[address] = name
 
+    # The decomp symbol list includes a small number of named internal text
+    # labels. When the Patch Pipeline supplies an authoritative manual function
+    # span, discard any other symbol strictly inside that span; the ELF path
+    # would expose the containing function, not the interior label.
+    manual_spans = [
+        (
+            str(entry["name"]),
+            int(str(entry["vram"]), 0),
+            int(str(entry["size"]), 0),
+        )
+        for entry in policy.get("manualFunctions", [])
+    ]
+    filtered: list[tuple[str, int]] = []
+    for name, address in functions:
+        interior_owner = next(
+            (
+                owner
+                for owner, start, size in manual_spans
+                if name != owner and start < address < start + size
+            ),
+            None,
+        )
+        if interior_owner is None:
+            filtered.append((name, address))
+    functions = filtered
+
     for entry in policy.get("functionSizes", []):
         explicit_sizes[str(entry["name"])] = int(str(entry["size"]), 0)
 
