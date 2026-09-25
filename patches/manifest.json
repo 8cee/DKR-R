@@ -207,6 +207,10 @@
         {
           "path": "patches/rt64/0020-gate-present-queue-on-android-lifecycle.patch",
           "sha256": "9acb08db8813a3ddd501eecb70ea497f64fafe39f3ffb13802a7bd46882ccd52"
+        },
+        {
+          "path": "patches/rt64/0021-skip-nfd-link-on-android.patch",
+          "sha256": "3a109c7f4e798d68905eb6ad6d71c1317913dd07f98679db3b0fe07686c45bbb"
         }
       ]
     },

@@ -59,9 +59,14 @@ target_compile_features(dkr_android_compat PRIVATE cxx_std_20)
 target_include_directories(dkr_android_compat PUBLIC "${ANDROID_COMPAT_DIR}")
 target_link_libraries(dkr_android_compat PUBLIC android log)
 
+add_library(dkr_android_input STATIC
+    "${DKR_RUNTIME_GAME_DIR}/android_input_bridge.cpp"
+)
+target_compile_features(dkr_android_input PRIVATE cxx_std_20)
+target_include_directories(dkr_android_input PUBLIC "${DKR_RUNTIME_GAME_DIR}")
+
 add_library(dkr_runtime_platform_android STATIC
     "${DKR_RUNTIME_GAME_DIR}/runtime_platform.cpp"
-    "${DKR_RUNTIME_GAME_DIR}/android_input_bridge.cpp"
 )
 target_compile_features(dkr_runtime_platform_android PRIVATE cxx_std_20)
 target_compile_definitions(dkr_runtime_platform_android PRIVATE
@@ -72,7 +77,7 @@ target_include_directories(dkr_runtime_platform_android PRIVATE
     "${DKR_RUNTIME_GAME_DIR}"
     "${sdl2_SOURCE_DIR}/include"
 )
-target_link_libraries(dkr_runtime_platform_android PRIVATE SDL2-static android log)
+target_link_libraries(dkr_runtime_platform_android PRIVATE dkr_android_input SDL2-static android log)
 
 if(DKR_ANDROID_BUILD_NMR_PROBE)
     if(NOT EXISTS "${DKR_ANDROID_NMR_DIR}/CMakeLists.txt")
@@ -116,7 +121,6 @@ add_library(dkr_runtime_portability_probe STATIC
     "${DKR_RUNTIME_GAME_DIR}/runtime_support.cpp"
     "${DKR_RUNTIME_GAME_DIR}/dkr_save_codec.cpp"
     "${DKR_RUNTIME_GAME_DIR}/save_manager.cpp"
-    "${DKR_RUNTIME_GAME_DIR}/android_input_bridge.cpp"
 )
 target_compile_features(dkr_runtime_portability_probe PRIVATE cxx_std_20)
 target_include_directories(dkr_runtime_portability_probe PRIVATE "${DKR_RUNTIME_GAME_DIR}")
@@ -129,6 +133,7 @@ target_link_libraries(dkr_android PRIVATE
     dkr_android_compat
     dkr_runtime_portability_probe
     dkr_runtime_platform_android
+    dkr_android_input
 )
 if(DKR_ANDROID_BUILD_NMR_PROBE)
     target_link_libraries(dkr_android PRIVATE ultramodern librecomp)
