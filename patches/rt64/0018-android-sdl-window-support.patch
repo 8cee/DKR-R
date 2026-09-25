@@ -1,0 +1,84 @@
+diff --git a/src/hle/rt64_application_window.cpp b/src/hle/rt64_application_window.cpp
+index 2bd58d4..77a1f72 100644
+--- a/src/hle/rt64_application_window.cpp
++++ b/src/hle/rt64_application_window.cpp
+@@ -48,7 +48,11 @@ namespace RT64 {
+ 
+         windowHandle = window;
+ 
+-#   if defined(RT64_SDL_WINDOW_VULKAN)
++#   if defined(__ANDROID__) && defined(RT64_SDL_WINDOW_VULKAN)
++        // plume exposes an Android render-window type, while DKR-R owns an
++        // SDL_Window. RT64's SDL Vulkan path keeps the SDL pointer here.
++        sdlWindow = reinterpret_cast<SDL_Window *>(window);
++#   elif defined(RT64_SDL_WINDOW_VULKAN)
+         sdlWindow = window;
+ #   endif
+@@ -101,7 +105,19 @@ namespace RT64 {
+         bounds.width = rect.right - rect.left;
+         bounds.height = rect.bottom - rect.top;
+ #   elif defined(__ANDROID__)
+-        static_assert(false && "Android unimplemented");
++        if (SDL_VideoInit(nullptr) != 0) {
++            printf("Failed to init SDL2 video: %s\n", SDL_GetError());
++            return;
++        }
++        SDL_DisplayMode dm{};
++        if (SDL_GetDesktopDisplayMode(0, &dm) != 0) {
++            printf("Failed to get SDL2 desktop display mode: %s\n",
++                   SDL_GetError());
++            return;
++        }
++        bounds.left = 0;
++        bounds.top = 0;
++        bounds.width = dm.w > 0 ? static_cast<uint32_t>(dm.w) : Width;
++        bounds.height = dm.h > 0 ? static_cast<uint32_t>(dm.h) : Height;
+ #   elif defined(__linux__) || defined(__APPLE__)
+         if (SDL_VideoInit(nullptr) != 0) {
+             printf("Failed to init SDL2 video: %s\n", SDL_GetError());
+@@ -145,9 +161,9 @@ namespace RT64 {
+         SDL_GetWindowWMInfo(sdlWindow, &wmInfo);
+ #   if defined(_WIN32)
+         windowHandle = wmInfo.info.win.window;
++#   elif defined(__ANDROID__)
++        windowHandle = reinterpret_cast<RenderWindow>(sdlWindow);
+ #   elif defined(RT64_SDL_WINDOW_VULKAN)
+         windowHandle = sdlWindow;
+-#   elif defined(__ANDROID__)
+-        static_assert(false && "Android unimplemented");
+ #   elif defined(__linux__)
+         windowHandle.display = wmInfo.info.x11.display;
+         windowHandle.window = wmInfo.info.x11.window;
+@@ -227,10 +243,10 @@ namespace RT64 {
+ #   elif defined(__APPLE__)
+         windowWrapper->toggleFullscreen();
+ #   elif defined(RT64_SDL_WINDOW_VULKAN)
+         if (newFullScreen) {
+-            SDL_SetWindowFullscreen(windowHandle, SDL_WINDOW_FULLSCREEN_DESKTOP);
++            SDL_SetWindowFullscreen(reinterpret_cast<SDL_Window *>(windowHandle), SDL_WINDOW_FULLSCREEN_DESKTOP);
+         } else {
+-            SDL_SetWindowFullscreen(windowHandle, 0);
++            SDL_SetWindowFullscreen(reinterpret_cast<SDL_Window *>(windowHandle), 0);
+         }
+         fullScreen = newFullScreen;
+ #   endif
+@@ -277,7 +293,7 @@ namespace RT64 {
+         if ((refreshRate % 10) == 9) {
+             refreshRate++;
+         }
+ #   elif defined(RT64_SDL_WINDOW_VULKAN)
+-        int displayIndex = SDL_GetWindowDisplayIndex(windowHandle);
++        int displayIndex = SDL_GetWindowDisplayIndex(reinterpret_cast<SDL_Window *>(windowHandle));
+         if (displayIndex < 0) {
+             fprintf(stderr, "SDL_GetWindowDisplayIndex failed. Error: %s.\n", SDL_GetError());
+             return;
+@@ -345,7 +361,7 @@ namespace RT64 {
+         GetWindowRect(windowHandle, &rect);
+         newWindowLeft = rect.left;
+         newWindowTop = rect.top;
+ #   elif defined(RT64_SDL_WINDOW_VULKAN)
+-        SDL_GetWindowPosition(windowHandle, &newWindowLeft, &newWindowTop);
++        SDL_GetWindowPosition(reinterpret_cast<SDL_Window *>(windowHandle), &newWindowLeft, &newWindowTop);
+ #   elif defined(__linux__)
+         XWindowAttributes attributes;
+         XGetWindowAttributes(windowHandle.display, windowHandle.window, &attributes);

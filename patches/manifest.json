@@ -191,6 +191,14 @@
         {
           "path": "patches/rt64/0016-optional-generated-texture-mips.patch",
           "sha256": "c3394574e3e740a1c28ff6ca4be135515565966e3023a8511c1a30b335e7a914"
+        },
+        {
+          "path": "patches/rt64/0017-android-cross-build-and-sdl-vulkan.patch",
+          "sha256": "e4805cb0eec0ff9f021111863aa5a63df6431edc1c72f8029ff821ac8b00fcc5"
+        },
+        {
+          "path": "patches/rt64/0018-android-sdl-window-support.patch",
+          "sha256": "ee912bcc565ca7ef6ca47fc673b7dc4c9ccf9026181cffdffbf6023ee4221378"
         }
       ]
     },
